@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>极速传 - 高速文件传输系统</title>
+
+    <!-- Favicon - 闪电图标 -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='%23ffc107' d='M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z'/></svg>" type="image/svg+xml">
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #6366f1;
+            --primary-dark: #4f46e5;
+            --secondary-color: #f59e0b;
+            --success-color: #10b981;
+            --danger-color: #ef4444;
+            --warning-color: #f59e0b;
+            --info-color: #3b82f6;
+            --light-bg: #f8fafc;
+            --card-bg: #ffffff;
+            --border-color: #e2e8f0;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-secondary: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --gradient-success: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        }
+
+        * {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .container-fluid {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 8px;
+            box-shadow: var(--shadow-lg);
+            margin: 2px;
+            padding: 6px;
+            max-width: calc(100vw - 4px);
+            height: calc(100vh - 4px);
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .file-browser {
+            height: calc(var(--browse-height, 50vh));
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--card-bg);
+            box-shadow: var(--shadow-sm);
+            transition: all 0.3s ease;
+        }
+
+        .file-browser:hover {
+            border-color: var(--primary-color);
+            box-shadow: var(--shadow-md);
+        }
+
+        .file-item {
+            cursor: pointer;
+            padding: 6px 10px;
+            border-bottom: 1px solid #f1f5f9;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            transition: all 0.2s ease;
+            border-radius: 4px;
+            margin: 1px 2px;
+        }
+
+        .file-item:hover {
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            transform: translateX(4px);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .file-item.selected {
+            background: var(--gradient-primary);
+            color: white;
+            box-shadow: var(--shadow-md);
+            transform: translateX(4px);
+        }
+
+        .file-item.selected:hover {
+            background: var(--gradient-primary);
+            filter: brightness(1.1);
+        }
+
+        .file-item i {
+            margin-right: 8px;
+            width: 16px;
+            text-align: center;
+            font-size: 0.8rem;
+        }
+
+        .file-info {
+            flex: 1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .file-name {
+            flex: 1;
+            font-weight: 500;
+        }
+
+        .file-details {
+            font-size: 0.75rem;
+            opacity: 0.7;
+            margin-left: 10px;
+            font-weight: 400;
+        }
+
+        .file-item.selected .file-details {
+            opacity: 0.9;
+        }
+
+        .progress-container {
+            display: none;
+        }
+
+        .server-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 6px;
+            margin-bottom: 3px;
+            box-shadow: var(--shadow-sm);
+            transition: all 0.3s ease;
+        }
+
+        .server-panel:hover {
+            border-color: var(--primary-color);
+            box-shadow: var(--shadow-md);
+        }
+
+
+
+        /* 拖拽相关样式 */
+        .file-item.dragging {
+            opacity: 0.6;
+            transform: rotate(2deg) scale(0.95);
+        }
+
+        .file-browser.drag-over {
+            border: 3px dashed var(--primary-color);
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+        }
+
+        .drag-preview {
+            position: fixed;
+            pointer-events: none;
+            z-index: 1000;
+            background: var(--gradient-primary);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            box-shadow: var(--shadow-lg);
+            backdrop-filter: blur(10px);
+        }
+
+        /* 分隔条样式 */
+        .resizer {
+            background: linear-gradient(135deg, var(--border-color) 0%, #cbd5e1 100%);
+            cursor: col-resize;
+            width: 8px;
+            position: relative;
+            transition: all 0.3s ease;
+            border-radius: 4px;
+        }
+
+        .resizer:hover {
+            background: var(--gradient-primary);
+            transform: scaleX(1.2);
+        }
+
+
+
+        /* 路径导航样式 */
+        .path-nav {
+            background: var(--card-bg);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            font-size: 0.875rem;
+            font-family: 'JetBrains Mono', monospace;
+            box-shadow: var(--shadow-sm);
+            transition: all 0.3s ease;
+        }
+
+        .path-nav:hover {
+            border-color: var(--primary-color);
+            box-shadow: var(--shadow-md);
+        }
+
+        .path-segment {
+            color: var(--primary-color);
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+
+        .path-segment:hover {
+            background: var(--primary-color);
+            color: white;
+            text-decoration: none;
+        }
+
+        .path-separator {
+            margin: 0 6px;
+            color: var(--text-secondary);
+            font-weight: 300;
+        }
+
+        /* 调整容器布局 */
+        .resizable-container {
+            display: flex;
+            height: 100%;
+            gap: 8px;
+        }
+
+        .resizable-panel {
+            overflow: hidden;
+            background: var(--card-bg);
+            border-radius: 6px;
+            padding: 3px;
+            box-shadow: var(--shadow-sm);
+            transition: all 0.3s ease;
+        }
+
+        .resizable-panel:hover {
+            box-shadow: var(--shadow-md);
+        }
+        /* 现代化按钮样式 */
+        .btn {
+            border-radius: 4px;
+            font-weight: 500;
+            padding: 6px 12px;
+            transition: all 0.3s ease;
+            border: none;
+            box-shadow: var(--shadow-sm);
+            font-size: 0.9rem;
+        }
+
+        .btn-primary {
+            background: var(--gradient-primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--gradient-primary);
+            filter: brightness(1.1);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            color: white;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            filter: brightness(1.1);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            color: white;
+        }
+
+        .btn-outline-secondary {
+            border: 2px solid var(--border-color);
+            color: var(--text-primary);
+            background: var(--card-bg);
+        }
+
+        .btn-outline-secondary:hover {
+            background: var(--primary-color);
+            border-color: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        /* 表单控件样式 */
+        .form-select, .form-control {
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 5px 8px;
+            transition: all 0.3s ease;
+            background: var(--card-bg);
+            font-size: 0.9rem;
+        }
+
+        .form-select:focus, .form-control:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+            background: var(--card-bg);
+        }
+
+        /* 卡片样式 */
+        .card {
+            border: none;
+            border-radius: 16px;
+            box-shadow: var(--shadow-md);
+            background: var(--card-bg);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+        }
+
+        .card-body {
+            padding: 4px 6px;
+        }
+
+        /* 进度条样式 */
+        .progress {
+            border-radius: 10px;
+            background: var(--light-bg);
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            background: var(--gradient-success);
+            border-radius: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .progress-bar-animated {
+            animation: progress-bar-stripes 1s linear infinite;
+        }
+
+        /* 标题样式 */
+        h4, h6 {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 3px;
+        }
+
+        .main-title {
+            background: var(--gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 3px;
+            margin-top: 4px;
+            text-align: center;
+        }
+
+        /* 确保完全单屏显示 */
+        .flex-shrink-0 {
+            flex-shrink: 0;
+        }
+
+        .flex-grow-1 {
+            flex-grow: 1;
+            min-height: 0;
+        }
+
+        /* 路径导航优化 */
+        .path-nav {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 2px 6px;
+            margin-bottom: 4px;
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            box-shadow: var(--shadow-sm);
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .container-fluid {
+                margin: 1px;
+                padding: 4px;
+                border-radius: 6px;
+            }
+
+            .resizable-container {
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .resizable-panel {
+                padding: 3px;
+            }
+
+            .main-title {
+                font-size: 1.1rem;
+                margin-bottom: 4px;
+            }
+
+            .server-panel {
+                padding: 4px 6px;
+                margin-bottom: 3px;
+            }
+
+            .file-item {
+                padding: 4px 6px;
+                font-size: 0.8rem;
+            }
+
+            .btn {
+                font-size: 0.85rem;
+                padding: 5px 10px;
+            }
+        }
+
+        /* 超小屏幕优化 */
+        @media (max-width: 576px) {
+            .col-md-6 {
+                padding-left: 3px;
+                padding-right: 3px;
+            }
+
+            .input-group .btn {
+                padding: 4px 8px;
+                font-size: 0.8rem;
+            }
+
+            .main-title {
+                font-size: 1rem;
+            }
+
+            .file-item {
+                font-size: 0.75rem;
+                padding: 3px 5px;
+            }
+        }
+
+        /* 高度限制优化 */
+        @media (max-height: 800px) {
+            .main-title {
+                font-size: 1.1rem;
+                margin-bottom: 2px;
+                margin-top: 2px;
+            }
+
+            .server-panel {
+                padding: 3px 5px;
+                margin-bottom: 2px;
+            }
+
+            .card-body {
+                padding: 3px 5px;
+            }
+
+            .file-item {
+                padding: 4px 6px;
+            }
+
+            .btn {
+                padding: 4px 8px;
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- 标题区域 -->
+        <div class="row flex-shrink-0">
+            <div class="col-12">
+                <h4 class="main-title">
+                    <i class="bi bi-lightning-charge-fill" style="color: #ffc107; font-size: 1.2em;"></i>
+                    极速传
+                    <small class="d-block" style="font-size: 0.7em; opacity: 0.8;">高速文件传输系统</small>
+                </h4>
+            </div>
+        </div>
+
+        <!-- 服务器选择面板 -->
+        <div class="row g-1 flex-shrink-0">
+            <div class="col-md-6">
+                <div class="server-panel">
+                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                        <i class="bi bi-hdd-network-fill text-primary"></i> 源服务器
+                    </h6>
+                    <select id="sourceServer" class="form-select mb-2">
+                        <option value="">🔍 请选择源服务器</option>
+                        {% for ip, info in servers.items() %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% endfor %}
+                    </select>
+                    <div class="input-group">
+                        <span class="input-group-text" style="padding: 4px 6px;">
+                            <i class="bi bi-folder2-open text-warning" style="font-size: 0.85rem;"></i>
+                        </span>
+                        <input type="text" id="sourcePath" class="form-control" placeholder="源路径" value="">
+                        <button class="btn btn-outline-secondary" onclick="browseSource()">浏览</button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="server-panel">
+                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                        <i class="bi bi-cloud-upload-fill text-success"></i> 目标服务器
+                    </h6>
+                    <select id="targetServer" class="form-select mb-2">
+                        <option value="">🎯 请选择目标服务器</option>
+                        {% for ip, info in servers.items() %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% endfor %}
+                    </select>
+                    <div class="input-group">
+                        <span class="input-group-text" style="padding: 4px 6px;">
+                            <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
+                        </span>
+                        <input type="text" id="targetPath" class="form-control" placeholder="目标路径" value="">
+                        <button class="btn btn-outline-secondary" onclick="browseTarget()">浏览</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 文件浏览器 -->
+        <div class="row flex-grow-1" style="min-height: 0;">
+            <div class="resizable-container" style="height: 100%;">
+                <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
+                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                        <i class="bi bi-files text-info"></i> 源文件浏览
+                    </h6>
+                    <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
+                        <i class="bi bi-geo-alt-fill text-primary me-1"></i>
+                        <span id="sourcePathDisplay">/</span>
+                    </div>
+                    <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 35px);">
+                        <div class="text-center text-muted p-3">
+                            <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
+                            <p class="mb-0" style="font-size: 0.85rem;">请先选择源服务器</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="resizer" id="verticalResizer"></div>
+
+                <div class="resizable-panel" id="targetPanel" style="width: 50%; height: 100%;">
+                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                        <i class="bi bi-folder-check text-success"></i> 目标目录浏览
+                    </h6>
+                    <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
+                        <i class="bi bi-geo-alt-fill text-success me-1"></i>
+                        <span id="targetPathDisplay">/</span>
+                    </div>
+                    <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 35px);">
+                        <div class="text-center text-muted p-3">
+                            <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
+                            <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 传输控制面板 -->
+        <div class="row flex-shrink-0">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="row align-items-center g-1">
+                            <div class="col-md-3">
+                                <select id="transferMode" class="form-select form-select-sm">
+                                    <option value="copy">📋 复制</option>
+                                    <option value="move">✂️ 移动</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6 text-center">
+                                <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()">
+                                    <i class="bi bi-lightning-charge-fill"></i> 开始传输
+                                </button>
+                                <button id="cancelTransferBtn" class="btn btn-danger" onclick="cancelTransfer()" style="display: none;">
+                                    <i class="bi bi-stop-circle-fill"></i> 取消传输
+                                </button>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="fastSSH" checked>
+                                    <label class="form-check-label" style="font-size: 0.85rem;" for="fastSSH">
+                                        🚀 SSH加速
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 进度显示 -->
+        <div class="row flex-shrink-0">
+            <div class="col-12">
+                <div id="progressContainer" class="progress-container">
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="progress mb-2" style="height: 20px;">
+                                <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                     role="progressbar" style="width: 0%; font-weight: 600; font-size: 13px; line-height: 20px;">0%</div>
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-6 col-md-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi bi-speedometer text-info me-1" style="font-size: 0.85rem;"></i>
+                                        <div>
+                                            <small class="text-muted" style="font-size: 0.75em;">速度</small>
+                                            <div id="transferSpeed" class="fw-bold" style="font-size: 0.85rem;">-</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi bi-download text-success me-1" style="font-size: 0.85rem;"></i>
+                                        <div>
+                                            <small class="text-muted" style="font-size: 0.75em;">已传输</small>
+                                            <div id="transferredBytes" class="fw-bold" style="font-size: 0.85rem;">-</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi bi-clock text-warning me-1" style="font-size: 0.85rem;"></i>
+                                        <div>
+                                            <small class="text-muted" style="font-size: 0.75em;">时间</small>
+                                            <div id="eta" class="fw-bold" style="font-size: 0.85rem;">-</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi bi-info-circle text-primary me-1" style="font-size: 0.85rem;"></i>
+                                        <div>
+                                            <small class="text-muted" style="font-size: 0.75em;">状态</small>
+                                            <div id="transferStatus" class="fw-bold" style="font-size: 0.85rem;">准备中</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+        // WebSocket连接
+        const socket = io();
+        let currentTransferId = null;
+        let selectedSourceFiles = [];
+        let currentSourcePath = '/home/th';
+        let currentTargetPath = '/home/thgd';
+
+        // 日志函数 - 保持兼容性但不显示UI
+        function addLog(message) {
+            // 日志功能已移除，但保持函数兼容性
+            // 可以在控制台输出日志用于调试
+            const timestamp = new Date().toLocaleTimeString();
+            console.log(`[${timestamp}] ${message}`);
+        }
+
+        // 浏览源文件
+        function browseSource() {
+            const server = document.getElementById('sourceServer').value;
+            const path = document.getElementById('sourcePath').value;
+            
+            if (!server) {
+                alert('请先选择源服务器');
+                return;
+            }
+            
+            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        displayFiles('sourceFileBrowser', data.files, path, true);
+                    } else {
+                        addLog(`浏览源目录失败: ${data.error}`);
+                    }
+                })
+                .catch(error => {
+                    addLog(`浏览源目录出错: ${error}`);
+                });
+        }
+
+        // 浏览目标文件
+        function browseTarget() {
+            const server = document.getElementById('targetServer').value;
+            const path = document.getElementById('targetPath').value;
+            
+            if (!server) {
+                alert('请先选择目标服务器');
+                return;
+            }
+            
+            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        displayFiles('targetFileBrowser', data.files, path, false);
+                    } else {
+                        addLog(`浏览目标目录失败: ${data.error}`);
+                    }
+                })
+                .catch(error => {
+                    addLog(`浏览目标目录出错: ${error}`);
+                });
+        }
+
+        // 显示文件列表
+        function displayFiles(containerId, files, currentPath, isSource) {
+            const container = document.getElementById(containerId);
+            let html = '';
+
+            // 更新路径导航
+            updatePathNavigation(currentPath, isSource);
+
+            // 返回上级目录
+            if (currentPath !== '/') {
+                const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
+                html += `<div class="file-item" onclick="navigateTo('${containerId}', '${parentPath}', ${isSource})">
+                    <i class="bi bi-arrow-up-circle text-primary"></i>
+                    <div class="file-info">
+                        <span class="file-name">..</span>
+                    </div>
+                </div>`;
+            }
+
+            // 文件和文件夹
+            files.forEach((file, index) => {
+                const icon = file.is_directory ? 'bi-folder-fill text-warning' : 'bi-file-earmark text-info';
+                const size = file.is_directory ? '' : formatFileSize(file.size);
+                const fileId = `file_${containerId}_${index}`;
+
+                if (isSource) {
+                    // 源文件支持多选、双击进入目录和拖拽
+                    html += `<div class="file-item selectable" id="${fileId}"
+                             draggable="true"
+                             data-path="${file.path}"
+                             data-name="${file.name}"
+                             data-is-directory="${file.is_directory}"
+                             onclick="selectFile(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}')"
+                             ondblclick="handleDoubleClick('${file.path}', ${file.is_directory}, ${isSource})"
+                             ondragstart="handleDragStart(event)"
+                             ondragend="handleDragEnd(event)">
+                        <i class="bi ${icon}"></i>
+                        <div class="file-info">
+                            <span class="file-name">${file.name}</span>
+                            <span class="file-details">${size} ${file.modified}</span>
+                        </div>
+                    </div>`;
+                } else {
+                    // 目标目录只支持导航
+                    html += `<div class="file-item"
+                             ondblclick="handleDoubleClick('${file.path}', ${file.is_directory}, ${isSource})">
+                        <i class="bi ${icon}"></i>
+                        <div class="file-info">
+                            <span class="file-name">${file.name}</span>
+                            <span class="file-details">${size} ${file.modified}</span>
+                        </div>
+                    </div>`;
+                }
+            });
+
+            container.innerHTML = html;
+
+            // 为目标文件浏览器添加拖拽接收功能
+            if (!isSource) {
+                setupDropZone(container);
+            }
+        }
+
+        // 格式化文件大小
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
+        }
+
+        // 导航到目录
+        function navigateTo(containerId, path, isSource) {
+            if (isSource) {
+                document.getElementById('sourcePath').value = path;
+                browseSource();
+            } else {
+                document.getElementById('targetPath').value = path;
+                browseTarget();
+            }
+        }
+
+        // 处理双击事件
+        function handleDoubleClick(path, isDirectory, isSource) {
+            if (isDirectory) {
+                // 双击目录进入该目录
+                if (isSource) {
+                    document.getElementById('sourcePath').value = path;
+                    browseSource();
+                } else {
+                    document.getElementById('targetPath').value = path;
+                    browseTarget();
+                }
+            }
+        }
+
+        // 更新路径导航
+        function updatePathNavigation(currentPath, isSource) {
+            const navId = isSource ? 'sourcePathNav' : 'targetPathNav';
+            const displayId = isSource ? 'sourcePathDisplay' : 'targetPathDisplay';
+            const nav = document.getElementById(navId);
+            const display = document.getElementById(displayId);
+
+            if (currentPath && currentPath !== '/') {
+                nav.style.display = 'block';
+                const pathParts = currentPath.split('/').filter(part => part);
+                let html = '<a href="#" class="path-segment" onclick="navigateToPath(\'/\', ' + isSource + ')">根目录</a>';
+
+                let buildPath = '';
+                pathParts.forEach((part, index) => {
+                    buildPath += '/' + part;
+                    html += '<span class="path-separator">/</span>';
+                    html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
+                });
+
+                display.innerHTML = html;
+            } else {
+                nav.style.display = 'block';
+                display.innerHTML = '<span class="path-segment">根目录</span>';
+            }
+        }
+
+        // 导航到指定路径
+        function navigateToPath(path, isSource) {
+            if (isSource) {
+                document.getElementById('sourcePath').value = path;
+                browseSource();
+            } else {
+                document.getElementById('targetPath').value = path;
+                browseTarget();
+            }
+        }
+
+        // 选择文件（支持多选）
+        function selectFile(event, path, name, isDirectory, fileId) {
+            event.stopPropagation();
+
+            const fileElement = document.getElementById(fileId);
+
+            if (event.ctrlKey || event.metaKey) {
+                // Ctrl+点击多选
+                if (fileElement.classList.contains('selected')) {
+                    selectedSourceFiles = selectedSourceFiles.filter(f => f.path !== path);
+                    fileElement.classList.remove('selected');
+                } else {
+                    selectedSourceFiles.push({path, name, is_directory: isDirectory});
+                    fileElement.classList.add('selected');
+                }
+            } else {
+                // 单选
+                clearAllSelections();
+                fileElement.classList.add('selected');
+                selectedSourceFiles = [{path, name, is_directory: isDirectory}];
+            }
+
+            updateSelectionInfo();
+        }
+
+        // 清除所有选择
+        function clearAllSelections() {
+            selectedSourceFiles = [];
+            document.querySelectorAll('.file-item.selected').forEach(item => {
+                item.classList.remove('selected');
+            });
+        }
+
+        // 更新选择信息
+        function updateSelectionInfo() {
+            if (selectedSourceFiles.length > 0) {
+                const names = selectedSourceFiles.map(f => f.name).join(', ');
+                addLog(`已选择 ${selectedSourceFiles.length} 项: ${names}`);
+            }
+        }
+
+        // 拖拽开始
+        function handleDragStart(event) {
+            const fileElement = event.target.closest('.file-item');
+            const path = fileElement.dataset.path;
+            const name = fileElement.dataset.name;
+            const isDirectory = String(fileElement.dataset.isDirectory).toLowerCase() === 'true';
+
+            // 如果拖拽的文件没有被选中，则选中它
+            if (!fileElement.classList.contains('selected')) {
+                clearAllSelections();
+                fileElement.classList.add('selected');
+                selectedSourceFiles = [{path, name, is_directory: isDirectory}];
+            }
+
+            // 设置拖拽数据
+            event.dataTransfer.setData('text/plain', JSON.stringify(selectedSourceFiles));
+            event.dataTransfer.effectAllowed = 'copy';
+
+            // 创建拖拽预览
+            const dragPreview = document.createElement('div');
+            dragPreview.className = 'drag-preview';
+            dragPreview.textContent = selectedSourceFiles.length > 1
+                ? `${selectedSourceFiles.length} 个项目`
+                : name;
+            document.body.appendChild(dragPreview);
+
+            // 设置拖拽图像
+            event.dataTransfer.setDragImage(dragPreview, 10, 10);
+
+            // 延迟移除预览元素
+            setTimeout(() => {
+                if (document.body.contains(dragPreview)) {
+                    document.body.removeChild(dragPreview);
+                }
+            }, 0);
+
+            fileElement.classList.add('dragging');
+        }
+
+        // 拖拽结束
+        function handleDragEnd(event) {
+            event.target.classList.remove('dragging');
+            document.querySelectorAll('.file-browser.drag-over').forEach(browser => {
+                browser.classList.remove('drag-over');
+            });
+        }
+
+        // 设置拖放区域
+        function setupDropZone(container) {
+            container.addEventListener('dragover', function(event) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'copy';
+                container.classList.add('drag-over');
+            });
+
+            container.addEventListener('dragleave', function(event) {
+                if (!container.contains(event.relatedTarget)) {
+                    container.classList.remove('drag-over');
+                }
+            });
+
+            container.addEventListener('drop', function(event) {
+                event.preventDefault();
+                container.classList.remove('drag-over');
+
+                try {
+                    const draggedFiles = JSON.parse(event.dataTransfer.getData('text/plain'));
+                    if (draggedFiles && draggedFiles.length > 0) {
+                        // 自动开始传输
+                        selectedSourceFiles = draggedFiles;
+                        startTransferFromDrag();
+                    }
+                } catch (e) {
+                    console.error('拖拽数据解析失败:', e);
+                }
+            });
+        }
+
+        // 从拖拽开始传输
+        function startTransferFromDrag() {
+            const sourceServer = document.getElementById('sourceServer').value;
+            const targetServer = document.getElementById('targetServer').value;
+            const targetPath = document.getElementById('targetPath').value;
+
+            if (!sourceServer || !targetServer || !targetPath) {
+                alert('请确保已选择源服务器、目标服务器和目标路径');
+                return;
+            }
+
+            addLog('通过拖拽开始传输...');
+            startTransfer();
+        }
+
+        // 开始传输
+        function startTransfer() {
+            const sourceServer = document.getElementById('sourceServer').value;
+            const targetServer = document.getElementById('targetServer').value;
+            const targetPath = document.getElementById('targetPath').value;
+            const mode = document.getElementById('transferMode').value;
+            const fastSSH = document.getElementById('fastSSH').checked;
+
+            if (!sourceServer || !targetServer || !targetPath) {
+                alert('请选择源服务器、目标服务器和目标路径');
+                return;
+            }
+
+            if (selectedSourceFiles.length === 0) {
+                alert('请选择要传输的文件或文件夹');
+                return;
+            }
+
+            if (sourceServer === targetServer) {
+                // 检查是否有路径冲突
+                const hasConflict = selectedSourceFiles.some(file =>
+                    file.path === targetPath || targetPath.startsWith(file.path + '/')
+                );
+                if (hasConflict) {
+                    alert('源路径和目标路径不能相同或存在包含关系');
+                    return;
+                }
+            }
+
+            // 显示进度面板
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('startTransferBtn').style.display = 'none';
+            document.getElementById('cancelTransferBtn').style.display = 'inline-block';
+
+            const fileNames = selectedSourceFiles.map(f => f.name).join(', ');
+            addLog(`开始传输 ${selectedSourceFiles.length} 项: ${fileNames} -> ${targetServer}:${targetPath} (${mode})`);
+
+            // 发送传输请求
+            socket.emit('start_transfer', {
+                source_server: sourceServer,
+                source_files: selectedSourceFiles,
+                target_server: targetServer,
+                target_path: targetPath,
+                mode: mode,
+                fast_ssh: fastSSH
+            });
+        }
+
+        // 取消传输
+        function cancelTransfer() {
+            if (currentTransferId) {
+                // 显示确认对话框
+                if (confirm('确定要取消当前传输吗？\n\n注意：已传输的部分文件将保留，但当前正在传输的文件可能不完整。')) {
+                    addLog('正在取消传输...');
+
+                    // 禁用取消按钮，防止重复点击
+                    const cancelBtn = document.getElementById('cancelTransferBtn');
+                    cancelBtn.disabled = true;
+                    cancelBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> 取消中...';
+
+                    // 发送取消请求
+                    socket.emit('cancel_transfer', {
+                        transfer_id: currentTransferId
+                    });
+                }
+            }
+        }
+
+        // 重置传输界面
+        function resetTransferUI() {
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('startTransferBtn').style.display = 'inline-block';
+
+            // 重置取消按钮
+            const cancelBtn = document.getElementById('cancelTransferBtn');
+            cancelBtn.style.display = 'none';
+            cancelBtn.disabled = false;
+            cancelBtn.innerHTML = '<i class="bi bi-stop-circle-fill"></i> 取消';
+
+            // 重置进度条
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            progressBar.classList.remove('bg-success', 'bg-danger');
+            progressBar.classList.add('progress-bar-animated');
+
+            // 重置状态信息
+            document.getElementById('transferStatus').textContent = '准备中';
+            document.getElementById('transferSpeed').textContent = '-';
+            document.getElementById('transferredBytes').textContent = '-';
+            document.getElementById('eta').textContent = '-';
+
+            currentTransferId = null;
+        }
+
+        // WebSocket事件处理
+        socket.on('transfer_started', function(data) {
+            currentTransferId = data.transfer_id;
+            document.getElementById('transferStatus').textContent = '传输中...';
+            addLog(`传输任务已启动 (ID: ${data.transfer_id})`);
+        });
+
+        socket.on('transfer_progress', function(data) {
+            if (data.transfer_id === currentTransferId) {
+                const progress = data.progress;
+                const percentage = Math.round(progress.percentage || 0);
+
+                // 更新进度条 - 确保精确度
+                document.getElementById('progressBar').style.width = percentage + '%';
+                document.getElementById('progressBar').textContent = percentage + '%';
+
+                // 更新状态信息
+                if (progress.current_file) {
+                    document.getElementById('transferStatus').textContent =
+                        `传输中: ${progress.current_file} (${progress.completed_files || 0}/${progress.total_files || 1})`;
+                } else if (progress.files_transferred && progress.total_files) {
+                    document.getElementById('transferStatus').textContent =
+                        `传输中: ${progress.files_transferred}/${progress.total_files} 文件`;
+                }
+
+                // 更新传输速度
+                if (progress.speed) {
+                    document.getElementById('transferSpeed').textContent = progress.speed;
+                }
+
+                // 更新已传输字节数 - 使用格式化后的人性化显示
+                if (progress.bytes_transferred) {
+                    document.getElementById('transferredBytes').textContent = progress.bytes_transferred;
+                }
+
+                // 更新预计剩余时间
+                if (progress.eta) {
+                    document.getElementById('eta').textContent = progress.eta;
+                }
+
+                // 如果有消息，也添加到日志
+                if (progress.message) {
+                    addLog(progress.message);
+                }
+            }
+        });
+
+        socket.on('transfer_log', function(data) {
+            if (data.transfer_id === currentTransferId) {
+                addLog(data.message);
+            }
+        });
+
+        socket.on('transfer_complete', function(data) {
+            if (data.transfer_id === currentTransferId) {
+                if (data.status === 'success') {
+                    document.getElementById('transferStatus').textContent = '传输完成';
+                    document.getElementById('progressBar').classList.remove('progress-bar-animated');
+                    document.getElementById('progressBar').classList.add('bg-success');
+                    addLog('✅ 传输成功完成');
+                } else {
+                    document.getElementById('transferStatus').textContent = '传输失败';
+                    document.getElementById('progressBar').classList.add('bg-danger');
+                    addLog(`❌ 传输失败: ${data.message}`);
+                }
+
+                setTimeout(resetTransferUI, 3000);
+            }
+        });
+
+        // 处理取消传输响应
+        socket.on('transfer_cancelled', function(data) {
+            if (data.transfer_id === currentTransferId) {
+                if (data.status === 'success') {
+                    document.getElementById('transferStatus').textContent = '传输已取消';
+                    document.getElementById('progressBar').classList.remove('progress-bar-animated');
+                    document.getElementById('progressBar').classList.add('bg-warning');
+                    addLog('⚠️ 传输已取消');
+                } else {
+                    addLog(`❌ 取消传输失败: ${data.message}`);
+                }
+
+                setTimeout(resetTransferUI, 2000);
+            }
+        });
+
+        // 初始化面板调整功能
+        function initializeResizers() {
+            // 垂直分隔条（左右面板）
+            const verticalResizer = document.getElementById('verticalResizer');
+            const sourcePanel = document.getElementById('sourcePanel');
+            const targetPanel = document.getElementById('targetPanel');
+
+            let isResizing = false;
+
+            verticalResizer.addEventListener('mousedown', function(e) {
+                isResizing = true;
+                document.addEventListener('mousemove', handleVerticalResize);
+                document.addEventListener('mouseup', stopResize);
+                e.preventDefault();
+            });
+
+            function handleVerticalResize(e) {
+                if (!isResizing) return;
+
+                const container = verticalResizer.parentElement;
+                const containerRect = container.getBoundingClientRect();
+                const percentage = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+
+                if (percentage > 20 && percentage < 80) {
+                    sourcePanel.style.width = percentage + '%';
+                    targetPanel.style.width = (100 - percentage) + '%';
+                }
+            }
+
+            // 水平分隔条已移除
+
+            function stopResize() {
+                isResizing = false;
+                document.removeEventListener('mousemove', handleVerticalResize);
+                document.removeEventListener('mouseup', stopResize);
+            }
+        }
+
+        // 根据服务器IP获取默认路径
+        function getDefaultPath(serverIP) {
+            const serverPaths = {
+                '192.168.9.62': '/home/th',
+                '192.168.9.61': '/home/th',
+                '192.168.9.60': '/home/th',
+                '192.168.9.57': '/home/thgd'
+            };
+            return serverPaths[serverIP] || '/home/th';
+        }
+
+        // 页面加载完成后的初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            addLog('🚀 Web文件传输系统已启动');
+
+            // 初始化面板调整功能
+            initializeResizers();
+
+            // 服务器选择变化时自动浏览
+            document.getElementById('sourceServer').addEventListener('change', function() {
+                if (this.value) {
+                    // 根据服务器设置默认路径
+                    const defaultPath = getDefaultPath(this.value);
+                    document.getElementById('sourcePath').value = defaultPath;
+                    setTimeout(browseSource, 100);
+                }
+            });
+
+            document.getElementById('targetServer').addEventListener('change', function() {
+                if (this.value) {
+                    // 根据服务器设置默认路径
+                    const defaultPath = getDefaultPath(this.value);
+                    document.getElementById('targetPath').value = defaultPath;
+                    setTimeout(browseTarget, 100);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

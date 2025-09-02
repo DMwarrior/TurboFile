@@ -1,0 +1,28 @@
+[Unit]
+Description=TurboFile - 极速传文件传输系统
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=th
+Group=th
+WorkingDirectory=/home/th/Work/fankun/code/TurboFile
+Environment=PATH=/home/th/.conda/envs/torch2.4/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/home/th/Work/fankun/code/TurboFile
+ExecStart=/home/th/.conda/envs/torch2.4/bin/python app.py --production
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=turbofile
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/th/Work/fankun/code/TurboFile
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target
