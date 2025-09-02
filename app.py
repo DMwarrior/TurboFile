@@ -33,6 +33,56 @@ SERVERS = {
     "192.168.9.57": {"name": "备份服务器", "user": "thgd", "password": "123456"}
 }
 
+# TurboFile运行的主机IP（当前运行在192.168.9.62上）
+TURBOFILE_HOST_IP = "192.168.9.62"
+
+# 获取当前主机的实际IP地址
+def get_current_host_ip():
+    """获取当前主机的IP地址"""
+    try:
+        import socket
+        # 连接到一个远程地址来获取本机IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return TURBOFILE_HOST_IP  # 回退到配置的IP
+
+def determine_transfer_mode(source_server, target_server):
+    """
+    智能判断传输模式，支持任意服务器作为源服务器
+
+    返回值:
+    - 'local_to_remote': 从TurboFile主机传输到远程服务器
+    - 'remote_to_remote': 从远程服务器传输到另一个远程服务器
+    - 'remote_to_local': 从远程服务器传输到TurboFile主机
+    """
+    current_host = get_current_host_ip()
+
+    # 支持localhost别名
+    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
+
+    is_source_local = source_server in local_aliases
+    is_target_local = target_server in local_aliases
+
+    if is_source_local and not is_target_local:
+        return 'local_to_remote'
+    elif not is_source_local and is_target_local:
+        return 'remote_to_local'
+    elif not is_source_local and not is_target_local:
+        return 'remote_to_remote'
+    else:
+        # 本地到本地（同一台机器）
+        return 'local_to_local'
+
+def is_local_server(server_ip):
+    """判断服务器是否为TurboFile运行的本地服务器"""
+    current_host = get_current_host_ip()
+    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
+    return server_ip in local_aliases
+
 # 全局变量
 ssh_connections = {}
 active_transfers = {}
@@ -267,7 +317,7 @@ class ParallelTransferManager:
 
     def get_file_size(self, server_ip, file_path):
         """获取文件大小"""
-        if server_ip == "localhost":
+        if is_local_server(server_ip):
             try:
                 return os.path.getsize(file_path)
             except:
@@ -285,9 +335,8 @@ class ParallelTransferManager:
 
         print(f"🔍 分析目录结构: {source_server}:{dir_path}")
 
-        # 判断是否为本地传输（包括localhost和本机IP 192.168.9.62）
-        local_identifiers = ["localhost", "127.0.0.1", "192.168.9.62"]
-        is_local_source = source_server in local_identifiers
+        # 智能判断传输模式
+        is_local_source = is_local_server(source_server)
 
         if is_local_source:
             # 本地目录分析
@@ -620,7 +669,7 @@ def get_directory_listing(server_ip, path="/home/th", show_hidden=False):
     cached_result = get_cached_listing(server_ip, path, show_hidden)
     if cached_result is not None:
         return cached_result
-    if server_ip == "localhost" or server_ip == "192.168.9.62":
+    if is_local_server(server_ip):
         # 本地目录
         try:
             items = []
@@ -710,7 +759,7 @@ def get_directory_listing_optimized(server_ip, path="/home/th", show_hidden=Fals
         return cached_result
 
     # 如果没有缓存，使用原始函数但添加性能优化
-    if server_ip == "localhost" or server_ip == "192.168.9.62":
+    if is_local_server(server_ip):
         # 本地目录 - 优化版本
         try:
             items = []
@@ -875,19 +924,26 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         if transfer_id not in active_transfers:
             return {'success': False, 'message': '传输被取消'}
 
-        # 判断传输模式（包括本机IP）
-        local_identifiers = ["localhost", "127.0.0.1", "192.168.9.62"]
-        is_local_source = source_server in local_identifiers
+        # 智能判断传输模式，支持任意服务器作为源服务器
+        transfer_mode = determine_transfer_mode(source_server, target_server)
 
-        if is_local_source:
-            # 本地传输
+        print(f"🔄 传输模式: {transfer_mode} ({source_server} → {target_server})")
+
+        if transfer_mode == 'local_to_remote':
+            # 从TurboFile主机传输到远程服务器
             transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
-        else:
-            # 远程传输
+        elif transfer_mode == 'remote_to_local':
+            # 从远程服务器传输到TurboFile主机
+            transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+        elif transfer_mode == 'remote_to_remote':
+            # 从远程服务器传输到另一个远程服务器
             transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+        else:
+            # 本地到本地（同一台机器）
+            transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
 
         # 如果是移动模式，删除源文件
-        if mode == "move" and not is_local_source:
+        if mode == "move" and not is_local_server(source_server):
             delete_cmd = f"rm -rf '{source_path}'"
             ssh_manager.execute_command(source_server, delete_cmd)
 
@@ -1152,8 +1208,140 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
         # 回退到单rsync传输
         return transfer_single_rsync(source_path, target_server, target_path, file_name, True, transfer_id, fast_ssh)
 
+def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
+    """从远程服务器传输到TurboFile主机 - 使用rsync拉取模式"""
+    source_user = SERVERS[source_server]['user']
+    source_password = SERVERS[source_server].get('password')
+
+    # 构建本地rsync命令（拉取模式）
+    rsync_opts = [
+        '-a',                    # 归档模式
+        '--info=progress2',      # 进度信息
+        '--inplace',             # 就地更新
+        '--whole-file',          # 整文件传输
+        '--timeout=300',         # 超时设置
+        '--partial',             # 断点续传
+        '--numeric-ids',         # 数字ID
+    ]
+
+    # 根据网络环境添加压缩选项
+    if fast_ssh:
+        rsync_opts.append('--no-compress')  # 局域网不压缩
+    else:
+        rsync_opts.append('-z')  # WAN环境使用压缩
+
+    # 构建完整命令（从远程拉取到本地）
+    if is_directory:
+        if source_password:
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}/', f'{target_path}/{file_name}/']
+        else:
+            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}/', f'{target_path}/{file_name}/']
+    else:
+        if source_password:
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}', f'{target_path}/']
+        else:
+            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}', f'{target_path}/']
+
+    # 执行rsync命令
+    import subprocess
+    import os
+    import signal
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        bufsize=1,
+        preexec_fn=os.setsid  # 创建新的进程组
+    )
+
+    # 存储进程用于取消操作
+    transfer_processes[transfer_id] = {
+        'type': 'subprocess',
+        'process': process
+    }
+
+    # 增强的进度读取和解析（不阻塞）
+    while True:
+        # 检查是否被取消
+        if transfer_id not in active_transfers:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                process.wait(timeout=2)
+            except:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    process.wait()
+                except:
+                    pass
+            raise Exception("传输被用户取消")
+
+        # 非阻塞读取
+        import select
+        if select.select([process.stdout], [], [], 0.1)[0]:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+
+            # 解析并发送进度信息
+            if output:
+                line_text = output.strip()
+                if line_text:
+                    progress_info = parse_rsync_progress(line_text)
+                    if progress_info:
+                        # 发送详细的传输进度信息
+                        socketio.emit('transfer_progress', {
+                            'transfer_id': transfer_id,
+                            'progress': {
+                                'percentage': progress_info.get('percentage', 0),
+                                'speed': progress_info.get('speed', ''),
+                                'bytes_transferred': progress_info.get('bytes_transferred_formatted', progress_info.get('bytes_transferred', '')),
+                                'eta': progress_info.get('eta', ''),
+                                'current_file': file_name,
+                                'transfer_mode': 'remote_to_local',
+                                'source_server': source_server,
+                                'target_server': target_server
+                            }
+                        })
+
+                        # 发送日志信息
+                        socketio.emit('transfer_log', {
+                            'transfer_id': transfer_id,
+                            'message': f'📥 {file_name}: {progress_info.get("message", "传输中...")}'
+                        })
+        else:
+            continue
+
+    # 检查退出状态
+    return_code = process.poll()
+    if return_code != 0:
+        raise Exception(f"rsync传输失败，退出码: {return_code}")
+
+def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id):
+    """本地到本地传输 - 使用cp命令"""
+    import shutil
+
+    try:
+        if is_directory:
+            # 目录复制
+            dest_path = os.path.join(target_path, file_name)
+            shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
+        else:
+            # 文件复制
+            dest_path = os.path.join(target_path, file_name)
+            shutil.copy2(source_path, dest_path)
+
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'📁 本地复制完成: {file_name}'
+        })
+
+    except Exception as e:
+        raise Exception(f"本地复制失败: {str(e)}")
+
 def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
-    """即时远程rsync传输 - 简化版"""
+    """即时远程rsync传输 - 简化版，支持sshpass和SSH密钥"""
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
@@ -1166,6 +1354,8 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         "--timeout=300",         # 超时设置
         "--partial",             # 断点续传
         "--numeric-ids",         # 数字ID
+        "-o", "StrictHostKeyChecking=no",  # 跳过主机密钥检查
+        "-o", "ConnectTimeout=10",         # 连接超时
     ]
 
     if fast_ssh:
@@ -1173,17 +1363,23 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     else:
         rsync_base_opts.append("-z")
 
-    # 构建rsync命令
+    # 构建rsync命令，优先使用sshpass，回退到SSH密钥
     if is_directory:
         if target_password:
+            # 使用sshpass进行密码认证
             remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{source_path}' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+            # 使用SSH密钥认证
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
     else:
         if target_password:
+            # 使用sshpass进行密码认证
             remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{source_path}' '{target_user}@{target_server}:{target_path}/'"
         else:
+            # 使用SSH密钥认证
             remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+
+    print(f"🔄 远程rsync命令: {remote_cmd}")
 
     # 在源服务器上执行rsync命令
     ssh = ssh_manager.get_connection(source_server)
@@ -1199,7 +1395,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         'channel': stdout.channel
     }
 
-    # 简化的进度读取
+    # 增强的进度读取和解析
     while True:
         # 检查是否被取消
         if transfer_id not in active_transfers:
@@ -1216,6 +1412,32 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             if not line:
                 break
 
+            # 解析并发送进度信息
+            line_text = line.strip()
+            if line_text:
+                progress_info = parse_rsync_progress(line_text)
+                if progress_info:
+                    # 发送详细的传输进度信息
+                    socketio.emit('transfer_progress', {
+                        'transfer_id': transfer_id,
+                        'progress': {
+                            'percentage': progress_info.get('percentage', 0),
+                            'speed': progress_info.get('speed', ''),
+                            'bytes_transferred': progress_info.get('bytes_transferred_formatted', progress_info.get('bytes_transferred', '')),
+                            'eta': progress_info.get('eta', ''),
+                            'current_file': file_name,
+                            'transfer_mode': 'remote_to_remote',
+                            'source_server': source_server,
+                            'target_server': target_server
+                        }
+                    })
+
+                    # 发送日志信息
+                    socketio.emit('transfer_log', {
+                        'transfer_id': transfer_id,
+                        'message': f'🔄 {file_name}: {progress_info.get("message", "传输中...")}'
+                    })
+
         # 检查命令是否完成
         if stdout.channel.exit_status_ready():
             break
@@ -1226,7 +1448,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     exit_status = stdout.channel.recv_exit_status()
     if exit_status != 0:
         error_output = stderr.read().decode('utf-8')
-        raise Exception(f"rsync传输失败: {error_output}")
+        raise Exception(f"rsync传输失败 (退出码: {exit_status}): {error_output}")
 
 def transfer_file_batch(transfer_id, source_server, file_batch, target_server, target_path, mode="copy", fast_ssh=True):
     """批量传输小文件"""
@@ -1391,9 +1613,8 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         })
 
         # 构建rsync命令
-        # 判断是否为本地传输（包括localhost和本机IP 192.168.9.62）
-        local_identifiers = ["localhost", "127.0.0.1", "192.168.9.62"]
-        is_local_source = source_server in local_identifiers
+        # 智能判断传输模式
+        is_local_source = is_local_server(source_server)
 
         if is_local_source:
             # 🚀 本地传输模式：完全使用rsync，移除Paramiko SFTP开销
@@ -1513,7 +1734,10 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                                                 'eta': progress_info.get('eta', ''),
                                                 'current_file': file_name,
                                                 'completed_files': completed_files,
-                                                'total_files': total_files
+                                                'total_files': total_files,
+                                                'transfer_mode': 'local_to_remote',
+                                                'source_server': 'localhost',
+                                                'target_server': target_server
                                             }
                                         })
 
@@ -1558,7 +1782,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         completed_files += 1
 
         # 如果是移动模式，删除源文件
-        if mode == "move" and source_server != "localhost":
+        if mode == "move" and not is_local_server(source_server):
             delete_cmd = f"rm -rf '{source_path}'"
             ssh_manager.execute_command(source_server, delete_cmd)
 
@@ -1984,7 +2208,10 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
                                 'eta': progress_info.get('eta', ''),
                                 'current_file': file_name,
                                 'completed_files': completed_files,
-                                'total_files': total_files
+                                'total_files': total_files,
+                                'transfer_mode': 'local_to_remote',
+                                'source_server': 'localhost',
+                                'target_server': target_server
                             }
                         })
 

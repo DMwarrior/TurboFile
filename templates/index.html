@@ -2060,7 +2060,9 @@
 
         // WebSocket事件处理
         socket.on('transfer_started', function(data) {
+            isTransferring = true;
             currentTransferId = data.transfer_id;
+            window.transferModeLogged = false; // 重置传输模式日志标志
             document.getElementById('transferStatus').textContent = '传输中...';
             addLogSuccess(`✅ 传输任务已启动 (ID: ${data.transfer_id})`);
         });
@@ -2074,13 +2076,44 @@
                 document.getElementById('progressBar').style.width = percentage + '%';
                 document.getElementById('progressBar').textContent = percentage + '%';
 
-                // 更新状态信息
+                // 更新状态信息，包含传输模式
+                let statusText = '';
+                let modeIcon = '';
+
+                // 根据传输模式设置图标
+                if (progress.transfer_mode) {
+                    switch (progress.transfer_mode) {
+                        case 'local_to_remote':
+                            modeIcon = '📤';
+                            break;
+                        case 'remote_to_local':
+                            modeIcon = '📥';
+                            break;
+                        case 'remote_to_remote':
+                            modeIcon = '🔄';
+                            break;
+                        default:
+                            modeIcon = '📁';
+                    }
+                }
+
                 if (progress.current_file) {
-                    document.getElementById('transferStatus').textContent =
-                        `传输中: ${progress.current_file} (${progress.completed_files || 0}/${progress.total_files || 1})`;
+                    statusText = `${modeIcon} 传输中: ${progress.current_file}`;
+                    if (progress.completed_files !== undefined && progress.total_files !== undefined) {
+                        statusText += ` (${progress.completed_files}/${progress.total_files})`;
+                    }
+
+                    // 添加服务器信息
+                    if (progress.source_server && progress.target_server) {
+                        const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
+                        const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
+                        statusText += ` [${sourceDisplay}→${targetDisplay}]`;
+                    }
+
+                    document.getElementById('transferStatus').textContent = statusText;
                 } else if (progress.files_transferred && progress.total_files) {
                     document.getElementById('transferStatus').textContent =
-                        `传输中: ${progress.files_transferred}/${progress.total_files} 文件`;
+                        `${modeIcon} 传输中: ${progress.files_transferred}/${progress.total_files} 文件`;
                 }
 
                 // 更新传输速度
@@ -2101,6 +2134,32 @@
                 // 如果有消息，也添加到日志
                 if (progress.message) {
                     addLog(progress.message);
+                }
+
+                // 首次显示传输模式信息
+                if (progress.transfer_mode && !window.transferModeLogged) {
+                    let modeDescription = '';
+                    switch (progress.transfer_mode) {
+                        case 'local_to_remote':
+                            modeDescription = '本地到远程传输';
+                            break;
+                        case 'remote_to_local':
+                            modeDescription = '远程到本地传输';
+                            break;
+                        case 'remote_to_remote':
+                            modeDescription = '远程到远程传输';
+                            break;
+                        default:
+                            modeDescription = '本地传输';
+                    }
+
+                    if (progress.source_server && progress.target_server) {
+                        const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
+                        const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
+                        addLogInfo(`🔄 传输模式: ${modeDescription} (${sourceDisplay} → ${targetDisplay})`);
+                    }
+
+                    window.transferModeLogged = true;
                 }
             }
         });
