@@ -106,18 +106,107 @@ class SSHManager:
 
 ssh_manager = SSHManager()
 
-def get_directory_listing(server_ip, path="/home/th"):
-    """获取远程目录列表"""
-    if server_ip == "localhost":
+def is_winscp_hidden_file(name, permissions="", path="/"):
+    """判断文件是否应该按照WinSCP规则隐藏
+
+    Args:
+        name: 文件名
+        permissions: 文件权限字符串（ls -l格式）
+        path: 当前目录路径
+
+    Returns:
+        bool: True表示应该隐藏，False表示应该显示
+    """
+    # 1. 隐藏以点号开头的文件（传统隐藏文件）
+    if name.startswith('.'):
+        return True
+
+    # 2. 隐藏系统符号链接（通常指向系统目录）
+    system_symlinks = {
+        'bin', 'sbin', 'lib', 'lib32', 'lib64', 'libx32'
+    }
+    if name in system_symlinks:
+        return True  # 无论是否为符号链接都隐藏
+
+    # 3. 隐藏系统目录（在任何位置都隐藏这些系统目录）
+    system_dirs = {
+        'proc', 'sys', 'dev', 'run', 'boot', 'etc', 'var', 'tmp',
+        'lost+found', 'cdrom', 'media', 'mnt', 'opt', 'srv', 'usr'
+    }
+    if name in system_dirs:
+        return True
+
+    # 4. 隐藏交换文件和系统文件
+    system_files = {
+        'swapfile', 'vmlinuz', 'initrd.img'
+    }
+    if name in system_files:
+        return True
+
+    # 5. 隐藏回收站目录
+    if name.startswith('.Trash-'):
+        return True
+
+    # 6. 隐藏root目录（在非根目录位置时）
+    if name == 'root' and path != '/':
+        return True
+
+    # 7. 隐藏home目录（当不在根目录时，通常表示这是挂载的系统）
+    if name == 'home' and path != '/':
+        return True
+
+    # 8. 隐藏snap目录（Ubuntu snap包目录）
+    if name == 'snap':
+        return True
+
+    # 9. 特殊情况：如果路径包含Work但显示了系统级目录，说明这是特殊挂载
+    # 在用户工作目录中，只显示用户创建的内容
+    if '/Work' in path or path.endswith('/Work'):
+        # 在Work目录中，进一步过滤系统相关内容
+        work_hidden_dirs = {
+            'home', 'root', 'snap', 'boot', 'etc', 'var', 'usr', 'opt',
+            'proc', 'sys', 'dev', 'run', 'tmp', 'media', 'mnt', 'srv',
+            'lost+found', 'cdrom'
+        }
+        if name in work_hidden_dirs:
+            return True
+
+        # 在Work目录中隐藏所有系统相关的符号链接
+        if name in {'bin', 'sbin', 'lib', 'lib32', 'lib64', 'libx32'}:
+            return True
+
+    return False
+
+def get_directory_listing(server_ip, path="/home/th", show_hidden=False):
+    """获取远程目录列表
+
+    Args:
+        server_ip: 服务器IP地址
+        path: 目录路径
+        show_hidden: 是否显示隐藏文件（包括WinSCP规则的隐藏文件）
+    """
+    if server_ip == "localhost" or server_ip == "192.168.9.62":
         # 本地目录
         try:
             items = []
             for item in os.listdir(path):
+                # 应用WinSCP过滤规则
+                if not show_hidden:
+                    # 获取文件权限信息用于判断符号链接
+                    item_path = os.path.join(path, item)
+                    permissions = ""
+                    if os.path.islink(item_path):
+                        permissions = "l"  # 标记为符号链接
+
+                    # 使用WinSCP过滤规则
+                    if is_winscp_hidden_file(item, permissions, path):
+                        continue
+
                 item_path = os.path.join(path, item)
                 is_dir = os.path.isdir(item_path)
                 size = os.path.getsize(item_path) if not is_dir else 0
                 mtime = os.path.getmtime(item_path)
-                
+
                 items.append({
                     "name": item,
                     "path": item_path,
@@ -130,31 +219,39 @@ def get_directory_listing(server_ip, path="/home/th"):
             return []
     else:
         # 远程目录
-        command = f"ls -la '{path}' | tail -n +2"  # 跳过第一行总计信息
+        # 使用ls -la命令以便正确识别符号链接和隐藏文件
+        command = f"ls -la '{path}' | tail -n +2"  # 总是使用-a选项以获取完整信息
+
         output, error = ssh_manager.execute_command(server_ip, command)
-        
+
         if error:
             return []
-        
+
         items = []
         for line in output.strip().split('\n'):
             if not line:
                 continue
-            
+
             parts = line.split()
             if len(parts) < 9:
                 continue
-            
+
             permissions = parts[0]
             size = parts[4]
             date_parts = parts[5:8]
             name = ' '.join(parts[8:])
-            
+
+            # 跳过当前目录和父目录
             if name in ['.', '..']:
                 continue
-            
+
+            # 应用WinSCP过滤规则
+            if not show_hidden:
+                if is_winscp_hidden_file(name, permissions, path):
+                    continue
+
             is_directory = permissions.startswith('d')
-            
+
             items.append({
                 "name": name,
                 "path": os.path.join(path, name),
@@ -162,7 +259,7 @@ def get_directory_listing(server_ip, path="/home/th"):
                 "size": int(size) if size.isdigit() else 0,
                 "modified": ' '.join(date_parts)
             })
-        
+
         return items
 
 def start_rsync_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True):
@@ -431,12 +528,15 @@ def get_servers():
 @app.route('/api/browse/<server_ip>')
 def browse_directory(server_ip):
     path = request.args.get('path', '/home/th')
+    show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
+
     try:
-        files = get_directory_listing(server_ip, path)
+        files = get_directory_listing(server_ip, path, show_hidden)
         return jsonify({
             'success': True,
             'path': path,
-            'files': files
+            'files': files,
+            'show_hidden': show_hidden
         })
     except Exception as e:
         return jsonify({
