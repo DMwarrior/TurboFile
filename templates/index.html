@@ -63,16 +63,44 @@
         .file-browser {
             height: calc(var(--browse-height, 50vh));
             overflow-y: auto;
+            overflow-x: hidden;
             border: 1px solid var(--border-color);
             border-radius: 8px;
             background: var(--card-bg);
             box-shadow: var(--shadow-sm);
             transition: all 0.3s ease;
+            /* 防止滚动事件冒泡到父元素 */
+            overscroll-behavior: contain;
+            /* 确保滚动平滑 */
+            scroll-behavior: smooth;
+            /* 设置滚动条样式 */
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-color) transparent;
         }
 
         .file-browser:hover {
             border-color: var(--primary-color);
             box-shadow: var(--shadow-md);
+        }
+
+        /* WebKit浏览器滚动条样式 */
+        .file-browser::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .file-browser::-webkit-scrollbar-track {
+            background: transparent;
+            border-radius: 4px;
+        }
+
+        .file-browser::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+            transition: background 0.3s ease;
+        }
+
+        .file-browser::-webkit-scrollbar-thumb:hover {
+            background: var(--text-secondary);
         }
 
         .file-item {
@@ -254,12 +282,14 @@
         }
 
         .resizable-panel {
-            overflow: hidden;
+            overflow: visible;
             background: var(--card-bg);
             border-radius: 6px;
             padding: 3px;
             box-shadow: var(--shadow-sm);
             transition: all 0.3s ease;
+            /* 确保面板内的滚动不影响外部 */
+            position: relative;
         }
 
         .resizable-panel:hover {
@@ -394,6 +424,24 @@
         .flex-grow-1 {
             flex-grow: 1;
             min-height: 0;
+        }
+
+        /* 防止滚动冲突的额外样式 */
+        .resizable-container {
+            /* 确保容器不会产生滚动条 */
+            overflow: hidden;
+            /* 防止滚动事件传播 */
+            overscroll-behavior: contain;
+        }
+
+        /* 确保文件浏览器区域的滚动独立性 */
+        #sourceFileBrowser, #targetFileBrowser {
+            /* 防止滚动事件冒泡 */
+            overscroll-behavior: contain;
+            /* 确保滚动区域明确定义 */
+            position: relative;
+            /* 优化滚动性能 */
+            will-change: scroll-position;
         }
 
         /* 路径导航优化 */
@@ -557,9 +605,17 @@
         <div class="row flex-grow-1" style="min-height: 0;">
             <div class="resizable-container" style="height: 100%;">
                 <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
-                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
-                        <i class="bi bi-files text-info"></i> 源文件浏览
-                    </h6>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <h6 style="font-size: 0.9rem; margin-bottom: 0;">
+                            <i class="bi bi-files text-info"></i> 源文件浏览
+                        </h6>
+                        <div class="form-check form-switch" style="font-size: 0.75rem;">
+                            <input class="form-check-input" type="checkbox" id="sourceShowHidden" onchange="toggleHiddenFiles('source')">
+                            <label class="form-check-label" for="sourceShowHidden" style="font-size: 0.75rem;">
+                                显示隐藏文件
+                            </label>
+                        </div>
+                    </div>
                     <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
@@ -575,9 +631,17 @@
                 <div class="resizer" id="verticalResizer"></div>
 
                 <div class="resizable-panel" id="targetPanel" style="width: 50%; height: 100%;">
-                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
-                        <i class="bi bi-folder-check text-success"></i> 目标目录浏览
-                    </h6>
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <h6 style="font-size: 0.9rem; margin-bottom: 0;">
+                            <i class="bi bi-folder-check text-success"></i> 目标目录浏览
+                        </h6>
+                        <div class="form-check form-switch" style="font-size: 0.75rem;">
+                            <input class="form-check-input" type="checkbox" id="targetShowHidden" onchange="toggleHiddenFiles('target')">
+                            <label class="form-check-label" for="targetShowHidden" style="font-size: 0.75rem;">
+                                显示隐藏文件
+                            </label>
+                        </div>
+                    </div>
                     <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
@@ -705,13 +769,14 @@
         function browseSource() {
             const server = document.getElementById('sourceServer').value;
             const path = document.getElementById('sourcePath').value;
-            
+            const showHidden = document.getElementById('sourceShowHidden').checked;
+
             if (!server) {
                 alert('请先选择源服务器');
                 return;
             }
-            
-            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}`)
+
+            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`)
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -729,13 +794,14 @@
         function browseTarget() {
             const server = document.getElementById('targetServer').value;
             const path = document.getElementById('targetPath').value;
-            
+            const showHidden = document.getElementById('targetShowHidden').checked;
+
             if (!server) {
                 alert('请先选择目标服务器');
                 return;
             }
-            
-            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}`)
+
+            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`)
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -747,6 +813,23 @@
                 .catch(error => {
                     addLog(`浏览目标目录出错: ${error}`);
                 });
+        }
+
+        // 切换隐藏文件显示
+        function toggleHiddenFiles(type) {
+            if (type === 'source') {
+                const server = document.getElementById('sourceServer').value;
+                const path = document.getElementById('sourcePath').value;
+                if (server && path) {
+                    browseSource();
+                }
+            } else if (type === 'target') {
+                const server = document.getElementById('targetServer').value;
+                const path = document.getElementById('targetPath').value;
+                if (server && path) {
+                    browseTarget();
+                }
+            }
         }
 
         // 显示文件列表
