@@ -203,6 +203,153 @@
             50% { transform: scale(1.02); }
         }
 
+        /* 加载状态样式优化 */
+        .loading-state {
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            border-radius: 8px;
+            animation: loadingPulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes loadingPulse {
+            0%, 100% { opacity: 0.8; }
+            50% { opacity: 1; }
+        }
+
+        .spinner-border {
+            animation: spin 0.75s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* 错误状态样式 */
+        .error-state {
+            background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+        }
+
+        /* 返回上级目录样式优化 */
+        .file-item[title*="双击返回"] {
+            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+            border: 1px solid #bfdbfe;
+            margin-bottom: 8px;
+        }
+
+        .file-item[title*="双击返回"]:hover {
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            transform: translateX(6px);
+            box-shadow: var(--shadow-md);
+        }
+
+        /* 双击响应优化动画 */
+        .file-item.double-click-active {
+            background: linear-gradient(135deg, #fef3c7 0%, #fbbf24 100%);
+            transform: scale(1.02) translateX(8px);
+            box-shadow: 0 8px 25px -5px rgba(251, 191, 36, 0.4);
+            transition: all 0.1s ease-out;
+        }
+
+        .file-item:active {
+            transform: scale(0.98);
+            transition: transform 0.05s ease-out;
+        }
+
+        /* 立即加载状态优化 */
+        .loading-state-instant {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border: 2px solid #0ea5e9;
+            border-radius: 12px;
+            animation: instantLoadingPulse 0.8s ease-in-out infinite;
+        }
+
+        @keyframes instantLoadingPulse {
+            0%, 100% {
+                opacity: 0.9;
+                border-color: #0ea5e9;
+            }
+            50% {
+                opacity: 1;
+                border-color: #0284c7;
+                box-shadow: 0 0 20px rgba(14, 165, 233, 0.3);
+            }
+        }
+
+        /* 快速响应指示器 */
+        .fast-response-indicator {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: #10b981;
+            color: white;
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 10px;
+            animation: fastResponseBlink 0.5s ease-out;
+        }
+
+        @keyframes fastResponseBlink {
+            0% { opacity: 0; transform: scale(0.5); }
+            50% { opacity: 1; transform: scale(1.1); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        /* 刷新状态动画 */
+        @keyframes refreshPulse {
+            0%, 100% {
+                opacity: 0.9;
+                border-color: #22c55e;
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+            }
+            50% {
+                opacity: 1;
+                border-color: #16a34a;
+                box-shadow: 0 0 0 10px rgba(34, 197, 94, 0);
+            }
+        }
+
+        /* 刷新按钮样式优化 */
+        .btn-outline-primary:hover, .btn-outline-success:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+
+        .btn-outline-primary:active, .btn-outline-success:active {
+            transform: translateY(0);
+        }
+
+        /* 强制保持默认光标样式 - 解决加载圆圈问题 */
+        body, html {
+            cursor: default !important;
+        }
+
+        .file-item, .file-item * {
+            cursor: pointer !important;
+        }
+
+        .path-segment, .path-segment * {
+            cursor: pointer !important;
+        }
+
+        .resizer {
+            cursor: col-resize !important;
+        }
+
+        /* 防止浏览器在fetch请求时显示loading光标 */
+        body.browsing, body.browsing * {
+            cursor: default !important;
+        }
+
+        body.browsing .file-item, body.browsing .file-item * {
+            cursor: pointer !important;
+        }
+
+        body.browsing .path-segment, body.browsing .path-segment * {
+            cursor: pointer !important;
+        }
+
         .drag-preview {
             position: fixed;
             pointer-events: none;
@@ -444,6 +591,83 @@
             will-change: scroll-position;
         }
 
+        /* 日志区域样式 */
+        .log-container {
+            height: 120px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: #f8f9fa;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.75rem;
+            line-height: 1.3;
+            overscroll-behavior: contain;
+            scroll-behavior: smooth;
+        }
+
+        .log-content {
+            padding: 6px 8px;
+            min-height: 100%;
+        }
+
+        .log-entry {
+            margin-bottom: 2px;
+            padding: 2px 4px;
+            border-radius: 2px;
+            word-wrap: break-word;
+            animation: logFadeIn 0.3s ease-in;
+        }
+
+        .log-entry.log-info {
+            color: #0066cc;
+            background: rgba(0, 102, 204, 0.05);
+        }
+
+        .log-entry.log-success {
+            color: #28a745;
+            background: rgba(40, 167, 69, 0.05);
+        }
+
+        .log-entry.log-warning {
+            color: #ffc107;
+            background: rgba(255, 193, 7, 0.1);
+        }
+
+        .log-entry.log-error {
+            color: #dc3545;
+            background: rgba(220, 53, 69, 0.1);
+        }
+
+        .log-timestamp {
+            color: #6c757d;
+            font-size: 0.7rem;
+            margin-right: 6px;
+        }
+
+        @keyframes logFadeIn {
+            from { opacity: 0; transform: translateY(-5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 日志滚动条样式 */
+        .log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .log-container::-webkit-scrollbar-thumb {
+            background: #ccc;
+            border-radius: 3px;
+        }
+
+        .log-container::-webkit-scrollbar-thumb:hover {
+            background: #999;
+        }
+
         /* 路径导航优化 */
         .path-nav {
             background: var(--card-bg);
@@ -575,7 +799,9 @@
                             <i class="bi bi-folder2-open text-warning" style="font-size: 0.85rem;"></i>
                         </span>
                         <input type="text" id="sourcePath" class="form-control" placeholder="源路径" value="">
-                        <button class="btn btn-outline-secondary" onclick="browseSource()">浏览</button>
+                        <button class="btn btn-outline-primary" onclick="refreshSource()" title="刷新目录内容">
+                            <i class="bi bi-arrow-clockwise"></i> 刷新
+                        </button>
                     </div>
                 </div>
             </div>
@@ -595,7 +821,9 @@
                             <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
                         </span>
                         <input type="text" id="targetPath" class="form-control" placeholder="目标路径" value="">
-                        <button class="btn btn-outline-secondary" onclick="browseTarget()">浏览</button>
+                        <button class="btn btn-outline-success" onclick="refreshTarget()" title="刷新目录内容">
+                            <i class="bi bi-arrow-clockwise"></i> 刷新
+                        </button>
                     </div>
                 </div>
             </div>
@@ -672,15 +900,21 @@
                                 <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()">
                                     <i class="bi bi-lightning-charge-fill"></i> 开始传输
                                 </button>
-                                <button id="cancelTransferBtn" class="btn btn-danger" onclick="cancelTransfer()" style="display: none;">
+                                <button id="cancelTransferBtn" class="btn btn-danger" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none;" title="单击取消传输，双击强制终止">
                                     <i class="bi bi-stop-circle-fill"></i> 取消传输
                                 </button>
                             </div>
                             <div class="col-md-3">
-                                <div class="form-check form-switch">
+                                <div class="form-check form-switch mb-1">
                                     <input class="form-check-input" type="checkbox" id="fastSSH" checked>
                                     <label class="form-check-label" style="font-size: 0.85rem;" for="fastSSH">
                                         🚀 SSH加速
+                                    </label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="parallelTransfer" checked>
+                                    <label class="form-check-label" style="font-size: 0.85rem;" for="parallelTransfer">
+                                        ⚡ 并行传输 (立即开始)
                                     </label>
                                 </div>
                             </div>
@@ -744,6 +978,29 @@
             </div>
         </div>
 
+        <!-- 传输日志区域 -->
+        <div class="row flex-shrink-0">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body" style="padding: 4px 6px;">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <h6 style="font-size: 0.85rem; margin-bottom: 0;">
+                                <i class="bi bi-journal-text text-secondary"></i> 传输日志
+                            </h6>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="clearLog()" style="font-size: 0.7rem; padding: 1px 6px;">
+                                <i class="bi bi-trash3"></i> 清空
+                            </button>
+                        </div>
+                        <div id="logContainer" class="log-container">
+                            <div id="logContent" class="log-content">
+                                <!-- 日志内容将在这里显示 -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
 
     </div>
 
@@ -757,16 +1014,140 @@
         let currentSourcePath = '/home/th';
         let currentTargetPath = '/home/thgd';
 
-        // 日志函数 - 保持兼容性但不显示UI
-        function addLog(message) {
-            // 日志功能已移除，但保持函数兼容性
-            // 可以在控制台输出日志用于调试
+        // 日志系统配置
+        let logBuffer = [];
+        let logUpdateTimer = null;
+        let isTransferring = false;
+        const MAX_LOG_ENTRIES = 100;
+        const LOG_UPDATE_INTERVAL = 500; // 500ms批量更新
+
+        // 智能日志函数
+        function addLog(message, type = 'info') {
+            // 传输过程中过滤详细进度信息
+            if (isTransferring && isProgressMessage(message)) {
+                return;
+            }
+
             const timestamp = new Date().toLocaleTimeString();
+            const logEntry = {
+                timestamp: timestamp,
+                message: message,
+                type: type,
+                id: Date.now() + Math.random()
+            };
+
+            // 添加到缓冲区
+            logBuffer.push(logEntry);
+
+            // 控制台输出（调试用）
             console.log(`[${timestamp}] ${message}`);
+
+            // 批量更新UI
+            scheduleLogUpdate();
         }
 
-        // 浏览源文件
+        // 判断是否为进度消息（传输时需要过滤）
+        function isProgressMessage(message) {
+            const progressKeywords = [
+                '字节', 'bytes', '%', 'MB/s', 'KB/s', 'GB/s',
+                '进度', 'progress', '传输速度', '剩余时间'
+            ];
+            return progressKeywords.some(keyword => message.includes(keyword));
+        }
+
+        // 调度日志更新
+        function scheduleLogUpdate() {
+            if (logUpdateTimer) {
+                clearTimeout(logUpdateTimer);
+            }
+
+            logUpdateTimer = setTimeout(() => {
+                updateLogDisplay();
+                logUpdateTimer = null;
+            }, LOG_UPDATE_INTERVAL);
+        }
+
+        // 更新日志显示
+        function updateLogDisplay() {
+            if (logBuffer.length === 0) return;
+
+            const logContent = document.getElementById('logContent');
+            const logContainer = document.getElementById('logContainer');
+
+            // 批量处理日志条目
+            const fragment = document.createDocumentFragment();
+
+            logBuffer.forEach(entry => {
+                const logDiv = document.createElement('div');
+                logDiv.className = `log-entry log-${entry.type}`;
+                logDiv.innerHTML = `
+                    <span class="log-timestamp">${entry.timestamp}</span>
+                    <span class="log-message">${escapeHtml(entry.message)}</span>
+                `;
+                fragment.appendChild(logDiv);
+            });
+
+            logContent.appendChild(fragment);
+
+            // 限制日志条目数量
+            const entries = logContent.querySelectorAll('.log-entry');
+            if (entries.length > MAX_LOG_ENTRIES) {
+                const removeCount = entries.length - MAX_LOG_ENTRIES;
+                for (let i = 0; i < removeCount; i++) {
+                    entries[i].remove();
+                }
+            }
+
+            // 自动滚动到底部
+            logContainer.scrollTop = logContainer.scrollHeight;
+
+            // 清空缓冲区
+            logBuffer = [];
+        }
+
+        // HTML转义函数
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 清空日志
+        function clearLog() {
+            document.getElementById('logContent').innerHTML = '';
+            logBuffer = [];
+            addLog('📝 日志已清空', 'info');
+        }
+
+        // 添加不同类型的日志函数
+        function addLogInfo(message) {
+            addLog(message, 'info');
+        }
+
+        function addLogSuccess(message) {
+            addLog(message, 'success');
+        }
+
+        function addLogWarning(message) {
+            addLog(message, 'warning');
+        }
+
+        function addLogError(message) {
+            addLog(message, 'error');
+        }
+
+        // 浏览源文件 - 同步版本（保持兼容性）
         function browseSource() {
+            browseSourceAsync();
+        }
+
+        // 刷新源文件 - 强制清除缓存
+        function refreshSource() {
+            refreshSourceAsync();
+        }
+
+        // 浏览源文件 - 异步优化版本
+        async function browseSourceAsync() {
             const server = document.getElementById('sourceServer').value;
             const path = document.getElementById('sourcePath').value;
             const showHidden = document.getElementById('sourceShowHidden').checked;
@@ -776,22 +1157,155 @@
                 return;
             }
 
-            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        displayFiles('sourceFileBrowser', data.files, path, true);
-                    } else {
-                        addLog(`浏览源目录失败: ${data.error}`);
-                    }
-                })
-                .catch(error => {
-                    addLog(`浏览源目录出错: ${error}`);
+            try {
+                // 强制保持默认光标
+                document.body.classList.add('browsing');
+
+                // 显示加载状态
+                showLoadingState('sourceFileBrowser', true);
+
+                // 使用防抖机制，避免重复请求
+                if (window.sourceRequestController) {
+                    window.sourceRequestController.abort();
+                }
+                window.sourceRequestController = new AbortController();
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`, {
+                    signal: window.sourceRequestController.signal
                 });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayFiles('sourceFileBrowser', data.files, path, true);
+                    addLogInfo(`📁 已加载源目录: ${path} (${data.files.length}项)`);
+                } else {
+                    showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
+                    addLogError(`❌ 浏览源目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('sourceFileBrowser', '浏览失败: ' + error.message);
+                    addLogError(`❌ 浏览源目录出错: ${error}`);
+                }
+            } finally {
+                // 移除浏览状态类，恢复正常光标
+                document.body.classList.remove('browsing');
+            }
         }
 
-        // 浏览目标文件
+        // 立即响应的源文件浏览 - 零延迟版本
+        async function browseSourceInstant(targetPath) {
+            const server = document.getElementById('sourceServer').value;
+            const showHidden = document.getElementById('sourceShowHidden').checked;
+
+            if (!server) {
+                alert('请先选择源服务器');
+                return;
+            }
+
+            try {
+                // 取消之前的请求
+                if (window.sourceInstantController) {
+                    window.sourceInstantController.abort();
+                }
+                window.sourceInstantController = new AbortController();
+
+                // 立即发起请求，无任何延迟
+                const startTime = performance.now();
+                console.log(`[源文件浏览] 开始请求: ${targetPath}`);
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(targetPath)}&show_hidden=${showHidden}`, {
+                    signal: window.sourceInstantController.signal,
+                    // 添加缓存控制，优化重复访问
+                    cache: 'default'
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                console.log(`[源文件浏览] 请求完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
+
+                if (data.success) {
+                    displayFiles('sourceFileBrowser', data.files, targetPath, true);
+                    addLogInfo(`📁 已进入源目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                } else {
+                    showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
+                    addLogError(`❌ 浏览源目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('sourceFileBrowser', '浏览失败: ' + error.message);
+                    addLogError(`❌ 浏览源目录出错: ${error}`);
+                }
+            }
+        }
+
+        // 刷新源文件 - 强制清除缓存版本
+        async function refreshSourceAsync() {
+            const server = document.getElementById('sourceServer').value;
+            const path = document.getElementById('sourcePath').value;
+            const showHidden = document.getElementById('sourceShowHidden').checked;
+
+            if (!server) {
+                alert('请先选择源服务器');
+                return;
+            }
+
+            try {
+                // 显示刷新状态
+                showRefreshingState('sourceFileBrowser', path);
+
+                // 取消之前的请求
+                if (window.sourceRefreshController) {
+                    window.sourceRefreshController.abort();
+                }
+                window.sourceRefreshController = new AbortController();
+
+                // 发起强制刷新请求
+                const startTime = performance.now();
+                console.log(`[源文件刷新] 强制刷新: ${path}`);
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}&force_refresh=true`, {
+                    signal: window.sourceRefreshController.signal,
+                    // 强制刷新不使用缓存
+                    cache: 'no-cache'
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                console.log(`[源文件刷新] 刷新完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
+
+                if (data.success) {
+                    displayFiles('sourceFileBrowser', data.files, path, true);
+                    const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
+                    addLogSuccess(`🔄 已刷新源目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+                } else {
+                    showErrorState('sourceFileBrowser', '刷新失败: ' + data.error);
+                    addLogError(`❌ 刷新源目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('sourceFileBrowser', '刷新失败: ' + error.message);
+                    addLogError(`❌ 刷新源目录出错: ${error}`);
+                }
+            }
+        }
+
+        // 浏览目标文件 - 同步版本（保持兼容性）
         function browseTarget() {
+            browseTargetAsync();
+        }
+
+        // 刷新目标文件 - 强制清除缓存
+        function refreshTarget() {
+            refreshTargetAsync();
+        }
+
+        // 浏览目标文件 - 异步优化版本
+        async function browseTargetAsync() {
             const server = document.getElementById('targetServer').value;
             const path = document.getElementById('targetPath').value;
             const showHidden = document.getElementById('targetShowHidden').checked;
@@ -801,18 +1315,135 @@
                 return;
             }
 
-            fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        displayFiles('targetFileBrowser', data.files, path, false);
-                    } else {
-                        addLog(`浏览目标目录失败: ${data.error}`);
-                    }
-                })
-                .catch(error => {
-                    addLog(`浏览目标目录出错: ${error}`);
+            try {
+                // 显示加载状态
+                showLoadingState('targetFileBrowser', true);
+
+                // 使用防抖机制，避免重复请求
+                if (window.targetRequestController) {
+                    window.targetRequestController.abort();
+                }
+                window.targetRequestController = new AbortController();
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`, {
+                    signal: window.targetRequestController.signal
                 });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayFiles('targetFileBrowser', data.files, path, false);
+                    addLogInfo(`📂 已加载目标目录: ${path} (${data.files.length}项)`);
+                } else {
+                    showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
+                    addLogError(`❌ 浏览目标目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('targetFileBrowser', '浏览失败: ' + error.message);
+                    addLogError(`❌ 浏览目标目录出错: ${error}`);
+                }
+            }
+        }
+
+        // 立即响应的目标文件浏览 - 零延迟版本
+        async function browseTargetInstant(targetPath) {
+            const server = document.getElementById('targetServer').value;
+            const showHidden = document.getElementById('targetShowHidden').checked;
+
+            if (!server) {
+                alert('请先选择目标服务器');
+                return;
+            }
+
+            try {
+                // 取消之前的请求
+                if (window.targetInstantController) {
+                    window.targetInstantController.abort();
+                }
+                window.targetInstantController = new AbortController();
+
+                // 立即发起请求，无任何延迟
+                const startTime = performance.now();
+                console.log(`[目标文件浏览] 开始请求: ${targetPath}`);
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(targetPath)}&show_hidden=${showHidden}`, {
+                    signal: window.targetInstantController.signal,
+                    // 添加缓存控制，优化重复访问
+                    cache: 'default'
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                console.log(`[目标文件浏览] 请求完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
+
+                if (data.success) {
+                    displayFiles('targetFileBrowser', data.files, targetPath, false);
+                    addLogInfo(`📂 已进入目标目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                } else {
+                    showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
+                    addLogError(`❌ 浏览目标目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('targetFileBrowser', '浏览失败: ' + error.message);
+                    addLogError(`❌ 浏览目标目录出错: ${error}`);
+                }
+            }
+        }
+
+        // 刷新目标文件 - 强制清除缓存版本
+        async function refreshTargetAsync() {
+            const server = document.getElementById('targetServer').value;
+            const path = document.getElementById('targetPath').value;
+            const showHidden = document.getElementById('targetShowHidden').checked;
+
+            if (!server) {
+                alert('请先选择目标服务器');
+                return;
+            }
+
+            try {
+                // 显示刷新状态
+                showRefreshingState('targetFileBrowser', path);
+
+                // 取消之前的请求
+                if (window.targetRefreshController) {
+                    window.targetRefreshController.abort();
+                }
+                window.targetRefreshController = new AbortController();
+
+                // 发起强制刷新请求
+                const startTime = performance.now();
+                console.log(`[目标文件刷新] 强制刷新: ${path}`);
+
+                const response = await fetch(`/api/browse/${server}?path=${encodeURIComponent(path)}&show_hidden=${showHidden}&force_refresh=true`, {
+                    signal: window.targetRefreshController.signal,
+                    // 强制刷新不使用缓存
+                    cache: 'no-cache'
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                console.log(`[目标文件刷新] 刷新完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
+
+                if (data.success) {
+                    displayFiles('targetFileBrowser', data.files, path, false);
+                    const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
+                    addLogSuccess(`🔄 已刷新目标目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+                } else {
+                    showErrorState('targetFileBrowser', '刷新失败: ' + data.error);
+                    addLogError(`❌ 刷新目标目录失败: ${data.error}`);
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Error:', error);
+                    showErrorState('targetFileBrowser', '刷新失败: ' + error.message);
+                    addLogError(`❌ 刷新目标目录出错: ${error}`);
+                }
+            }
         }
 
         // 切换隐藏文件显示
@@ -840,13 +1471,14 @@
             // 更新路径导航
             updatePathNavigation(currentPath, isSource);
 
-            // 返回上级目录
+            // 返回上级目录 - 修改为双击操作
             if (currentPath !== '/') {
                 const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
-                html += `<div class="file-item" onclick="navigateTo('${containerId}', '${parentPath}', ${isSource})">
+                html += `<div class="file-item" ondblclick="navigateTo('${containerId}', '${parentPath}', ${isSource})" title="双击返回上级目录">
                     <i class="bi bi-arrow-up-circle text-primary"></i>
                     <div class="file-info">
                         <span class="file-name">..</span>
+                        <span class="file-details" style="font-size: 0.75rem; color: #6c757d;">双击返回上级</span>
                     </div>
                 </div>`;
             }
@@ -858,14 +1490,13 @@
                 const fileId = `file_${containerId}_${index}`;
 
                 if (isSource) {
-                    // 源文件支持多选、双击进入目录和拖拽
+                    // 源文件支持多选、双击进入目录和拖拽 - 优化事件处理
                     html += `<div class="file-item selectable" id="${fileId}"
                              draggable="true"
                              data-path="${file.path}"
                              data-name="${file.name}"
                              data-is-directory="${file.is_directory}"
-                             onclick="selectFile(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}')"
-                             ondblclick="handleDoubleClick('${file.path}', ${file.is_directory}, ${isSource})"
+                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}', ${isSource})"
                              ondragstart="handleDragStart(event)"
                              ondragend="handleDragEnd(event)">
                         <i class="bi ${icon}"></i>
@@ -875,9 +1506,9 @@
                         </div>
                     </div>`;
                 } else {
-                    // 目标目录只支持导航
+                    // 目标目录只支持导航 - 优化事件处理
                     html += `<div class="file-item"
-                             ondblclick="handleDoubleClick('${file.path}', ${file.is_directory}, ${isSource})">
+                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, null, ${isSource})">
                         <i class="bi ${icon}"></i>
                         <div class="file-info">
                             <span class="file-name">${file.name}</span>
@@ -915,19 +1546,209 @@
             }
         }
 
-        // 处理双击事件
-        function handleDoubleClick(path, isDirectory, isSource) {
-            if (isDirectory) {
-                // 双击目录进入该目录
-                if (isSource) {
-                    document.getElementById('sourcePath').value = path;
-                    browseSource();
-                } else {
-                    document.getElementById('targetPath').value = path;
-                    browseTarget();
+        // 智能鼠标事件处理 - 区分单击和双击
+        let clickTimer = null;
+        let clickCount = 0;
+
+        function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
+            event.preventDefault();
+            clickCount++;
+
+            if (clickCount === 1) {
+                // 第一次点击，设置延迟处理单击
+                clickTimer = setTimeout(() => {
+                    // 单击处理
+                    if (isSource && fileId) {
+                        selectFile(event, path, name, isDirectory, fileId);
+                    }
+                    clickCount = 0;
+                }, 200); // 200ms延迟，等待可能的第二次点击
+            } else if (clickCount === 2) {
+                // 双击处理 - 立即响应
+                clearTimeout(clickTimer);
+                clickCount = 0;
+
+                if (isDirectory) {
+                    // 立即视觉反馈
+                    if (fileId) {
+                        const fileElement = document.getElementById(fileId);
+                        if (fileElement) {
+                            fileElement.classList.add('double-click-active');
+                            setTimeout(() => {
+                                fileElement.classList.remove('double-click-active');
+                            }, 300);
+                        }
+                    }
+
+                    // 立即响应双击，无延迟
+                    console.log(`[双击] 立即进入目录: ${path}`);
+
+                    // 立即更新路径和UI状态
+                    if (isSource) {
+                        document.getElementById('sourcePath').value = path;
+                        // 立即显示加载状态
+                        showLoadingStateInstant('sourceFileBrowser', path);
+                        // 立即开始异步加载
+                        browseSourceInstant(path);
+                    } else {
+                        document.getElementById('targetPath').value = path;
+                        // 立即显示加载状态
+                        showLoadingStateInstant('targetFileBrowser', path);
+                        // 立即开始异步加载
+                        browseTargetInstant(path);
+                    }
                 }
             }
         }
+
+        // 处理双击事件 - 保持兼容性
+        function handleDoubleClick(path, isDirectory, isSource) {
+            if (!isDirectory) return;
+
+            // 立即响应，无延迟
+            console.log(`[双击] 立即进入目录: ${path}`);
+
+            // 立即更新路径和UI状态
+            if (isSource) {
+                document.getElementById('sourcePath').value = path;
+                // 立即显示加载状态
+                showLoadingStateInstant('sourceFileBrowser', path);
+                // 立即开始异步加载
+                browseSourceInstant(path);
+            } else {
+                document.getElementById('targetPath').value = path;
+                // 立即显示加载状态
+                showLoadingStateInstant('targetFileBrowser', path);
+                // 立即开始异步加载
+                browseTargetInstant(path);
+            }
+        }
+
+        // 显示加载状态
+        function showLoadingState(containerId, isLoading) {
+            const container = document.getElementById(containerId);
+            if (isLoading) {
+                container.innerHTML = `
+                    <div class="text-center p-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">加载中...</span>
+                        </div>
+                        <div class="mt-2">正在加载目录...</div>
+                    </div>
+                `;
+            }
+        }
+
+        // 立即显示加载状态 - 零延迟版本
+        function showLoadingStateInstant(containerId, targetPath) {
+            const container = document.getElementById(containerId);
+            const pathName = targetPath.split('/').pop() || '根目录';
+
+            // 立即更新DOM，无任何延迟
+            container.innerHTML = `
+                <div class="text-center p-4 loading-state-instant position-relative">
+                    <div class="fast-response-indicator">快速响应</div>
+                    <div class="d-flex justify-content-center align-items-center mb-3">
+                        <div class="spinner-border text-primary me-2" role="status" style="width: 1.5rem; height: 1.5rem;">
+                            <span class="visually-hidden">加载中...</span>
+                        </div>
+                        <strong class="text-primary">⚡ 正在进入 "${pathName}"</strong>
+                    </div>
+                    <div class="progress" style="height: 6px; border-radius: 3px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+                             role="progressbar" style="width: 100%"></div>
+                    </div>
+                    <small class="text-muted mt-2 d-block">
+                        <i class="bi bi-lightning-charge-fill text-warning"></i>
+                        立即响应模式 - 正在加载文件列表...
+                    </small>
+                </div>
+            `;
+
+            // 强制重绘，确保立即显示
+            container.offsetHeight;
+        }
+
+        // 显示刷新状态 - 强制刷新版本
+        function showRefreshingState(containerId, targetPath) {
+            const container = document.getElementById(containerId);
+            const pathName = targetPath.split('/').pop() || '根目录';
+
+            // 立即更新DOM，显示刷新状态
+            container.innerHTML = `
+                <div class="text-center p-4 position-relative" style="background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border: 2px solid #22c55e; border-radius: 12px; animation: refreshPulse 1s ease-in-out infinite;">
+                    <div class="position-absolute top-0 end-0 m-2">
+                        <span class="badge bg-success">强制刷新</span>
+                    </div>
+                    <div class="d-flex justify-content-center align-items-center mb-3">
+                        <div class="spinner-border text-success me-2" role="status" style="width: 1.5rem; height: 1.5rem;">
+                            <span class="visually-hidden">刷新中...</span>
+                        </div>
+                        <strong class="text-success">🔄 正在刷新 "${pathName}"</strong>
+                    </div>
+                    <div class="progress" style="height: 6px; border-radius: 3px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+                             role="progressbar" style="width: 100%"></div>
+                    </div>
+                    <small class="text-muted mt-2 d-block">
+                        <i class="bi bi-arrow-clockwise text-success"></i>
+                        清除缓存中 - 获取最新目录内容...
+                    </small>
+                </div>
+            `;
+
+            // 强制重绘，确保立即显示
+            container.offsetHeight;
+        }
+
+        // 显示错误状态
+        function showErrorState(containerId, errorMessage) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = `
+                <div class="text-center p-4">
+                    <div class="text-danger mb-3">
+                        <i class="bi bi-exclamation-triangle-fill" style="font-size: 2rem;"></i>
+                    </div>
+                    <div class="text-danger">${errorMessage}</div>
+                    <button class="btn btn-outline-primary btn-sm mt-3" onclick="location.reload()">
+                        <i class="bi bi-arrow-clockwise"></i> 重新加载
+                    </button>
+                </div>
+            `;
+        }
+
+        // 防抖函数 - 防止快速重复操作
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
+        // 优化的双击处理 - 添加防抖
+        const debouncedHandleDoubleClick = debounce(function(path, isDirectory, isSource) {
+            if (isDirectory) {
+                // 立即更新路径显示，提供即时反馈
+                if (isSource) {
+                    document.getElementById('sourcePath').value = path;
+                    // 立即显示加载状态
+                    showLoadingState('sourceFileBrowser', true);
+                    // 异步浏览目录
+                    browseSourceAsync();
+                } else {
+                    document.getElementById('targetPath').value = path;
+                    // 立即显示加载状态
+                    showLoadingState('targetFileBrowser', true);
+                    // 异步浏览目录
+                    browseTargetAsync();
+                }
+            }
+        }, 100); // 100ms防抖延迟
 
         // 更新路径导航
         function updatePathNavigation(currentPath, isSource) {
@@ -1107,13 +1928,16 @@
             const targetPath = document.getElementById('targetPath').value;
             const mode = document.getElementById('transferMode').value;
             const fastSSH = document.getElementById('fastSSH').checked;
+            const parallelTransfer = document.getElementById('parallelTransfer').checked;
 
             if (!sourceServer || !targetServer || !targetPath) {
+                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
                 alert('请选择源服务器、目标服务器和目标路径');
                 return;
             }
 
             if (selectedSourceFiles.length === 0) {
+                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
                 alert('请选择要传输的文件或文件夹');
                 return;
             }
@@ -1124,10 +1948,14 @@
                     file.path === targetPath || targetPath.startsWith(file.path + '/')
                 );
                 if (hasConflict) {
+                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
                     alert('源路径和目标路径不能相同或存在包含关系');
                     return;
                 }
             }
+
+            // 设置传输状态
+            isTransferring = true;
 
             // 显示进度面板
             document.getElementById('progressContainer').style.display = 'block';
@@ -1135,7 +1963,14 @@
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
             const fileNames = selectedSourceFiles.map(f => f.name).join(', ');
-            addLog(`开始传输 ${selectedSourceFiles.length} 项: ${fileNames} -> ${targetServer}:${targetPath} (${mode})`);
+            const modeText = mode === 'copy' ? '复制' : '移动';
+            const sshText = fastSSH ? '(SSH加速)' : '';
+            const parallelText = parallelTransfer ? '(立即并行传输)' : '';
+
+            addLogInfo(`🚀 开始${modeText}传输 ${sshText}${parallelText}`);
+            addLogInfo(`📤 源: ${sourceServer} (${selectedSourceFiles.length}项)`);
+            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
 
             // 发送传输请求
             socket.emit('start_transfer', {
@@ -1144,27 +1979,55 @@
                 target_server: targetServer,
                 target_path: targetPath,
                 mode: mode,
-                fast_ssh: fastSSH
+                fast_ssh: fastSSH,
+                parallel_transfer: parallelTransfer
             });
         }
 
         // 取消传输
         function cancelTransfer() {
             if (currentTransferId) {
-                // 显示确认对话框
-                if (confirm('确定要取消当前传输吗？\n\n注意：已传输的部分文件将保留，但当前正在传输的文件可能不完整。')) {
-                    addLog('正在取消传输...');
+                // 立即更新UI状态，不等待确认
+                addLogWarning('🛑 用户请求取消传输...');
 
-                    // 禁用取消按钮，防止重复点击
-                    const cancelBtn = document.getElementById('cancelTransferBtn');
-                    cancelBtn.disabled = true;
-                    cancelBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> 取消中...';
+                // 立即禁用取消按钮，防止重复点击
+                const cancelBtn = document.getElementById('cancelTransferBtn');
+                cancelBtn.disabled = true;
+                cancelBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> 取消中...';
 
-                    // 发送取消请求
-                    socket.emit('cancel_transfer', {
-                        transfer_id: currentTransferId
-                    });
-                }
+                // 立即发送取消请求，不需要确认对话框
+                socket.emit('cancel_transfer', {
+                    transfer_id: currentTransferId
+                });
+
+                // 设置超时保护，如果3秒内没有收到响应，强制重置UI
+                setTimeout(() => {
+                    if (cancelBtn.disabled) {
+                        addLogWarning('⚠️ 取消操作超时，强制重置界面');
+                        resetTransferUI();
+                        isTransferring = false;
+                    }
+                }, 3000);
+            }
+        }
+
+        // 强制取消传输（双击触发）
+        function forceCancelTransfer() {
+            if (currentTransferId) {
+                addLogError('🚨 强制终止传输...');
+
+                // 立即重置UI
+                resetTransferUI();
+                isTransferring = false;
+
+                // 发送强制取消请求
+                socket.emit('cancel_transfer', {
+                    transfer_id: currentTransferId,
+                    force: true
+                });
+
+                // 清除当前传输ID
+                currentTransferId = null;
             }
         }
 
@@ -1199,7 +2062,7 @@
         socket.on('transfer_started', function(data) {
             currentTransferId = data.transfer_id;
             document.getElementById('transferStatus').textContent = '传输中...';
-            addLog(`传输任务已启动 (ID: ${data.transfer_id})`);
+            addLogSuccess(`✅ 传输任务已启动 (ID: ${data.transfer_id})`);
         });
 
         socket.on('transfer_progress', function(data) {
@@ -1244,21 +2107,42 @@
 
         socket.on('transfer_log', function(data) {
             if (data.transfer_id === currentTransferId) {
-                addLog(data.message);
+                // 传输过程中的日志使用info级别，但会被过滤
+                addLogInfo(data.message);
             }
         });
 
         socket.on('transfer_complete', function(data) {
             if (data.transfer_id === currentTransferId) {
+                // 传输结束，恢复日志记录
+                isTransferring = false;
+
                 if (data.status === 'success') {
                     document.getElementById('transferStatus').textContent = '传输完成';
                     document.getElementById('progressBar').classList.remove('progress-bar-animated');
                     document.getElementById('progressBar').classList.add('bg-success');
-                    addLog('✅ 传输成功完成');
+                    addLogSuccess('🎉 传输成功完成');
+
+                    // 记录传输统计信息
+                    if (data.stats) {
+                        addLogInfo(`📊 传输统计: ${data.stats.files_transferred || 0}个文件, ${data.stats.total_size || '未知'}大小`);
+                        addLogInfo(`⏱️ 传输耗时: ${data.stats.duration || '未知'}`);
+                    }
+
+                    // 自动刷新目标目录，显示最新传输的文件
+                    setTimeout(() => {
+                        const targetServer = document.getElementById('targetServer').value;
+                        const targetPath = document.getElementById('targetPath').value;
+
+                        if (targetServer && targetPath) {
+                            addLogInfo('🔄 自动刷新目标目录以显示最新文件...');
+                            refreshTargetAsync();
+                        }
+                    }, 1000); // 延迟1秒后刷新，确保文件系统同步
                 } else {
                     document.getElementById('transferStatus').textContent = '传输失败';
                     document.getElementById('progressBar').classList.add('bg-danger');
-                    addLog(`❌ 传输失败: ${data.message}`);
+                    addLogError(`❌ 传输失败: ${data.message}`);
                 }
 
                 setTimeout(resetTransferUI, 3000);
@@ -1268,13 +2152,16 @@
         // 处理取消传输响应
         socket.on('transfer_cancelled', function(data) {
             if (data.transfer_id === currentTransferId) {
+                // 传输取消，恢复日志记录
+                isTransferring = false;
+
                 if (data.status === 'success') {
                     document.getElementById('transferStatus').textContent = '传输已取消';
                     document.getElementById('progressBar').classList.remove('progress-bar-animated');
                     document.getElementById('progressBar').classList.add('bg-warning');
-                    addLog('⚠️ 传输已取消');
+                    addLogWarning('⚠️ 传输已取消');
                 } else {
-                    addLog(`❌ 取消传输失败: ${data.message}`);
+                    addLogError(`❌ 取消传输失败: ${data.message}`);
                 }
 
                 setTimeout(resetTransferUI, 2000);
@@ -1332,7 +2219,9 @@
 
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
-            addLog('🚀 Web文件传输系统已启动');
+            addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
+            addLogInfo('📋 请选择源服务器和目标服务器开始传输');
+            addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
 
             // 初始化面板调整功能
             initializeResizers();
