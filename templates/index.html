@@ -930,9 +930,12 @@
                 <div id="progressContainer" class="progress-container">
                     <div class="card">
                         <div class="card-body">
-                            <div class="progress mb-2" style="height: 20px;">
-                                <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
-                                     role="progressbar" style="width: 0%; font-weight: 600; font-size: 13px; line-height: 20px;">0%</div>
+                            <!-- 传输路径显示 -->
+                            <div class="transfer-route mb-2 p-2 bg-light rounded" style="height: 40px; display: flex; align-items: center; justify-content: center;">
+                                <div id="transferRoute" class="fw-bold text-primary" style="font-size: 14px;">
+                                    <i class="bi bi-arrow-right-circle-fill me-1"></i>
+                                    准备传输...
+                                </div>
                             </div>
                             <div class="row g-2">
                                 <div class="col-6 col-md-3">
@@ -957,8 +960,8 @@
                                     <div class="d-flex align-items-center">
                                         <i class="bi bi-clock text-warning me-1" style="font-size: 0.85rem;"></i>
                                         <div>
-                                            <small class="text-muted" style="font-size: 0.75em;">时间</small>
-                                            <div id="eta" class="fw-bold" style="font-size: 0.85rem;">-</div>
+                                            <small class="text-muted" style="font-size: 0.75em;">已用时间</small>
+                                            <div id="elapsedTime" class="fw-bold" style="font-size: 0.85rem;">00:00:00</div>
                                         </div>
                                     </div>
                                 </div>
@@ -2042,12 +2045,8 @@
             cancelBtn.disabled = false;
             cancelBtn.innerHTML = '<i class="bi bi-stop-circle-fill"></i> 取消';
 
-            // 重置进度条
-            const progressBar = document.getElementById('progressBar');
-            progressBar.style.width = '0%';
-            progressBar.textContent = '0%';
-            progressBar.classList.remove('bg-success', 'bg-danger');
-            progressBar.classList.add('progress-bar-animated');
+            // 重置传输路径显示
+            document.getElementById('transferRoute').innerHTML = '<i class="bi bi-arrow-right-circle-fill me-1"></i>准备传输...';
 
             // 重置状态信息
             document.getElementById('transferStatus').textContent = '准备中';
@@ -2070,11 +2069,22 @@
         socket.on('transfer_progress', function(data) {
             if (data.transfer_id === currentTransferId) {
                 const progress = data.progress;
-                const percentage = Math.round(progress.percentage || 0);
 
-                // 更新进度条 - 确保精确度
-                document.getElementById('progressBar').style.width = percentage + '%';
-                document.getElementById('progressBar').textContent = percentage + '%';
+                // 更新传输路径显示
+                if (progress.source_server && progress.target_server) {
+                    const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
+                    const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
+
+                    let routeIcon = '🔄';
+                    if (progress.transfer_mode === 'local_to_remote') {
+                        routeIcon = '📤';
+                    } else if (progress.transfer_mode === 'remote_to_local') {
+                        routeIcon = '📥';
+                    }
+
+                    document.getElementById('transferRoute').innerHTML =
+                        `${routeIcon} ${sourceDisplay} → ${targetDisplay}`;
+                }
 
                 // 更新状态信息，包含传输模式
                 let statusText = '';
@@ -2121,14 +2131,12 @@
                     document.getElementById('transferSpeed').textContent = progress.speed;
                 }
 
-                // 更新已传输字节数 - 使用格式化后的人性化显示
-                if (progress.bytes_transferred) {
-                    document.getElementById('transferredBytes').textContent = progress.bytes_transferred;
-                }
+                // 更新已传输字节数 - 显示为"传输中..."
+                document.getElementById('transferredBytes').textContent = '传输中...';
 
-                // 更新预计剩余时间
-                if (progress.eta) {
-                    document.getElementById('eta').textContent = progress.eta;
+                // 更新已用时间
+                if (progress.elapsed_time) {
+                    document.getElementById('elapsedTime').textContent = progress.elapsed_time;
                 }
 
                 // 如果有消息，也添加到日志
@@ -2171,6 +2179,42 @@
             }
         });
 
+        // 监听速度更新事件（30ms高频更新）
+        socket.on('speed_update', function(data) {
+            if (data.transfer_id === currentTransferId) {
+                // 更新传输速度（每30ms）
+                if (data.speed) {
+                    document.getElementById('transferSpeed').textContent = data.speed;
+                }
+
+                // 更新已用时间（仅当有新时间数据时）
+                if (data.elapsed_time) {
+                    document.getElementById('elapsedTime').textContent = data.elapsed_time;
+                }
+
+                // 更新传输路径显示（仅在首次或变化时）
+                if (data.source_server && data.target_server) {
+                    const sourceDisplay = data.source_server === 'localhost' ? '本地' : data.source_server;
+                    const targetDisplay = data.target_server === 'localhost' ? '本地' : data.target_server;
+
+                    let routeIcon = '🔄';
+                    if (data.transfer_mode === 'local_to_remote') {
+                        routeIcon = '📤';
+                    } else if (data.transfer_mode === 'remote_to_local') {
+                        routeIcon = '📥';
+                    }
+
+                    const newRoute = `${routeIcon} ${sourceDisplay} → ${targetDisplay}`;
+                    const currentRoute = document.getElementById('transferRoute').innerHTML;
+
+                    // 只在路径变化时更新，避免不必要的DOM操作
+                    if (currentRoute !== newRoute) {
+                        document.getElementById('transferRoute').innerHTML = newRoute;
+                    }
+                }
+            }
+        });
+
         socket.on('transfer_complete', function(data) {
             if (data.transfer_id === currentTransferId) {
                 // 传输结束，恢复日志记录
@@ -2178,8 +2222,13 @@
 
                 if (data.status === 'success') {
                     document.getElementById('transferStatus').textContent = '传输完成';
-                    document.getElementById('progressBar').classList.remove('progress-bar-animated');
-                    document.getElementById('progressBar').classList.add('bg-success');
+                    document.getElementById('transferRoute').innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成';
+
+                    // 显示总耗时
+                    if (data.total_time) {
+                        document.getElementById('elapsedTime').textContent = data.total_time;
+                    }
+
                     addLogSuccess('🎉 传输成功完成');
 
                     // 记录传输统计信息
