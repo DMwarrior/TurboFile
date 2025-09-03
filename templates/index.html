@@ -1091,7 +1091,6 @@
                     // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, path, true);
                     addLogInfo(`📁 已加载源目录: ${path} (${data.files.length}项)`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览源目录失败: ${data.error}`);
@@ -1140,7 +1139,6 @@
                     // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, targetPath, true);
                     addLogInfo(`📁 已进入源目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览源目录失败: ${data.error}`);
@@ -1191,7 +1189,6 @@
                     displayFiles('sourceFileBrowser', data.files, path, true);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
                     addLogSuccess(`🔄 已刷新源目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新源目录失败: ${data.error}`);
@@ -1243,7 +1240,6 @@
                     // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, path, false);
                     addLogInfo(`📂 已加载目标目录: ${path} (${data.files.length}项)`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览目标目录失败: ${data.error}`);
@@ -1292,7 +1288,6 @@
                     // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, targetPath, false);
                     addLogInfo(`📂 已进入目标目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览目标目录失败: ${data.error}`);
@@ -1343,7 +1338,6 @@
                     displayFiles('targetFileBrowser', data.files, path, false);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
                     addLogSuccess(`🔄 已刷新目标目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
-                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新目标目录失败: ${data.error}`);
@@ -1431,18 +1425,6 @@
 
             container.innerHTML = html;
 
-            // 恢复选中状态（仅对源文件）
-            if (isSource && selectedSourceFiles.length > 0) {
-                setTimeout(() => {
-                    selectedSourceFiles.forEach(selectedFile => {
-                        const fileElement = document.querySelector(`[data-path="${selectedFile.path}"]`);
-                        if (fileElement) {
-                            fileElement.classList.add('selected');
-                        }
-                    });
-                }, 50); // 短暂延迟确保DOM更新完成
-            }
-
             // 为目标文件浏览器添加拖拽接收功能
             if (!isSource) {
                 setupDropZone(container);
@@ -1469,7 +1451,6 @@
                 // 直接使用即时浏览，无加载动画
                 browseTargetInstant(path);
             }
-            savePageState(); // 保存状态
         }
 
         // 智能鼠标事件处理 - 区分单击和双击（无加载动画版本）
@@ -1508,7 +1489,6 @@
                         // 直接开始异步加载，不显示加载状态
                         browseTargetInstant(path);
                     }
-                    savePageState(); // 保存状态
                 }
             }
         }
@@ -1530,7 +1510,6 @@
                 // 直接开始异步加载，不显示加载状态
                 browseTargetInstant(path);
             }
-            savePageState(); // 保存状态
         }
 
         // 注意：加载动画相关函数已移除，实现无感双击进入文件夹
@@ -1619,7 +1598,6 @@
                 // 直接使用即时浏览，无加载动画
                 browseTargetInstant(path);
             }
-            savePageState(); // 保存状态
         }
 
         // 选择文件（支持多选）
@@ -1645,7 +1623,6 @@
             }
 
             updateSelectionInfo();
-            savePageState(); // 保存状态
         }
 
         // 清除所有选择
@@ -2158,120 +2135,22 @@
             return serverPaths[serverIP] || '/home/th';
         }
 
-        // 状态保存和恢复功能
-        function savePageState() {
-            const state = {
-                sourceServer: document.getElementById('sourceServer').value,
-                targetServer: document.getElementById('targetServer').value,
-                sourcePath: document.getElementById('sourcePath').value,
-                targetPath: document.getElementById('targetPath').value,
-                sourceShowHidden: document.getElementById('sourceShowHidden').checked,
-                targetShowHidden: document.getElementById('targetShowHidden').checked,
-                selectedSourceFiles: selectedSourceFiles,
-                timestamp: Date.now()
-            };
-            localStorage.setItem('turbofile_state', JSON.stringify(state));
-        }
-
-        function restorePageState() {
-            try {
-                const savedState = localStorage.getItem('turbofile_state');
-                if (!savedState) return false;
-
-                const state = JSON.parse(savedState);
-
-                // 检查状态是否过期（24小时）
-                if (Date.now() - state.timestamp > 24 * 60 * 60 * 1000) {
-                    localStorage.removeItem('turbofile_state');
-                    return false;
-                }
-
-                // 恢复服务器选择
-                if (state.sourceServer) {
-                    document.getElementById('sourceServer').value = state.sourceServer;
-                }
-                if (state.targetServer) {
-                    document.getElementById('targetServer').value = state.targetServer;
-                }
-
-                // 恢复路径
-                if (state.sourcePath) {
-                    document.getElementById('sourcePath').value = state.sourcePath;
-                }
-                if (state.targetPath) {
-                    document.getElementById('targetPath').value = state.targetPath;
-                }
-
-                // 恢复显示隐藏文件设置
-                if (state.sourceShowHidden !== undefined) {
-                    document.getElementById('sourceShowHidden').checked = state.sourceShowHidden;
-                }
-                if (state.targetShowHidden !== undefined) {
-                    document.getElementById('targetShowHidden').checked = state.targetShowHidden;
-                }
-
-                // 恢复选中的文件
-                if (state.selectedSourceFiles) {
-                    selectedSourceFiles = state.selectedSourceFiles;
-                }
-
-                return true;
-            } catch (error) {
-                console.error('恢复页面状态失败:', error);
-                localStorage.removeItem('turbofile_state');
-                return false;
-            }
-        }
-
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
-            // 尝试恢复之前的状态
-            const stateRestored = restorePageState();
-
-            if (stateRestored) {
-                addLogInfo('🔄 已恢复上次的浏览状态');
-
-                // 如果有保存的服务器和路径，自动加载文件列表
-                const sourceServer = document.getElementById('sourceServer').value;
-                const targetServer = document.getElementById('targetServer').value;
-                const sourcePath = document.getElementById('sourcePath').value;
-                const targetPath = document.getElementById('targetPath').value;
-
-                if (sourceServer && sourcePath) {
-                    setTimeout(() => {
-                        browseSourceInstant(sourcePath);
-                        addLogInfo(`📁 已恢复源目录: ${sourcePath}`);
-                    }, 200);
-                }
-
-                if (targetServer && targetPath) {
-                    setTimeout(() => {
-                        browseTargetInstant(targetPath);
-                        addLogInfo(`📂 已恢复目标目录: ${targetPath}`);
-                    }, 400);
-                }
-            } else {
-                addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
-                addLogInfo('📋 请选择源服务器和目标服务器开始传输');
-            }
-
+            addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
+            addLogInfo('📋 请选择源服务器和目标服务器开始传输');
             addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
 
             // 初始化面板调整功能
             initializeResizers();
 
-            // 服务器选择变化时自动浏览并保存状态
+            // 服务器选择变化时自动浏览
             document.getElementById('sourceServer').addEventListener('change', function() {
                 if (this.value) {
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     document.getElementById('sourcePath').value = defaultPath;
-                    setTimeout(() => {
-                        browseSource();
-                        savePageState(); // 保存状态
-                    }, 100);
-                } else {
-                    savePageState(); // 保存状态
+                    setTimeout(browseSource, 100);
                 }
             });
 
@@ -2280,31 +2159,8 @@
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     document.getElementById('targetPath').value = defaultPath;
-                    setTimeout(() => {
-                        browseTarget();
-                        savePageState(); // 保存状态
-                    }, 100);
-                } else {
-                    savePageState(); // 保存状态
+                    setTimeout(browseTarget, 100);
                 }
-            });
-
-            // 路径变化时保存状态
-            document.getElementById('sourcePath').addEventListener('input', function() {
-                savePageState();
-            });
-
-            document.getElementById('targetPath').addEventListener('input', function() {
-                savePageState();
-            });
-
-            // 显示隐藏文件设置变化时保存状态
-            document.getElementById('sourceShowHidden').addEventListener('change', function() {
-                savePageState();
-            });
-
-            document.getElementById('targetShowHidden').addEventListener('change', function() {
-                savePageState();
             });
         });
     </script>
