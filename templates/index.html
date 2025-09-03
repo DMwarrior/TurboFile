@@ -76,6 +76,9 @@
             /* 设置滚动条样式 */
             scrollbar-width: thin;
             scrollbar-color: var(--border-color) transparent;
+            /* 确保内容可以完全滚动 */
+            box-sizing: border-box;
+            position: relative;
         }
 
         .file-browser:hover {
@@ -114,7 +117,9 @@
             align-items: center;
             transition: all 0.2s ease;
             border-radius: 4px;
-            margin: 1px 2px;
+            margin: 1px 2px 1px 2px;
+            /* 确保最后一个文件项有足够的底部间距 */
+            min-height: 36px;
         }
 
         .file-item:hover {
@@ -173,8 +178,8 @@
             background: var(--card-bg);
             border: 1px solid var(--border-color);
             border-radius: 6px;
-            padding: 4px 6px;
-            margin-bottom: 3px;
+            padding: 3px 5px;
+            margin-bottom: 2px;
             box-shadow: var(--shadow-sm);
             transition: all 0.3s ease;
         }
@@ -229,6 +234,11 @@
         .file-item:active {
             transform: scale(0.98);
             transition: transform 0.05s ease-out;
+        }
+
+        /* 确保最后一个文件项有足够的底部间距 */
+        .file-item:last-child {
+            margin-bottom: 15px;
         }
 
         /* 刷新状态动画已移除 */
@@ -462,7 +472,8 @@
         h4, h6 {
             font-weight: 600;
             color: var(--text-primary);
-            margin-bottom: 3px;
+            margin-bottom: 2px;
+            margin-top: 1px;
         }
 
         .main-title {
@@ -470,11 +481,84 @@
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-            font-size: 1.3rem;
+            font-size: 1.1rem;
             font-weight: 700;
-            margin-bottom: 3px;
-            margin-top: 4px;
-            text-align: center;
+            margin: 0;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+        }
+
+        /* 公司品牌整体样式 */
+        .company-brand {
+            transition: all 0.3s ease;
+            filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.1));
+            display: flex;
+            align-items: center;
+            height: 32px; /* 与标题高度一致 */
+        }
+
+        .company-brand:hover {
+            transform: scale(1.03);
+            filter: drop-shadow(0 2px 6px rgba(20, 184, 166, 0.2));
+        }
+
+        .company-brand svg {
+            vertical-align: middle;
+        }
+
+        /* 产品品牌整体样式 */
+        .product-brand {
+            display: flex;
+            align-items: center;
+            height: 32px;
+        }
+
+
+
+
+
+        /* 响应式品牌调整 */
+        @media (max-width: 768px) {
+            .company-brand {
+                height: 26px;
+                margin-right: 30px !important;
+            }
+
+            .company-brand svg {
+                width: 130px;
+                height: 26px;
+            }
+
+            .product-brand {
+                height: 26px;
+                margin-left: 12px !important;
+            }
+
+            .main-title {
+                font-size: 1.0rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .company-brand {
+                height: 22px;
+                margin-right: 20px !important;
+            }
+
+            .company-brand svg {
+                width: 110px;
+                height: 22px;
+            }
+
+            .product-brand {
+                height: 22px;
+                margin-left: 10px !important;
+            }
+
+            .main-title {
+                font-size: 0.9rem;
+            }
         }
 
         /* 确保完全单屏显示 */
@@ -503,6 +587,8 @@
             position: relative;
             /* 优化滚动性能 */
             will-change: scroll-position;
+            /* 确保滚动到底部时有足够的空间 */
+            scroll-padding-bottom: 20px;
         }
 
         /* 日志区域样式 */
@@ -612,13 +698,13 @@
             }
 
             .main-title {
-                font-size: 1.1rem;
-                margin-bottom: 4px;
+                font-size: 1.0rem;
+                margin: 0;
             }
 
             .server-panel {
-                padding: 4px 6px;
-                margin-bottom: 3px;
+                padding: 3px 5px;
+                margin-bottom: 2px;
             }
 
             .file-item {
@@ -645,7 +731,8 @@
             }
 
             .main-title {
-                font-size: 1rem;
+                font-size: 0.9rem;
+                margin: 0;
             }
 
             .file-item {
@@ -657,14 +744,13 @@
         /* 高度限制优化 */
         @media (max-height: 800px) {
             .main-title {
-                font-size: 1.1rem;
-                margin-bottom: 2px;
-                margin-top: 2px;
+                font-size: 0.95rem;
+                margin: 0;
             }
 
             .server-panel {
-                padding: 3px 5px;
-                margin-bottom: 2px;
+                padding: 2px 4px;
+                margin-bottom: 1px;
             }
 
             .card-body {
@@ -683,26 +769,52 @@
     </style>
 </head>
 <body>
-    <div class="container-fluid">
+    <div class="container-fluid" style="position: relative;">
+
+
         <!-- 标题区域 -->
-        <div class="row flex-shrink-0">
+        <div class="row flex-shrink-0" style="margin-bottom: 2px;">
             <div class="col-12">
-                <h4 class="main-title">
-                    <i class="bi bi-lightning-charge-fill" style="color: #ffc107; font-size: 1.2em;"></i>
-                    极速传
-                    <small class="d-block" style="font-size: 0.7em; opacity: 0.8;">高速文件传输系统</small>
-                </h4>
+                <div class="d-flex align-items-center justify-content-center">
+                    <!-- TAIHO公司整体 (LOGO + TAIHO + 泰禾) -->
+                    <div class="company-brand d-flex align-items-center" style="margin-right: 40px;">
+                        <svg width="160" height="32" viewBox="0 0 160 36" xmlns="http://www.w3.org/2000/svg">
+                            <!-- TAIHO标志性几何图形 -->
+                            <g>
+                                <!-- 左侧图标 - 现代化几何设计 -->
+                                <rect x="2" y="6" width="10" height="24" fill="#14b8a6" rx="2"/>
+                                <rect x="16" y="6" width="10" height="24" fill="#0891b2" rx="2"/>
+                                <!-- 连接元素 -->
+                                <circle cx="7" cy="9" r="2" fill="#06b6d4"/>
+                                <circle cx="21" cy="9" r="2" fill="#0284c7"/>
+
+                                <!-- TAIHO文字 - 与LOGO保持相同距离，使用与泰禾相同的颜色 -->
+                                <text x="32" y="26" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="700" fill="#14b8a6">TAIHO</text>
+                                <!-- 泰禾文字 - 与TAIHO保持与LOGO到TAIHO相同的距离 -->
+                                <text x="102" y="26" font-family="'Microsoft YaHei', sans-serif" font-size="18" font-weight="700" fill="#14b8a6">泰禾</text>
+                            </g>
+                        </svg>
+                    </div>
+
+                    <!-- 极速传标题整体 - 与目标服务器左边对齐 -->
+                    <div class="product-brand d-flex align-items-center" style="margin-left: 15px;">
+                        <h4 class="main-title d-flex align-items-center" style="margin: 0; line-height: 1;">
+                            <i class="bi bi-lightning-charge-fill" style="color: #ffc107; font-size: 1.0em; margin-right: 6px;"></i>
+                            <span>极速传</span>
+                        </h4>
+                    </div>
+                </div>
             </div>
         </div>
 
         <!-- 服务器选择面板 -->
-        <div class="row g-1 flex-shrink-0">
+        <div class="row g-1 flex-shrink-0" style="margin-bottom: 3px;">
             <div class="col-md-6">
-                <div class="server-panel">
-                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                <div class="server-panel" style="padding: 4px 6px;">
+                    <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
                         <i class="bi bi-hdd-network-fill text-primary"></i> 源服务器
                     </h6>
-                    <select id="sourceServer" class="form-select mb-2">
+                    <select id="sourceServer" class="form-select mb-1" style="font-size: 0.85rem;">
                         <option value="">🔍 请选择源服务器</option>
                         {% for ip, info in servers.items() %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
@@ -720,11 +832,11 @@
                 </div>
             </div>
             <div class="col-md-6">
-                <div class="server-panel">
-                    <h6 style="font-size: 0.9rem; margin-bottom: 3px;">
+                <div class="server-panel" style="padding: 4px 6px;">
+                    <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
                         <i class="bi bi-cloud-upload-fill text-success"></i> 目标服务器
                     </h6>
-                    <select id="targetServer" class="form-select mb-2">
+                    <select id="targetServer" class="form-select mb-1" style="font-size: 0.85rem;">
                         <option value="">🎯 请选择目标服务器</option>
                         {% for ip, info in servers.items() %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
@@ -762,7 +874,7 @@
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
                     </div>
-                    <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 35px);">
+                    <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
                             <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
                             <p class="mb-0" style="font-size: 0.85rem;">请先选择源服务器</p>
@@ -788,7 +900,7 @@
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
                     </div>
-                    <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 35px);">
+                    <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
                             <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
                             <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
@@ -917,6 +1029,7 @@
                 </div>
             </div>
         </div>
+
 
 
     </div>
@@ -1422,6 +1535,9 @@
                     </div>`;
                 }
             });
+
+            // 添加底部间距确保最后一个文件可见
+            html += '<div style="height: 20px;"></div>';
 
             container.innerHTML = html;
 
@@ -2135,11 +2251,20 @@
             return serverPaths[serverIP] || '/home/th';
         }
 
+        // LOGO显示方案切换函数（保留备用）
+        function switchLogoDisplay(mode) {
+            // 当前使用方案一（标题并排），其他方案已隐藏
+            console.log(`LOGO显示模式: ${mode === 'header' ? '标题并排（当前）' : mode}`);
+        }
+
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
             addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
             addLogInfo('📋 请选择源服务器和目标服务器开始传输');
             addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
+
+            // 默认使用标题并排模式，您可以调用 switchLogoDisplay('watermark') 或 switchLogoDisplay('footer') 切换
+            switchLogoDisplay('header');
 
             // 初始化面板调整功能
             initializeResizers();
