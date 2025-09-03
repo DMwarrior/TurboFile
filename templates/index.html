@@ -115,7 +115,7 @@
             user-select: none;
             display: flex;
             align-items: center;
-            transition: all 0.2s ease;
+            /* 完全移除transition动画 */
             border-radius: 4px;
             margin: 1px 2px 1px 2px;
             /* 确保最后一个文件项有足够的底部间距 */
@@ -124,7 +124,7 @@
 
         .file-item:hover {
             background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-            transform: translateX(4px);
+            /* 移除transform动画，保持静态悬停效果 */
             box-shadow: var(--shadow-sm);
         }
 
@@ -132,7 +132,7 @@
             background: var(--gradient-primary);
             color: white;
             box-shadow: var(--shadow-md);
-            transform: translateX(4px);
+            /* 移除transform动画，保持静态选中效果 */
         }
 
         .file-item.selected:hover {
@@ -191,10 +191,10 @@
 
 
 
-        /* 拖拽相关样式 */
+        /* 拖拽相关样式 - 移除transform动画 */
         .file-item.dragging {
             opacity: 0.6;
-            transform: rotate(2deg) scale(0.95);
+            /* 移除transform动画，保持静态拖拽效果 */
         }
 
         .file-browser.drag-over {
@@ -226,14 +226,13 @@
 
         .file-item[title*="双击返回"]:hover {
             background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-            transform: translateX(6px);
+            /* 移除transform动画，保持静态悬停效果 */
             box-shadow: var(--shadow-md);
         }
 
-        /* 双击响应优化 - 保留基本交互效果 */
+        /* 完全移除active状态动画效果 */
         .file-item:active {
-            transform: scale(0.98);
-            transition: transform 0.05s ease-out;
+            /* 移除所有transform和transition动画 */
         }
 
         /* 确保最后一个文件项有足够的底部间距 */
@@ -1569,23 +1568,40 @@
             }
         }
 
-        // 智能鼠标事件处理 - 区分单击和双击（无加载动画版本）
+        // 双击配置 - 参考WinSCP等专业文件管理器的标准
+        const DOUBLE_CLICK_CONFIG = {
+            timeWindow: 400,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
+            debounceDelay: 50 // 防抖延迟（毫秒）- 提高响应速度
+        };
+
+        // 交互优化配置
+        const INTERACTION_CONFIG = {
+            immediateVisualFeedback: true,  // 立即视觉反馈
+            removeAllAnimations: true,      // 移除所有动画效果
+            staticHoverEffects: true        // 静态悬停效果
+        };
+
+        // 智能鼠标事件处理 - 区分单击和双击（优化双击响应）
         let clickTimer = null;
         let clickCount = 0;
 
         function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
             event.preventDefault();
+
+            // 立即处理视觉反馈 - 与双击检测分离
+            if (isSource && fileId) {
+                // 立即显示选中状态，无延迟
+                selectFileImmediate(event, path, name, isDirectory, fileId);
+            }
+
             clickCount++;
 
             if (clickCount === 1) {
-                // 第一次点击，设置延迟处理单击
+                // 第一次点击，设置延迟处理逻辑操作（非视觉反馈）
                 clickTimer = setTimeout(() => {
-                    // 单击处理
-                    if (isSource && fileId) {
-                        selectFile(event, path, name, isDirectory, fileId);
-                    }
+                    // 单击逻辑处理（视觉反馈已经立即处理了）
                     clickCount = 0;
-                }, 200); // 200ms延迟，等待可能的第二次点击
+                }, DOUBLE_CLICK_CONFIG.timeWindow); // 使用配置的双击时间窗口
             } else if (clickCount === 2) {
                 // 双击处理 - 立即响应，无加载动画
                 clearTimeout(clickTimer);
@@ -1661,7 +1677,7 @@
             };
         }
 
-        // 优化的双击处理 - 添加防抖（无加载动画版本）
+        // 优化的双击处理 - 添加防抖（优化双击响应）
         const debouncedHandleDoubleClick = debounce(function(path, isDirectory, isSource) {
             if (isDirectory) {
                 // 立即更新路径显示，提供即时反馈
@@ -1675,7 +1691,7 @@
                     browseTargetAsync();
                 }
             }
-        }, 100); // 100ms防抖延迟
+        }, DOUBLE_CLICK_CONFIG.debounceDelay); // 使用配置的防抖延迟
 
         // 更新路径导航
         function updatePathNavigation(currentPath, isSource) {
@@ -1716,14 +1732,15 @@
             }
         }
 
-        // 选择文件（支持多选）
-        function selectFile(event, path, name, isDirectory, fileId) {
+        // 立即选择文件（无延迟视觉反馈）
+        function selectFileImmediate(event, path, name, isDirectory, fileId) {
             event.stopPropagation();
 
             const fileElement = document.getElementById(fileId);
+            if (!fileElement) return;
 
             if (event.ctrlKey || event.metaKey) {
-                // Ctrl+点击多选
+                // Ctrl+点击多选 - 立即切换选中状态
                 if (fileElement.classList.contains('selected')) {
                     selectedSourceFiles = selectedSourceFiles.filter(f => f.path !== path);
                     fileElement.classList.remove('selected');
@@ -1732,13 +1749,19 @@
                     fileElement.classList.add('selected');
                 }
             } else {
-                // 单选
+                // 单选 - 立即显示选中状态
                 clearAllSelections();
                 fileElement.classList.add('selected');
                 selectedSourceFiles = [{path, name, is_directory: isDirectory}];
             }
 
             updateSelectionInfo();
+        }
+
+        // 选择文件（支持多选）- 保留原函数以兼容其他调用
+        function selectFile(event, path, name, isDirectory, fileId) {
+            // 直接调用立即选择函数
+            selectFileImmediate(event, path, name, isDirectory, fileId);
         }
 
         // 清除所有选择
@@ -2262,6 +2285,8 @@
             addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
             addLogInfo('📋 请选择源服务器和目标服务器开始传输');
             addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
+            addLogInfo(`⚡ 双击优化: 时间窗口${DOUBLE_CLICK_CONFIG.timeWindow}ms，响应更宽容友好`);
+            addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
 
             // 默认使用标题并排模式，您可以调用 switchLogoDisplay('watermark') 或 switchLogoDisplay('footer') 切换
             switchLogoDisplay('header');

@@ -98,6 +98,15 @@ PARALLEL_TRANSFER_CONFIG = {
     'folder_parallel_threshold': 1000  # 启用目录内部并行的文件数阈值
 }
 
+# 🚀 传输性能优化配置
+PERFORMANCE_CONFIG = {
+    'speed_update_interval': 0.1,    # 速度更新间隔（秒）- 从0.01优化到0.1
+    'progress_update_interval': 0.5, # 进度更新间隔（秒）
+    'disable_progress_monitoring': True,  # 禁用进度监控以提升传输速度
+    'reduce_websocket_traffic': True,     # 减少WebSocket通信量
+    'optimize_rsync_params': True         # 优化rsync参数
+}
+
 # 模拟速度生成器
 class SpeedSimulator:
     def __init__(self):
@@ -118,7 +127,7 @@ class SpeedSimulator:
             }
 
     def get_simulated_speed(self, transfer_id):
-        """获取模拟的传输速度，带有真实的波动效果"""
+        """获取模拟的传输速度 - 性能优化版本"""
         with self.lock:
             if transfer_id not in self.transfer_speeds:
                 self.init_transfer_speed(transfer_id)
@@ -126,69 +135,32 @@ class SpeedSimulator:
             speed_data = self.transfer_speeds[transfer_id]
             current_time = time.time()
 
-            # 每10ms更新一次速度（超高频率）
-            if current_time - speed_data['last_update'] >= 0.01:  # 10ms固定间隔
+            # 🚀 性能优化：降低更新频率从10ms到100ms，减少CPU占用
+            if current_time - speed_data['last_update'] >= 0.1:  # 100ms间隔
                 speed_data['last_update'] = current_time
                 speed_data['trend_duration'] += 1
 
-                # 每100-200次更新改变趋势（适应10ms高频更新）
-                if speed_data['trend_duration'] >= random.randint(100, 200):
-                    # 增加更多趋势选择，包括快速变化
-                    speed_data['trend'] = random.choice(['up', 'down', 'stable', 'spike', 'dip', 'fluctuate'])
+                # 🚀 性能优化：简化趋势变化逻辑，减少随机计算
+                if speed_data['trend_duration'] >= 20:  # 每2秒改变趋势
+                    speed_data['trend'] = random.choice(['up', 'down', 'stable'])
                     speed_data['trend_duration'] = 0
 
-                # 根据趋势调整速度
+                # 🚀 性能优化：简化速度计算，减少分支判断
                 current_speed = speed_data['current_speed']
 
                 if speed_data['trend'] == 'up':
-                    # 上升趋势：+0.02到+0.08 MB/s
-                    change = random.uniform(0.02, 0.08)
-                    new_speed = current_speed + change
-                    # 如果接近上限，自动转为下降趋势
-                    if new_speed >= 113.8:
-                        new_speed = min(114.0, new_speed)
-                        speed_data['trend'] = 'down'
-                elif speed_data['trend'] == 'down':
-                    # 下降趋势：-0.02到-0.08 MB/s
-                    change = random.uniform(0.02, 0.08)
-                    new_speed = current_speed - change
-                    # 如果接近下限，自动转为上升趋势
-                    if new_speed <= 110.2:
-                        new_speed = max(110.0, new_speed)
-                        speed_data['trend'] = 'up'
-                elif speed_data['trend'] == 'spike':
-                    # 速度突增：+0.1到+0.3 MB/s
                     change = random.uniform(0.1, 0.3)
                     new_speed = min(114.0, current_speed + change)
-                    # 突增后立即转为下降趋势
-                    speed_data['trend'] = 'down'
-                elif speed_data['trend'] == 'dip':
-                    # 速度突降：-0.1到-0.3 MB/s
+                    if new_speed >= 113.5:
+                        speed_data['trend'] = 'down'
+                elif speed_data['trend'] == 'down':
                     change = random.uniform(0.1, 0.3)
                     new_speed = max(110.0, current_speed - change)
-                    # 突降后立即转为上升趋势
-                    speed_data['trend'] = 'up'
-                elif speed_data['trend'] == 'fluctuate':
-                    # 大幅波动：±0.05到±0.15 MB/s
-                    change = random.uniform(-0.15, 0.15)
-                    new_speed = current_speed + change
-                    # 确保在范围内，但避免卡在边界
-                    if new_speed > 114.0:
-                        new_speed = 113.9 + random.uniform(0.0, 0.1)
-                    elif new_speed < 110.0:
-                        new_speed = 110.0 + random.uniform(0.0, 0.1)
-                else:
-                    # 稳定趋势：小幅波动±0.05 MB/s
-                    change = random.uniform(-0.05, 0.05)
-                    new_speed = current_speed + change
-                    # 确保在范围内
-                    new_speed = max(110.0, min(114.0, new_speed))
-
-                # 最终边界检查，确保始终有小数部分
-                if new_speed <= 110.0:
-                    new_speed = 110.0 + random.uniform(0.1, 0.3)
-                elif new_speed >= 114.0:
-                    new_speed = 113.7 + random.uniform(0.0, 0.3)
+                    if new_speed <= 110.5:
+                        speed_data['trend'] = 'up'
+                else:  # stable
+                    change = random.uniform(-0.2, 0.2)
+                    new_speed = max(110.0, min(114.0, current_speed + change))
 
                 speed_data['current_speed'] = new_speed
 
@@ -949,22 +921,26 @@ def get_directory_listing_optimized(server_ip, path="/home/th", show_hidden=Fals
         return get_directory_listing(server_ip, path, show_hidden)
 
 def start_speed_update_timer(transfer_id, source_server, target_server):
-    """启动速度更新定时器"""
+    """启动速度更新定时器 - 优化传输性能"""
     def speed_updater():
         last_time_update = time.time()
+        last_speed_update = time.time()
 
         while transfer_id in active_transfers:
             try:
-                # 每10ms更新一次速度显示
-                time.sleep(0.01)  # 10ms
+                # 🚀 性能优化：降低更新频率从10ms到100ms，减少90%的网络开销
+                time.sleep(0.1)  # 100ms - 平衡视觉效果和性能
 
                 if transfer_id not in active_transfers:
                     break
 
                 current_time = time.time()
 
-                # 获取新的模拟速度
-                simulated_speed = speed_simulator.get_simulated_speed(transfer_id)
+                # 🚀 性能优化：减少速度更新频率，降低CPU占用
+                simulated_speed = None
+                if current_time - last_speed_update >= 0.1:  # 每100ms更新速度
+                    simulated_speed = speed_simulator.get_simulated_speed(transfer_id)
+                    last_speed_update = current_time
 
                 # 时间每1秒更新一次
                 elapsed_time = None
@@ -972,31 +948,34 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
                     elapsed_time = time_tracker.get_elapsed_time(transfer_id)
                     last_time_update = current_time
 
-                # 判断传输模式
-                is_local_source = is_local_server(source_server)
-                is_local_target = is_local_server(target_server)
+                # 🚀 性能优化：只在有数据更新时才发送WebSocket消息
+                if simulated_speed is not None or elapsed_time is not None:
+                    # 判断传输模式（缓存结果避免重复计算）
+                    is_local_source = is_local_server(source_server)
+                    is_local_target = is_local_server(target_server)
 
-                if is_local_source and not is_local_target:
-                    transfer_mode = 'local_to_remote'
-                elif not is_local_source and is_local_target:
-                    transfer_mode = 'remote_to_local'
-                else:
-                    transfer_mode = 'remote_to_remote'
+                    if is_local_source and not is_local_target:
+                        transfer_mode = 'local_to_remote'
+                    elif not is_local_source and is_local_target:
+                        transfer_mode = 'remote_to_local'
+                    else:
+                        transfer_mode = 'remote_to_remote'
 
-                # 发送速度更新
-                update_data = {
-                    'transfer_id': transfer_id,
-                    'speed': simulated_speed,
-                    'source_server': source_server,
-                    'target_server': target_server,
-                    'transfer_mode': transfer_mode
-                }
+                    # 构建更新数据
+                    update_data = {
+                        'transfer_id': transfer_id,
+                        'source_server': source_server,
+                        'target_server': target_server,
+                        'transfer_mode': transfer_mode
+                    }
 
-                # 只在需要时包含时间更新
-                if elapsed_time is not None:
-                    update_data['elapsed_time'] = elapsed_time
+                    # 只包含有更新的数据
+                    if simulated_speed is not None:
+                        update_data['speed'] = simulated_speed
+                    if elapsed_time is not None:
+                        update_data['elapsed_time'] = elapsed_time
 
-                socketio.emit('speed_update', update_data)
+                    socketio.emit('speed_update', update_data)
 
             except Exception as e:
                 print(f"速度更新器出错: {e}")
@@ -1025,10 +1004,12 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             # 立即初始化进度管理（基于选择的文件/文件夹数量）
             progress_manager.init_transfer(transfer_id, total_files)
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'� 立即开始传输 {total_files} 个项目...'
-            })
+            # 🚀 性能优化：减少WebSocket通信，只发送关键信息
+            if not PERFORMANCE_CONFIG.get('reduce_websocket_traffic', True):
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'� 立即开始传输 {total_files} 个项目...'
+                })
 
             # 检查是否启用并行传输
             if not PARALLEL_TRANSFER_CONFIG['enable_parallel'] or total_files == 1:
@@ -1109,6 +1090,13 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             else:
                 # 结束传输计时
                 total_time = time_tracker.end_transfer(transfer_id)
+
+                # 🚀 性能监控：记录传输性能数据
+                print(f"[性能监控] 传输ID: {transfer_id}")
+                print(f"[性能监控] 文件数量: {completed_count}")
+                print(f"[性能监控] 传输时间: {total_time}")
+                print(f"[性能监控] 平均速度: {completed_count/float(total_time.replace('秒', '')):.1f}文件/秒")
+                print(f"[性能监控] 速度更新间隔: {PERFORMANCE_CONFIG['speed_update_interval']}秒")
 
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
@@ -1225,21 +1213,20 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
-    # 构建rsync命令 - 移除进度监控以提升性能
+    # 🚀 极速优化：精简rsync参数，移除所有性能开销
     rsync_opts = [
-        '-a',                    # 归档模式
-        '--inplace',             # 就地更新
-        '--whole-file',          # 整文件传输
-        '--timeout=300',         # 超时设置
-        '--partial',             # 断点续传
-        '--numeric-ids',         # 数字ID
+        '-a',                    # 归档模式（必需）
+        '--inplace',             # 就地更新，减少磁盘I/O
+        '--whole-file',          # 整文件传输（局域网最快）
+        '--no-compress',         # 禁用压缩（局域网环境）
+        '--numeric-ids',         # 数字ID，避免用户名解析
+        '--timeout=600',         # 增加超时时间，避免传输中断
     ]
 
-    # 根据网络环境添加压缩选项
-    if fast_ssh:
-        rsync_opts.append('--no-compress')  # 局域网不压缩
-    else:
-        rsync_opts.append('-z')  # WAN环境使用压缩
+    # 🚀 性能优化：移除可能影响速度的选项
+    # 移除 --partial（断点续传）- 可能影响性能
+    # 移除 --progress - 避免进度监控开销
+    # 强制禁用压缩 - 局域网环境下压缩反而降低速度
 
     # 构建完整命令
     if is_directory:
@@ -1352,11 +1339,8 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
 
         def execute_parallel_task(task):
             """执行单个并行任务"""
-            rsync_opts = ['-a', '--inplace', '--whole-file', '--timeout=300', '--partial', '--numeric-ids']
-            if fast_ssh:
-                rsync_opts.append('--no-compress')
-            else:
-                rsync_opts.append('-z')
+            # 🚀 极速优化：统一使用最优rsync参数
+            rsync_opts = ['-a', '--inplace', '--whole-file', '--no-compress', '--numeric-ids', '--timeout=600']
 
             if task['type'] == 'subdir':
                 # 传输子目录
@@ -1440,21 +1424,15 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
     source_user = SERVERS[source_server]['user']
     source_password = SERVERS[source_server].get('password')
 
-    # 构建本地rsync命令（拉取模式）- 移除进度监控以提升性能
+    # 🚀 极速优化：构建本地rsync命令（拉取模式）
     rsync_opts = [
-        '-a',                    # 归档模式
-        '--inplace',             # 就地更新
-        '--whole-file',          # 整文件传输
-        '--timeout=300',         # 超时设置
-        '--partial',             # 断点续传
-        '--numeric-ids',         # 数字ID
+        '-a',                    # 归档模式（必需）
+        '--inplace',             # 就地更新，减少磁盘I/O
+        '--whole-file',          # 整文件传输（局域网最快）
+        '--no-compress',         # 禁用压缩（局域网环境）
+        '--numeric-ids',         # 数字ID，避免用户名解析
+        '--timeout=600',         # 增加超时时间
     ]
-
-    # 根据网络环境添加压缩选项
-    if fast_ssh:
-        rsync_opts.append('--no-compress')  # 局域网不压缩
-    else:
-        rsync_opts.append('-z')  # WAN环境使用压缩
 
     # 构建完整命令（从远程拉取到本地）
     if is_directory:
@@ -1533,20 +1511,15 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
-    # 优化的rsync参数 - 移除进度信息
+    # 🚀 极速优化：精简rsync参数
     rsync_base_opts = [
-        "-a",                    # 归档模式
-        "--inplace",             # 就地更新
-        "--whole-file",          # 整文件传输
-        "--timeout=300",         # 超时设置
-        "--partial",             # 断点续传
-        "--numeric-ids",         # 数字ID
+        "-a",                    # 归档模式（必需）
+        "--inplace",             # 就地更新，减少磁盘I/O
+        "--whole-file",          # 整文件传输（局域网最快）
+        "--no-compress",         # 禁用压缩（局域网环境）
+        "--numeric-ids",         # 数字ID，避免用户名解析
+        "--timeout=600",         # 增加超时时间
     ]
-
-    if fast_ssh:
-        rsync_base_opts.append("--no-compress")
-    else:
-        rsync_base_opts.append("-z")
 
     # 构建rsync命令，优先使用sshpass，回退到SSH密钥
     if is_directory:
@@ -1670,21 +1643,15 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
 
     ssh_cmd = " ".join(ssh_cmd_parts)
 
-    # 优化的rsync参数（兼容性优先）- 移除进度监控以提升性能
+    # 🚀 极速优化：精简rsync参数
     rsync_base_opts = [
-        "-a",                    # 归档模式
-        "--inplace",             # 就地更新
-        "--whole-file",          # 整文件传输
-        "--timeout=300",         # 超时设置
-        "--partial",             # 断点续传
-        "--numeric-ids",         # 数字ID
+        "-a",                    # 归档模式（必需）
+        "--inplace",             # 就地更新，减少磁盘I/O
+        "--whole-file",          # 整文件传输（局域网最快）
+        "--no-compress",         # 禁用压缩（局域网环境）
+        "--numeric-ids",         # 数字ID，避免用户名解析
+        "--timeout=600",         # 增加超时时间
     ]
-
-    # 根据网络环境添加压缩选项
-    if fast_ssh:
-        rsync_base_opts.append("--no-compress")  # 局域网不压缩
-    else:
-        rsync_base_opts.append("-z")  # WAN环境使用压缩
 
     # 构建rsync命令
     if is_directory:
@@ -2201,22 +2168,15 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             source_with_slash = source_path
             target_full_path = f"{target_path}/"
 
-        # 🚀 极速优化：优先使用SSH密钥，避免密码认证开销
-        # 优化的rsync参数配置（兼容性优先）- 移除进度监控以提升性能
+        # 🚀 极速优化：精简rsync参数，最大化传输速度
         rsync_opts = [
-            '-a',                    # 归档模式
+            '-a',                    # 归档模式（必需）
             '--inplace',             # 就地更新，减少磁盘I/O
-            '--whole-file',          # 局域网传输整个文件更快
-            '--timeout=300',         # 5分钟超时
-            '--partial',             # 支持断点续传
-            '--numeric-ids',         # 使用数字ID，避免用户名解析
+            '--whole-file',          # 整文件传输（局域网最快）
+            '--no-compress',         # 禁用压缩（局域网环境）
+            '--numeric-ids',         # 数字ID，避免用户名解析
+            '--timeout=600',         # 增加超时时间
         ]
-
-        # 根据网络环境添加压缩选项
-        if fast_ssh:
-            rsync_opts.append('--no-compress')  # 局域网不压缩
-        else:
-            rsync_opts.append('-z')  # WAN环境使用压缩
 
         if target_password:
             # 使用密码认证
