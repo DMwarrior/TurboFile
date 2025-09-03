@@ -107,8 +107,8 @@ class SpeedSimulator:
     def init_transfer_speed(self, transfer_id):
         """初始化传输速度"""
         with self.lock:
-            # 初始速度在105-113之间
-            initial_speed = random.uniform(105.0, 113.0)
+            # 初始速度在110-114之间
+            initial_speed = random.uniform(110.0, 114.0)
             self.transfer_speeds[transfer_id] = {
                 'current_speed': initial_speed,
                 'last_update': time.time(),
@@ -126,44 +126,69 @@ class SpeedSimulator:
             speed_data = self.transfer_speeds[transfer_id]
             current_time = time.time()
 
-            # 每30-50ms更新一次速度（超高频率）
-            if current_time - speed_data['last_update'] >= random.uniform(0.03, 0.05):
+            # 每10ms更新一次速度（超高频率）
+            if current_time - speed_data['last_update'] >= 0.01:  # 10ms固定间隔
                 speed_data['last_update'] = current_time
                 speed_data['trend_duration'] += 1
 
-                # 每50-100次更新改变趋势（适应30ms高频更新）
-                if speed_data['trend_duration'] >= random.randint(50, 100):
+                # 每100-200次更新改变趋势（适应10ms高频更新）
+                if speed_data['trend_duration'] >= random.randint(100, 200):
                     # 增加更多趋势选择，包括快速变化
-                    speed_data['trend'] = random.choice(['up', 'down', 'stable', 'spike', 'dip'])
+                    speed_data['trend'] = random.choice(['up', 'down', 'stable', 'spike', 'dip', 'fluctuate'])
                     speed_data['trend_duration'] = 0
 
                 # 根据趋势调整速度
                 current_speed = speed_data['current_speed']
 
                 if speed_data['trend'] == 'up':
-                    # 上升趋势：+0.01到+0.05 MB/s（小步长，高频更新）
-                    change = random.uniform(0.01, 0.05)
-                    new_speed = min(113.0, current_speed + change)
+                    # 上升趋势：+0.02到+0.08 MB/s
+                    change = random.uniform(0.02, 0.08)
+                    new_speed = current_speed + change
+                    # 如果接近上限，自动转为下降趋势
+                    if new_speed >= 113.8:
+                        new_speed = min(114.0, new_speed)
+                        speed_data['trend'] = 'down'
                 elif speed_data['trend'] == 'down':
-                    # 下降趋势：-0.01到-0.05 MB/s
-                    change = random.uniform(0.01, 0.05)
-                    new_speed = max(105.0, current_speed - change)
+                    # 下降趋势：-0.02到-0.08 MB/s
+                    change = random.uniform(0.02, 0.08)
+                    new_speed = current_speed - change
+                    # 如果接近下限，自动转为上升趋势
+                    if new_speed <= 110.2:
+                        new_speed = max(110.0, new_speed)
+                        speed_data['trend'] = 'up'
                 elif speed_data['trend'] == 'spike':
-                    # 速度突增：+0.05到+0.15 MB/s
-                    change = random.uniform(0.05, 0.15)
-                    new_speed = min(113.0, current_speed + change)
+                    # 速度突增：+0.1到+0.3 MB/s
+                    change = random.uniform(0.1, 0.3)
+                    new_speed = min(114.0, current_speed + change)
                     # 突增后立即转为下降趋势
                     speed_data['trend'] = 'down'
                 elif speed_data['trend'] == 'dip':
-                    # 速度突降：-0.05到-0.15 MB/s
-                    change = random.uniform(0.05, 0.15)
-                    new_speed = max(105.0, current_speed - change)
+                    # 速度突降：-0.1到-0.3 MB/s
+                    change = random.uniform(0.1, 0.3)
+                    new_speed = max(110.0, current_speed - change)
                     # 突降后立即转为上升趋势
                     speed_data['trend'] = 'up'
+                elif speed_data['trend'] == 'fluctuate':
+                    # 大幅波动：±0.05到±0.15 MB/s
+                    change = random.uniform(-0.15, 0.15)
+                    new_speed = current_speed + change
+                    # 确保在范围内，但避免卡在边界
+                    if new_speed > 114.0:
+                        new_speed = 113.9 + random.uniform(0.0, 0.1)
+                    elif new_speed < 110.0:
+                        new_speed = 110.0 + random.uniform(0.0, 0.1)
                 else:
-                    # 稳定趋势：小幅波动±0.03 MB/s
-                    change = random.uniform(-0.03, 0.03)
-                    new_speed = max(105.0, min(113.0, current_speed + change))
+                    # 稳定趋势：小幅波动±0.05 MB/s
+                    change = random.uniform(-0.05, 0.05)
+                    new_speed = current_speed + change
+                    # 确保在范围内
+                    new_speed = max(110.0, min(114.0, new_speed))
+
+                # 最终边界检查，确保始终有小数部分
+                if new_speed <= 110.0:
+                    new_speed = 110.0 + random.uniform(0.1, 0.3)
+                elif new_speed >= 114.0:
+                    new_speed = 113.7 + random.uniform(0.0, 0.3)
 
                 speed_data['current_speed'] = new_speed
 
@@ -930,8 +955,8 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
 
         while transfer_id in active_transfers:
             try:
-                # 每30ms更新一次速度显示
-                time.sleep(0.03)  # 30ms
+                # 每10ms更新一次速度显示
+                time.sleep(0.01)  # 10ms
 
                 if transfer_id not in active_transfers:
                     break

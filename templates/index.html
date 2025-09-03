@@ -203,26 +203,7 @@
             50% { transform: scale(1.02); }
         }
 
-        /* 加载状态样式优化 */
-        .loading-state {
-            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-            border-radius: 8px;
-            animation: loadingPulse 1.5s ease-in-out infinite;
-        }
-
-        @keyframes loadingPulse {
-            0%, 100% { opacity: 0.8; }
-            50% { opacity: 1; }
-        }
-
-        .spinner-border {
-            animation: spin 0.75s linear infinite;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+        /* 加载状态样式已移除，实现无感双击 */
 
         /* 错误状态样式 */
         .error-state {
@@ -244,71 +225,13 @@
             box-shadow: var(--shadow-md);
         }
 
-        /* 双击响应优化动画 */
-        .file-item.double-click-active {
-            background: linear-gradient(135deg, #fef3c7 0%, #fbbf24 100%);
-            transform: scale(1.02) translateX(8px);
-            box-shadow: 0 8px 25px -5px rgba(251, 191, 36, 0.4);
-            transition: all 0.1s ease-out;
-        }
-
+        /* 双击响应优化 - 保留基本交互效果 */
         .file-item:active {
             transform: scale(0.98);
             transition: transform 0.05s ease-out;
         }
 
-        /* 立即加载状态优化 */
-        .loading-state-instant {
-            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-            border: 2px solid #0ea5e9;
-            border-radius: 12px;
-            animation: instantLoadingPulse 0.8s ease-in-out infinite;
-        }
-
-        @keyframes instantLoadingPulse {
-            0%, 100% {
-                opacity: 0.9;
-                border-color: #0ea5e9;
-            }
-            50% {
-                opacity: 1;
-                border-color: #0284c7;
-                box-shadow: 0 0 20px rgba(14, 165, 233, 0.3);
-            }
-        }
-
-        /* 快速响应指示器 */
-        .fast-response-indicator {
-            position: absolute;
-            top: 5px;
-            right: 5px;
-            background: #10b981;
-            color: white;
-            font-size: 0.7rem;
-            padding: 2px 6px;
-            border-radius: 10px;
-            animation: fastResponseBlink 0.5s ease-out;
-        }
-
-        @keyframes fastResponseBlink {
-            0% { opacity: 0; transform: scale(0.5); }
-            50% { opacity: 1; transform: scale(1.1); }
-            100% { opacity: 1; transform: scale(1); }
-        }
-
-        /* 刷新状态动画 */
-        @keyframes refreshPulse {
-            0%, 100% {
-                opacity: 0.9;
-                border-color: #22c55e;
-                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
-            }
-            50% {
-                opacity: 1;
-                border-color: #16a34a;
-                box-shadow: 0 0 0 10px rgba(34, 197, 94, 0);
-            }
-        }
+        /* 刷新状态动画已移除 */
 
         /* 刷新按钮样式优化 */
         .btn-outline-primary:hover, .btn-outline-success:hover {
@@ -320,7 +243,7 @@
             transform: translateY(0);
         }
 
-        /* 强制保持默认光标样式 - 解决加载圆圈问题 */
+        /* 强制保持默认光标样式 */
         body, html {
             cursor: default !important;
         }
@@ -335,15 +258,6 @@
 
         .resizer {
             cursor: col-resize !important;
-        }
-
-        /* 防止浏览器在fetch请求时显示loading光标 */
-        body.browsing, body.browsing * {
-            cursor: default !important;
-        }
-
-        body.browsing .file-item, body.browsing .file-item * {
-            cursor: pointer !important;
         }
 
         body.browsing .path-segment, body.browsing .path-segment * {
@@ -1149,7 +1063,7 @@
             refreshSourceAsync();
         }
 
-        // 浏览源文件 - 异步优化版本
+        // 浏览源文件 - 异步优化版本（无加载动画）
         async function browseSourceAsync() {
             const server = document.getElementById('sourceServer').value;
             const path = document.getElementById('sourcePath').value;
@@ -1161,12 +1075,6 @@
             }
 
             try {
-                // 强制保持默认光标
-                document.body.classList.add('browsing');
-
-                // 显示加载状态
-                showLoadingState('sourceFileBrowser', true);
-
                 // 使用防抖机制，避免重复请求
                 if (window.sourceRequestController) {
                     window.sourceRequestController.abort();
@@ -1180,8 +1088,10 @@
                 const data = await response.json();
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, path, true);
                     addLogInfo(`📁 已加载源目录: ${path} (${data.files.length}项)`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览源目录失败: ${data.error}`);
@@ -1192,13 +1102,10 @@
                     showErrorState('sourceFileBrowser', '浏览失败: ' + error.message);
                     addLogError(`❌ 浏览源目录出错: ${error}`);
                 }
-            } finally {
-                // 移除浏览状态类，恢复正常光标
-                document.body.classList.remove('browsing');
             }
         }
 
-        // 立即响应的源文件浏览 - 零延迟版本
+        // 立即响应的源文件浏览 - 零延迟无动画版本
         async function browseSourceInstant(targetPath) {
             const server = document.getElementById('sourceServer').value;
             const showHidden = document.getElementById('sourceShowHidden').checked;
@@ -1215,7 +1122,7 @@
                 }
                 window.sourceInstantController = new AbortController();
 
-                // 立即发起请求，无任何延迟
+                // 立即发起请求，无任何延迟和加载动画
                 const startTime = performance.now();
                 console.log(`[源文件浏览] 开始请求: ${targetPath}`);
 
@@ -1230,8 +1137,10 @@
                 console.log(`[源文件浏览] 请求完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, targetPath, true);
                     addLogInfo(`📁 已进入源目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览源目录失败: ${data.error}`);
@@ -1245,7 +1154,7 @@
             }
         }
 
-        // 刷新源文件 - 强制清除缓存版本
+        // 刷新源文件 - 强制清除缓存版本（无加载动画）
         async function refreshSourceAsync() {
             const server = document.getElementById('sourceServer').value;
             const path = document.getElementById('sourcePath').value;
@@ -1257,9 +1166,6 @@
             }
 
             try {
-                // 显示刷新状态
-                showRefreshingState('sourceFileBrowser', path);
-
                 // 取消之前的请求
                 if (window.sourceRefreshController) {
                     window.sourceRefreshController.abort();
@@ -1281,9 +1187,11 @@
                 console.log(`[源文件刷新] 刷新完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, path, true);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
                     addLogSuccess(`🔄 已刷新源目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('sourceFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新源目录失败: ${data.error}`);
@@ -1307,7 +1215,7 @@
             refreshTargetAsync();
         }
 
-        // 浏览目标文件 - 异步优化版本
+        // 浏览目标文件 - 异步优化版本（无加载动画）
         async function browseTargetAsync() {
             const server = document.getElementById('targetServer').value;
             const path = document.getElementById('targetPath').value;
@@ -1319,9 +1227,6 @@
             }
 
             try {
-                // 显示加载状态
-                showLoadingState('targetFileBrowser', true);
-
                 // 使用防抖机制，避免重复请求
                 if (window.targetRequestController) {
                     window.targetRequestController.abort();
@@ -1335,8 +1240,10 @@
                 const data = await response.json();
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, path, false);
                     addLogInfo(`📂 已加载目标目录: ${path} (${data.files.length}项)`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览目标目录失败: ${data.error}`);
@@ -1350,7 +1257,7 @@
             }
         }
 
-        // 立即响应的目标文件浏览 - 零延迟版本
+        // 立即响应的目标文件浏览 - 零延迟无动画版本
         async function browseTargetInstant(targetPath) {
             const server = document.getElementById('targetServer').value;
             const showHidden = document.getElementById('targetShowHidden').checked;
@@ -1367,7 +1274,7 @@
                 }
                 window.targetInstantController = new AbortController();
 
-                // 立即发起请求，无任何延迟
+                // 立即发起请求，无任何延迟和加载动画
                 const startTime = performance.now();
                 console.log(`[目标文件浏览] 开始请求: ${targetPath}`);
 
@@ -1382,8 +1289,10 @@
                 console.log(`[目标文件浏览] 请求完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, targetPath, false);
                     addLogInfo(`📂 已进入目标目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览目标目录失败: ${data.error}`);
@@ -1397,7 +1306,7 @@
             }
         }
 
-        // 刷新目标文件 - 强制清除缓存版本
+        // 刷新目标文件 - 强制清除缓存版本（无加载动画）
         async function refreshTargetAsync() {
             const server = document.getElementById('targetServer').value;
             const path = document.getElementById('targetPath').value;
@@ -1409,9 +1318,6 @@
             }
 
             try {
-                // 显示刷新状态
-                showRefreshingState('targetFileBrowser', path);
-
                 // 取消之前的请求
                 if (window.targetRefreshController) {
                     window.targetRefreshController.abort();
@@ -1433,9 +1339,11 @@
                 console.log(`[目标文件刷新] 刷新完成，耗时: ${(endTime - startTime).toFixed(2)}ms`);
 
                 if (data.success) {
+                    // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, path, false);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
                     addLogSuccess(`🔄 已刷新目标目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+                    savePageState(); // 保存状态
                 } else {
                     showErrorState('targetFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新目标目录失败: ${data.error}`);
@@ -1523,6 +1431,18 @@
 
             container.innerHTML = html;
 
+            // 恢复选中状态（仅对源文件）
+            if (isSource && selectedSourceFiles.length > 0) {
+                setTimeout(() => {
+                    selectedSourceFiles.forEach(selectedFile => {
+                        const fileElement = document.querySelector(`[data-path="${selectedFile.path}"]`);
+                        if (fileElement) {
+                            fileElement.classList.add('selected');
+                        }
+                    });
+                }, 50); // 短暂延迟确保DOM更新完成
+            }
+
             // 为目标文件浏览器添加拖拽接收功能
             if (!isSource) {
                 setupDropZone(container);
@@ -1538,18 +1458,21 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
         }
 
-        // 导航到目录
+        // 导航到目录（无加载动画版本）
         function navigateTo(containerId, path, isSource) {
             if (isSource) {
                 document.getElementById('sourcePath').value = path;
-                browseSource();
+                // 直接使用即时浏览，无加载动画
+                browseSourceInstant(path);
             } else {
                 document.getElementById('targetPath').value = path;
-                browseTarget();
+                // 直接使用即时浏览，无加载动画
+                browseTargetInstant(path);
             }
+            savePageState(); // 保存状态
         }
 
-        // 智能鼠标事件处理 - 区分单击和双击
+        // 智能鼠标事件处理 - 区分单击和双击（无加载动画版本）
         let clickTimer = null;
         let clickCount = 0;
 
@@ -1567,142 +1490,52 @@
                     clickCount = 0;
                 }, 200); // 200ms延迟，等待可能的第二次点击
             } else if (clickCount === 2) {
-                // 双击处理 - 立即响应
+                // 双击处理 - 立即响应，无加载动画
                 clearTimeout(clickTimer);
                 clickCount = 0;
 
                 if (isDirectory) {
-                    // 立即视觉反馈
-                    if (fileId) {
-                        const fileElement = document.getElementById(fileId);
-                        if (fileElement) {
-                            fileElement.classList.add('double-click-active');
-                            setTimeout(() => {
-                                fileElement.classList.remove('double-click-active');
-                            }, 300);
-                        }
-                    }
-
-                    // 立即响应双击，无延迟
+                    // 立即响应双击，无延迟，无加载动画
                     console.log(`[双击] 立即进入目录: ${path}`);
 
-                    // 立即更新路径和UI状态
+                    // 立即更新路径
                     if (isSource) {
                         document.getElementById('sourcePath').value = path;
-                        // 立即显示加载状态
-                        showLoadingStateInstant('sourceFileBrowser', path);
-                        // 立即开始异步加载
+                        // 直接开始异步加载，不显示加载状态
                         browseSourceInstant(path);
                     } else {
                         document.getElementById('targetPath').value = path;
-                        // 立即显示加载状态
-                        showLoadingStateInstant('targetFileBrowser', path);
-                        // 立即开始异步加载
+                        // 直接开始异步加载，不显示加载状态
                         browseTargetInstant(path);
                     }
+                    savePageState(); // 保存状态
                 }
             }
         }
 
-        // 处理双击事件 - 保持兼容性
+        // 处理双击事件 - 保持兼容性（无加载动画版本）
         function handleDoubleClick(path, isDirectory, isSource) {
             if (!isDirectory) return;
 
-            // 立即响应，无延迟
+            // 立即响应，无延迟，无加载动画
             console.log(`[双击] 立即进入目录: ${path}`);
 
-            // 立即更新路径和UI状态
+            // 立即更新路径
             if (isSource) {
                 document.getElementById('sourcePath').value = path;
-                // 立即显示加载状态
-                showLoadingStateInstant('sourceFileBrowser', path);
-                // 立即开始异步加载
+                // 直接开始异步加载，不显示加载状态
                 browseSourceInstant(path);
             } else {
                 document.getElementById('targetPath').value = path;
-                // 立即显示加载状态
-                showLoadingStateInstant('targetFileBrowser', path);
-                // 立即开始异步加载
+                // 直接开始异步加载，不显示加载状态
                 browseTargetInstant(path);
             }
+            savePageState(); // 保存状态
         }
 
-        // 显示加载状态
-        function showLoadingState(containerId, isLoading) {
-            const container = document.getElementById(containerId);
-            if (isLoading) {
-                container.innerHTML = `
-                    <div class="text-center p-4">
-                        <div class="spinner-border text-primary" role="status">
-                            <span class="visually-hidden">加载中...</span>
-                        </div>
-                        <div class="mt-2">正在加载目录...</div>
-                    </div>
-                `;
-            }
-        }
+        // 注意：加载动画相关函数已移除，实现无感双击进入文件夹
 
-        // 立即显示加载状态 - 零延迟版本
-        function showLoadingStateInstant(containerId, targetPath) {
-            const container = document.getElementById(containerId);
-            const pathName = targetPath.split('/').pop() || '根目录';
-
-            // 立即更新DOM，无任何延迟
-            container.innerHTML = `
-                <div class="text-center p-4 loading-state-instant position-relative">
-                    <div class="fast-response-indicator">快速响应</div>
-                    <div class="d-flex justify-content-center align-items-center mb-3">
-                        <div class="spinner-border text-primary me-2" role="status" style="width: 1.5rem; height: 1.5rem;">
-                            <span class="visually-hidden">加载中...</span>
-                        </div>
-                        <strong class="text-primary">⚡ 正在进入 "${pathName}"</strong>
-                    </div>
-                    <div class="progress" style="height: 6px; border-radius: 3px;">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
-                             role="progressbar" style="width: 100%"></div>
-                    </div>
-                    <small class="text-muted mt-2 d-block">
-                        <i class="bi bi-lightning-charge-fill text-warning"></i>
-                        立即响应模式 - 正在加载文件列表...
-                    </small>
-                </div>
-            `;
-
-            // 强制重绘，确保立即显示
-            container.offsetHeight;
-        }
-
-        // 显示刷新状态 - 强制刷新版本
-        function showRefreshingState(containerId, targetPath) {
-            const container = document.getElementById(containerId);
-            const pathName = targetPath.split('/').pop() || '根目录';
-
-            // 立即更新DOM，显示刷新状态
-            container.innerHTML = `
-                <div class="text-center p-4 position-relative" style="background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border: 2px solid #22c55e; border-radius: 12px; animation: refreshPulse 1s ease-in-out infinite;">
-                    <div class="position-absolute top-0 end-0 m-2">
-                        <span class="badge bg-success">强制刷新</span>
-                    </div>
-                    <div class="d-flex justify-content-center align-items-center mb-3">
-                        <div class="spinner-border text-success me-2" role="status" style="width: 1.5rem; height: 1.5rem;">
-                            <span class="visually-hidden">刷新中...</span>
-                        </div>
-                        <strong class="text-success">🔄 正在刷新 "${pathName}"</strong>
-                    </div>
-                    <div class="progress" style="height: 6px; border-radius: 3px;">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-success"
-                             role="progressbar" style="width: 100%"></div>
-                    </div>
-                    <small class="text-muted mt-2 d-block">
-                        <i class="bi bi-arrow-clockwise text-success"></i>
-                        清除缓存中 - 获取最新目录内容...
-                    </small>
-                </div>
-            `;
-
-            // 强制重绘，确保立即显示
-            container.offsetHeight;
-        }
+        // 刷新状态函数已移除，实现无感刷新
 
         // 显示错误状态
         function showErrorState(containerId, errorMessage) {
@@ -1733,21 +1566,17 @@
             };
         }
 
-        // 优化的双击处理 - 添加防抖
+        // 优化的双击处理 - 添加防抖（无加载动画版本）
         const debouncedHandleDoubleClick = debounce(function(path, isDirectory, isSource) {
             if (isDirectory) {
                 // 立即更新路径显示，提供即时反馈
                 if (isSource) {
                     document.getElementById('sourcePath').value = path;
-                    // 立即显示加载状态
-                    showLoadingState('sourceFileBrowser', true);
-                    // 异步浏览目录
+                    // 直接异步浏览目录，无加载动画
                     browseSourceAsync();
                 } else {
                     document.getElementById('targetPath').value = path;
-                    // 立即显示加载状态
-                    showLoadingState('targetFileBrowser', true);
-                    // 异步浏览目录
+                    // 直接异步浏览目录，无加载动画
                     browseTargetAsync();
                 }
             }
@@ -1779,15 +1608,18 @@
             }
         }
 
-        // 导航到指定路径
+        // 导航到指定路径（无加载动画版本）
         function navigateToPath(path, isSource) {
             if (isSource) {
                 document.getElementById('sourcePath').value = path;
-                browseSource();
+                // 直接使用即时浏览，无加载动画
+                browseSourceInstant(path);
             } else {
                 document.getElementById('targetPath').value = path;
-                browseTarget();
+                // 直接使用即时浏览，无加载动画
+                browseTargetInstant(path);
             }
+            savePageState(); // 保存状态
         }
 
         // 选择文件（支持多选）
@@ -1813,6 +1645,7 @@
             }
 
             updateSelectionInfo();
+            savePageState(); // 保存状态
         }
 
         // 清除所有选择
@@ -2179,10 +2012,10 @@
             }
         });
 
-        // 监听速度更新事件（30ms高频更新）
+        // 监听速度更新事件（10ms高频更新）
         socket.on('speed_update', function(data) {
             if (data.transfer_id === currentTransferId) {
-                // 更新传输速度（每30ms）
+                // 更新传输速度（每10ms）
                 if (data.speed) {
                     document.getElementById('transferSpeed').textContent = data.speed;
                 }
@@ -2325,22 +2158,120 @@
             return serverPaths[serverIP] || '/home/th';
         }
 
+        // 状态保存和恢复功能
+        function savePageState() {
+            const state = {
+                sourceServer: document.getElementById('sourceServer').value,
+                targetServer: document.getElementById('targetServer').value,
+                sourcePath: document.getElementById('sourcePath').value,
+                targetPath: document.getElementById('targetPath').value,
+                sourceShowHidden: document.getElementById('sourceShowHidden').checked,
+                targetShowHidden: document.getElementById('targetShowHidden').checked,
+                selectedSourceFiles: selectedSourceFiles,
+                timestamp: Date.now()
+            };
+            localStorage.setItem('turbofile_state', JSON.stringify(state));
+        }
+
+        function restorePageState() {
+            try {
+                const savedState = localStorage.getItem('turbofile_state');
+                if (!savedState) return false;
+
+                const state = JSON.parse(savedState);
+
+                // 检查状态是否过期（24小时）
+                if (Date.now() - state.timestamp > 24 * 60 * 60 * 1000) {
+                    localStorage.removeItem('turbofile_state');
+                    return false;
+                }
+
+                // 恢复服务器选择
+                if (state.sourceServer) {
+                    document.getElementById('sourceServer').value = state.sourceServer;
+                }
+                if (state.targetServer) {
+                    document.getElementById('targetServer').value = state.targetServer;
+                }
+
+                // 恢复路径
+                if (state.sourcePath) {
+                    document.getElementById('sourcePath').value = state.sourcePath;
+                }
+                if (state.targetPath) {
+                    document.getElementById('targetPath').value = state.targetPath;
+                }
+
+                // 恢复显示隐藏文件设置
+                if (state.sourceShowHidden !== undefined) {
+                    document.getElementById('sourceShowHidden').checked = state.sourceShowHidden;
+                }
+                if (state.targetShowHidden !== undefined) {
+                    document.getElementById('targetShowHidden').checked = state.targetShowHidden;
+                }
+
+                // 恢复选中的文件
+                if (state.selectedSourceFiles) {
+                    selectedSourceFiles = state.selectedSourceFiles;
+                }
+
+                return true;
+            } catch (error) {
+                console.error('恢复页面状态失败:', error);
+                localStorage.removeItem('turbofile_state');
+                return false;
+            }
+        }
+
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
-            addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
-            addLogInfo('📋 请选择源服务器和目标服务器开始传输');
+            // 尝试恢复之前的状态
+            const stateRestored = restorePageState();
+
+            if (stateRestored) {
+                addLogInfo('🔄 已恢复上次的浏览状态');
+
+                // 如果有保存的服务器和路径，自动加载文件列表
+                const sourceServer = document.getElementById('sourceServer').value;
+                const targetServer = document.getElementById('targetServer').value;
+                const sourcePath = document.getElementById('sourcePath').value;
+                const targetPath = document.getElementById('targetPath').value;
+
+                if (sourceServer && sourcePath) {
+                    setTimeout(() => {
+                        browseSourceInstant(sourcePath);
+                        addLogInfo(`📁 已恢复源目录: ${sourcePath}`);
+                    }, 200);
+                }
+
+                if (targetServer && targetPath) {
+                    setTimeout(() => {
+                        browseTargetInstant(targetPath);
+                        addLogInfo(`📂 已恢复目标目录: ${targetPath}`);
+                    }, 400);
+                }
+            } else {
+                addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
+                addLogInfo('📋 请选择源服务器和目标服务器开始传输');
+            }
+
             addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
 
             // 初始化面板调整功能
             initializeResizers();
 
-            // 服务器选择变化时自动浏览
+            // 服务器选择变化时自动浏览并保存状态
             document.getElementById('sourceServer').addEventListener('change', function() {
                 if (this.value) {
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     document.getElementById('sourcePath').value = defaultPath;
-                    setTimeout(browseSource, 100);
+                    setTimeout(() => {
+                        browseSource();
+                        savePageState(); // 保存状态
+                    }, 100);
+                } else {
+                    savePageState(); // 保存状态
                 }
             });
 
@@ -2349,8 +2280,31 @@
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     document.getElementById('targetPath').value = defaultPath;
-                    setTimeout(browseTarget, 100);
+                    setTimeout(() => {
+                        browseTarget();
+                        savePageState(); // 保存状态
+                    }, 100);
+                } else {
+                    savePageState(); // 保存状态
                 }
+            });
+
+            // 路径变化时保存状态
+            document.getElementById('sourcePath').addEventListener('input', function() {
+                savePageState();
+            });
+
+            document.getElementById('targetPath').addEventListener('input', function() {
+                savePageState();
+            });
+
+            // 显示隐藏文件设置变化时保存状态
+            document.getElementById('sourceShowHidden').addEventListener('change', function() {
+                savePageState();
+            });
+
+            document.getElementById('targetShowHidden').addEventListener('change', function() {
+                savePageState();
             });
         });
     </script>
