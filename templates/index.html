@@ -862,11 +862,14 @@
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-files text-info"></i> 源文件浏览
                         </h6>
-                        <div class="form-check form-switch" style="font-size: 0.75rem;">
-                            <input class="form-check-input" type="checkbox" id="sourceShowHidden" onchange="toggleHiddenFiles('source')">
-                            <label class="form-check-label" for="sourceShowHidden" style="font-size: 0.75rem;">
-                                显示隐藏文件
-                            </label>
+                        <div class="d-flex align-items-center" style="gap: 10px;">
+                            <small id="sourceFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                                <input class="form-check-input" type="checkbox" id="sourceShowHidden" onchange="toggleHiddenFiles('source')">
+                                <label class="form-check-label" for="sourceShowHidden" style="font-size: 0.75rem;">
+                                    显示隐藏文件
+                                </label>
+                            </div>
                         </div>
                     </div>
                     <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
@@ -888,11 +891,14 @@
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-folder-check text-success"></i> 目标目录浏览
                         </h6>
-                        <div class="form-check form-switch" style="font-size: 0.75rem;">
-                            <input class="form-check-input" type="checkbox" id="targetShowHidden" onchange="toggleHiddenFiles('target')">
-                            <label class="form-check-label" for="targetShowHidden" style="font-size: 0.75rem;">
-                                显示隐藏文件
-                            </label>
+                        <div class="d-flex align-items-center" style="gap: 10px;">
+                            <small id="targetFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                                <input class="form-check-input" type="checkbox" id="targetShowHidden" onchange="toggleHiddenFiles('target')">
+                                <label class="form-check-label" for="targetShowHidden" style="font-size: 0.75rem;">
+                                    显示隐藏文件
+                                </label>
+                            </div>
                         </div>
                     </div>
                     <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
@@ -1515,7 +1521,8 @@
                              data-is-directory="${file.is_directory}"
                              onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}', ${isSource})"
                              ondragstart="handleDragStart(event)"
-                             ondragend="handleDragEnd(event)">
+                             ondragend="handleDragEnd(event)"
+                             ondblclick="handleFileItemDblClick(this, ${isSource})">
                         <i class="bi ${icon}"></i>
                         <div class="file-info">
                             <span class="file-name">${file.name}</span>
@@ -1525,7 +1532,11 @@
                 } else {
                     // 目标目录只支持导航 - 优化事件处理
                     html += `<div class="file-item"
-                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, null, ${isSource})">
+                             data-path="${file.path}"
+                             data-name="${file.name}"
+                             data-is-directory="${file.is_directory}"
+                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, null, ${isSource})"
+                             ondblclick="handleFileItemDblClick(this, ${isSource})">
                         <i class="bi ${icon}"></i>
                         <div class="file-info">
                             <span class="file-name">${file.name}</span>
@@ -1539,6 +1550,16 @@
             html += '<div style="height: 20px;"></div>';
 
             container.innerHTML = html;
+
+            // 更新文件数显示（只统计实际渲染的项目数，不含“返回上级”）
+            const count = Array.from(container.querySelectorAll('.file-item')).filter(el => el.querySelector('.file-name')?.textContent !== '..').length;
+            if (isSource) {
+                const el = document.getElementById('sourceFileCount');
+                if (el) el.textContent = `共 ${count} 项`;
+            } else {
+                const el = document.getElementById('targetFileCount');
+                if (el) el.textContent = `共 ${count} 项`;
+            }
 
             // 为目标文件浏览器添加拖拽接收功能
             if (!isSource) {
@@ -2280,6 +2301,134 @@
             console.log(`LOGO显示模式: ${mode === 'header' ? '标题并排（当前）' : mode}`);
         }
 
+
+            // 轻量级图片预览与在线编辑（懒加载、异步、性能优先）
+            const PreviewCache = new Map(); // 路径->BlobURL / 文本缓存
+
+            function isImageFile(name) {
+                return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
+            }
+            function isTextEditable(name) {
+                return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml)$/i.test(name);
+            }
+
+            async function previewImage(server, path, name) {
+                try {
+                    const key = server + '|' + path;
+                    if (!PreviewCache.has(key)) {
+                        const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+                        const resp = await fetch(url, { cache: 'no-store' });
+                        if (!resp.ok) {
+                            let msg = '';
+                            try { msg = await resp.text(); } catch(_) {}
+                            throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                        }
+                        const blob = await resp.blob();
+                        const blobUrl = URL.createObjectURL(blob);
+                        PreviewCache.set(key, blobUrl);
+                    }
+                    const blobUrl = PreviewCache.get(key);
+                    openImageModal(blobUrl, name);
+                } catch (e) {
+                    addLogError('图片预览失败: ' + (e.message || e));
+                    console.error('Image preview fetch error:', e);
+                }
+            }
+
+            async function editTextFile(server, path, name) {
+                try {
+                    const key = server + '|' + path;
+                    let content = PreviewCache.get(key);
+
+
+                    if (!content) {
+                        const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+                        const resp = await fetch(url, { cache: 'no-store' });
+                        const data = await resp.json();
+                        if (!data.success) throw new Error(data.error || '读取失败');
+                        content = data.content || '';
+                        PreviewCache.set(key, content);
+                    }
+                    openEditorModal(server, path, name, content);
+                } catch (e) {
+                    addLogError('打开编辑器失败: ' + (e.message || e));
+                }
+            }
+
+            function handleFileItemDblClick(el, isSource) {
+                try {
+                    const path = el.dataset.path;
+                    const name = el.dataset.name || '';
+                    const isDir = String(el.dataset.isDirectory).toLowerCase() === 'true';
+                    if (isDir) {
+                        // 目录的双击导航仍由原有逻辑处理，这里不干预
+                        return;
+                    }
+                    const server = (isSource ? document.getElementById('sourceServer') : document.getElementById('targetServer')).value;
+                    if (!server) return;
+                    if (isImageFile(name)) {
+                        previewImage(server, path, name);
+                    } else if (isTextEditable(name)) {
+                        editTextFile(server, path, name);
+                    }
+                } catch (e) {
+                    console.error('handleFileItemDblClick error:', e);
+                }
+            }
+
+            function openImageModal(src, title) {
+                const modal = document.getElementById('imagePreviewModal');
+                if (!modal) return;
+                const img = modal.querySelector('img');
+                if (img) img.src = src;
+                modal.style.display = 'block';
+            }
+            function closeImageModal() {
+                const modal = document.getElementById('imagePreviewModal');
+                modal.style.display = 'none';
+            }
+
+            function openEditorModal(server, path, title, content) {
+                const modal = document.getElementById('editorModal');
+                modal.querySelector('.modal-title').textContent = title;
+                const ta = modal.querySelector('textarea');
+                ta.value = content;
+                ta.dataset.server = server;
+                ta.dataset.path = path;
+                modal.style.display = 'block';
+            }
+            function closeEditorModal() {
+                document.getElementById('editorModal').style.display = 'none';
+            }
+            async function saveEditorContent() {
+                const ta = document.querySelector('#editorModal textarea');
+                const server = ta.dataset.server;
+                const path = ta.dataset.path;
+                const content = ta.value;
+                const resp = await fetch('/api/file/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, path, content })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    addLogInfo('💾 已保存: ' + path);
+                    // 更新缓存
+                    PreviewCache.set(server + '|' + path, content);
+                    closeEditorModal();
+                } else {
+                    addLogError('保存失败: ' + (data.error || '未知错误'));
+                }
+            }
+
+            // 键盘ESC关闭
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeImageModal();
+                    closeEditorModal();
+                }
+            });
+
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
             addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
@@ -2314,5 +2463,34 @@
             });
         });
     </script>
+
+    <!-- 极简图片预览模态框 -->
+    <div id="imagePreviewModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1050;">
+        <button onclick="closeImageModal()" aria-label="关闭" title="关闭"
+                style="position:absolute; top:14px; right:18px; width:36px; height:36px; border:none; border-radius:50%; background:rgba(0,0,0,0.6); color:#fff; font-size:18px; line-height:36px; text-align:center; cursor:pointer;">×</button>
+        <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
+            <img src="" alt="预览" style="max-width: 96vw; max-height: 92vh; object-fit: contain; display:block;" />
+        </div>
+    </div>
+
+    <!-- 轻量级在线编辑器模态框 -->
+    <div id="editorModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 1050;">
+        <div style="position: absolute; top: 8%; left: 50%; transform: translateX(-50%); width: 80%; max-width: 1000px; background: #fff; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.3);">
+            <div class="d-flex justify-content-between align-items-center" style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">
+                <strong class="modal-title" style="font-size: 0.95rem;">在线编辑</strong>
+                <div>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="toggleHighlightPreview()">高亮预览</button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="document.querySelector('#editorModal textarea').value='';">清空</button>
+                    <button class="btn btn-sm btn-primary" onclick="saveEditorContent()">保存</button>
+                    <button class="btn btn-sm btn-danger" onclick="closeEditorModal()">关闭</button>
+                </div>
+            </div>
+            <div style="max-height: 80vh; overflow: hidden;">
+                <textarea style="width: 100%; height: 60vh; padding: 10px; font-family: Consolas, 'Courier New', monospace; font-size: 13px; line-height: 1.5; border: none; outline: none; resize: none;"></textarea>
+                <pre id="editorPreview" style="display:none; width:100%; height:60vh; margin:0;"><code class="language-clike"></code></pre>
+            </div>
+        </div>
+    </div>
+
 </body>
 </html>
