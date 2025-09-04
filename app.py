@@ -5,7 +5,7 @@ Web文件传输系统 - 主应用
 基于现有的rsync传输脚本，提供Web界面控制
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from flask_socketio import SocketIO, emit
 import paramiko
 import threading
@@ -394,7 +394,7 @@ class SSHManager:
         except Exception as e:
             print(f"❌ 连接服务器 {server_ip} 失败: {e}")
             return None
-    
+
     def execute_command(self, server_ip, command):
         """在远程服务器执行命令"""
         ssh = self.get_connection(server_ip)
@@ -1944,6 +1944,111 @@ def parse_rsync_progress(line):
 @app.route('/')
 def index():
     return render_template('index.html', servers=SERVERS)
+
+@app.route('/api/image/stream')
+def api_image_stream():
+    server_ip = request.args.get('server')
+    path = request.args.get('path')
+    if not server_ip or not path:
+        return jsonify({'success': False, 'error': '缺少参数'}), 400
+
+    try:
+        # 本地读取
+        if is_local_server(server_ip):
+            def generate():
+                with open(path, 'rb') as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            return Response(generate(), mimetype='application/octet-stream')
+        # 远程读取
+        ssh = ssh_manager.get_connection(server_ip)
+        if not ssh:
+            return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+        sftp = ssh.open_sftp()
+        def generate_sftp():
+            try:
+                with sftp.file(path, 'rb') as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk if isinstance(chunk, (bytes, bytearray)) else bytes(chunk)
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+        return Response(generate_sftp(), mimetype='application/octet-stream')
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/file/read', methods=['GET'])
+def api_file_read():
+    server_ip = request.args.get('server')
+    path = request.args.get('path')
+    if not server_ip or not path:
+        return jsonify({'success': False, 'error': '缺少参数'}), 400
+    try:
+        if is_local_server(server_ip):
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            return jsonify({'success': True, 'content': content})
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            sftp = ssh.open_sftp()
+            try:
+                with sftp.file(path, 'r') as f:
+                    data = f.read()
+                    if isinstance(data, (bytes, bytearray)):
+                        content = data.decode('utf-8', errors='ignore')
+                    else:
+                        content = str(data)
+                return jsonify({'success': True, 'content': content})
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/file/save', methods=['POST'])
+def api_file_save():
+    data = request.get_json(silent=True) or {}
+    server_ip = data.get('server')
+    path = data.get('path')
+    content = data.get('content', '')
+    if not server_ip or not path:
+        return jsonify({'success': False, 'error': '缺少参数'}), 400
+    try:
+        if is_local_server(server_ip):
+            with open(path, 'w', encoding='utf-8', errors='ignore') as f:
+                f.write(content if isinstance(content, str) else str(content))
+            return jsonify({'success': True})
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            sftp = ssh.open_sftp()
+            try:
+                with sftp.file(path, 'w') as f:
+                    data_bytes = content.encode('utf-8') if isinstance(content, str) else bytes(content)
+                    f.write(data_bytes)
+                return jsonify({'success': True})
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/servers')
 def get_servers():

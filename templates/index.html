@@ -2315,6 +2315,16 @@
             async function previewImage(server, path, name) {
                 try {
                     const key = server + '|' + path;
+
+                    // 立即显示模态框，避免等待感
+                    const modal = document.getElementById('imagePreviewModal');
+                    const img = modal.querySelector('img');
+                    if (modal && img) {
+                        modal.style.display = 'block';
+                        img.style.opacity = '0.3';
+                        img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+                    }
+
                     if (!PreviewCache.has(key)) {
                         const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
                         const resp = await fetch(url, { cache: 'no-store' });
@@ -2328,30 +2338,53 @@
                         PreviewCache.set(key, blobUrl);
                     }
                     const blobUrl = PreviewCache.get(key);
-                    openImageModal(blobUrl, name);
+
+                    // 图片加载完成后显示
+                    if (img) {
+                        img.onload = () => { img.style.opacity = '1'; };
+                        img.src = blobUrl;
+                    }
                 } catch (e) {
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
+                    closeImageModal();
                 }
             }
 
             async function editTextFile(server, path, name) {
                 try {
                     const key = server + '|' + path;
+
+                    // 立即打开编辑器，提升感知速度
+                    openEditorModal(server, path, name, '正在加载...');
                     let content = PreviewCache.get(key);
-
-
-                    if (!content) {
-                        const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
-                        const resp = await fetch(url, { cache: 'no-store' });
-                        const data = await resp.json();
-                        if (!data.success) throw new Error(data.error || '读取失败');
-                        content = data.content || '';
-                        PreviewCache.set(key, content);
+                    if (content) {
+                        // 缓存命中，立即填充
+                        const ta = document.querySelector('#editorModal textarea');
+                        if (ta) ta.value = content;
+                        return;
                     }
-                    openEditorModal(server, path, name, content);
+
+                    // 异步拉取内容
+                    const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+                    const resp = await fetch(url, { cache: 'no-store' });
+                    if (!resp.ok) {
+                        let msg = '';
+                        try { msg = await resp.text(); } catch(_) {}
+                        throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                    }
+                    const data = await resp.json();
+                    if (!data.success) throw new Error(data.error || '读取失败');
+                    content = data.content || '';
+                    PreviewCache.set(key, content);
+
+                    // 填充内容
+                    const ta = document.querySelector('#editorModal textarea');
+                    if (ta) ta.value = content;
                 } catch (e) {
                     addLogError('打开编辑器失败: ' + (e.message || e));
+                    // 失败时关闭编辑器，避免空白状态
+                    closeEditorModal();
                 }
             }
 
@@ -2385,7 +2418,10 @@
             }
             function closeImageModal() {
                 const modal = document.getElementById('imagePreviewModal');
+                if (!modal) return;
                 modal.style.display = 'none';
+                const img = modal.querySelector('img');
+                if (img) img.removeAttribute('src');
             }
 
             function openEditorModal(server, path, title, content) {
@@ -2410,6 +2446,13 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, path, content })
                 });
+
+            // 绑定关闭按钮（避免某些环境下内联onclick不触发）
+            document.addEventListener('DOMContentLoaded', () => {
+                const btn = document.getElementById('imagePreviewCloseBtn');
+                if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
+            });
+
                 const data = await resp.json();
                 if (data.success) {
                     addLogInfo('💾 已保存: ' + path);
@@ -2465,11 +2508,11 @@
     </script>
 
     <!-- 极简图片预览模态框 -->
-    <div id="imagePreviewModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1050;">
-        <button onclick="closeImageModal()" aria-label="关闭" title="关闭"
-                style="position:absolute; top:14px; right:18px; width:36px; height:36px; border:none; border-radius:50%; background:rgba(0,0,0,0.6); color:#fff; font-size:18px; line-height:36px; text-align:center; cursor:pointer;">×</button>
+    <div id="imagePreviewModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1050;">
+        <button id="imagePreviewCloseBtn" aria-label="关闭" title="关闭"
+                style="position:absolute; top:14px; right:18px; width:40px; height:40px; border:none; border-radius:50%; background:rgba(0,0,0,0.6); color:#fff; font-size:22px; line-height:40px; text-align:center; cursor:pointer;">×</button>
         <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
-            <img src="" alt="预览" style="max-width: 96vw; max-height: 92vh; object-fit: contain; display:block;" />
+            <img src="" alt="预览" style="max-width: 98vw; max-height: 95vh; object-fit: contain; display:block;" />
         </div>
     </div>
 
