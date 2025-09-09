@@ -32,7 +32,7 @@ SERVERS = {
     "192.168.9.61": {"name": "训练服务器2", "user": "th", "password": "th123456"},
     "192.168.9.60": {"name": "数据服务器", "user": "th", "password": "taiho603656_0"},
     "192.168.9.57": {"name": "备份服务器", "user": "thgd", "password": "123456"},
-    "10.190.21.253": {"name": "NAS存储服务器", "user": "Algorithm", "port": 8000}
+    "10.190.21.253": {"name": "NAS存储服务器", "user": "Algorithm", "password": "Ai123456", "port": 8000}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -496,19 +496,19 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
         else:
             print(f"✅ 目录创建成功: {target_path}")
 
-        # 使用tar+ssh传输
+        # 使用tar+ssh传输，添加静默选项避免输出干扰
         if is_directory:
             # 目录传输
             if target_password:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
             else:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
         else:
             # 文件传输
             if target_password:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
             else:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
 
         print(f"🚀 执行tar+ssh传输: {file_name}")
         print(f"🔧 源路径: {source_path}")
@@ -637,10 +637,12 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
     try:
         source_config = SERVERS[source_server]
         source_user = source_config['user']
+        source_password = source_config.get('password')
         source_port = source_config.get('port', 22)
 
         target_config = SERVERS[target_server]
         target_user = target_config['user']
+        target_password = target_config.get('password')
         target_port = target_config.get('port', 22)
 
         print(f"🚀 执行远程到NAS tar+ssh传输: {file_name}")
@@ -657,7 +659,10 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
 
         # 创建NAS目标目录
         ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
-        mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+        if target_password:
+            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+        else:
+            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
 
         print(f"🔧 创建NAS目录命令: {mkdir_cmd}")
         mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
@@ -671,13 +676,28 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         else:
             print(f"✅ NAS目录创建成功: {target_path}")
 
-        # 构建tar+ssh传输命令
+        # 构建tar+ssh传输命令，添加密码认证支持
+        source_ssh_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no"
+        target_ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+
         if is_directory:
             # 目录传输
-            tar_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no {source_user}@{source_server} 'cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}' | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
+            target_extract_cmd = f"cd {target_path} && tar -xf -"
         else:
             # 文件传输
-            tar_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no {source_user}@{source_server} 'cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}' | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
+            target_extract_cmd = f"cd {target_path} && tar -xf -"
+
+        # 根据密码配置构建完整命令
+        if source_password and target_password:
+            tar_cmd = f"sshpass -p '{source_password}' {source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+        elif source_password:
+            tar_cmd = f"sshpass -p '{source_password}' {source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+        elif target_password:
+            tar_cmd = f"{source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+        else:
+            tar_cmd = f"{source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
 
         print(f"🔧 执行命令: {tar_cmd}")
 
@@ -788,11 +808,11 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
             subprocess.run(mkdir_cmd, shell=True, check=True)
 
-        # 构建传输命令
+        # 构建传输命令，添加静默选项避免输出干扰
         if is_directory:
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}"
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
         else:
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}"
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
 
         if is_local_server(target_server):
             # NAS到本地
@@ -802,9 +822,9 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 target_extract_cmd = f"cd {target_path} && tar -xf -"
 
             if source_password:
-                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_extract_cmd}"
+                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
             else:
-                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_extract_cmd}"
+                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
         else:
             # NAS到远程服务器
             if is_directory:
