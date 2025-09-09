@@ -1,16 +1,13 @@
-# 查看服务状态
-./manage_service.sh status
-
-# 查看实时日志
-./manage_service.sh logs
+# 查看状态
+./turbofile_manager.sh status
 
 # 重启服务
-sudo ./manage_service.sh restart
+./turbofile_manager.sh restart
 
-# 停止服务
-sudo ./manage_service.sh stop
+# 查看日志
+./turbofile_manager.sh logs
 
-# 启动服务
-sudo ./manage_service.sh start
+# 实时查看日志
+./turbofile_manager.sh follow
 
 打开浏览器访问 http://192.168.9.62:5000

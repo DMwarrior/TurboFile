@@ -31,7 +31,8 @@ SERVERS = {
     "192.168.9.62": {"name": "训练服务器1", "user": "th", "password": "th123456"},
     "192.168.9.61": {"name": "训练服务器2", "user": "th", "password": "th123456"},
     "192.168.9.60": {"name": "数据服务器", "user": "th", "password": "taiho603656_0"},
-    "192.168.9.57": {"name": "备份服务器", "user": "thgd", "password": "123456"}
+    "192.168.9.57": {"name": "备份服务器", "user": "thgd", "password": "123456"},
+    "10.190.21.253": {"name": "NAS存储服务器", "user": "Algorithm", "port": 8000}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -355,6 +356,7 @@ class SSHManager:
             connect_kwargs = {
                 'hostname': server_ip,
                 'username': server_config["user"],
+                'port': server_config.get("port", 22),  # 支持自定义端口，默认22
                 'timeout': 5,  # 减少超时时间
                 'compress': False,  # 局域网不需要压缩
                 'look_for_keys': True,
@@ -430,6 +432,479 @@ class SSHManager:
             return None, str(e)
 
 ssh_manager = SSHManager()
+
+def get_ssh_command_with_port(server_ip, fast_ssh=True):
+    """构建支持自定义端口的SSH命令字符串"""
+    server_config = SERVERS[server_ip]
+    port = server_config.get("port", 22)
+
+    ssh_cmd_parts = [
+        "ssh",
+        "-p", str(port),  # 支持自定义端口
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "PasswordAuthentication=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "TCPKeepAlive=yes",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath=/tmp/ssh-%r@%h:{port}",  # 端口相关的控制路径
+        "-o", "ControlPersist=300"
+    ]
+
+    if fast_ssh:
+        ssh_cmd_parts.extend([
+            "-o", "Compression=no",
+            "-o", "Ciphers=aes128-ctr,aes192-ctr,aes256-ctr",
+            "-o", "MACs=hmac-sha2-256,hmac-sha2-512"
+        ])
+
+    return " ".join(ssh_cmd_parts)
+
+def is_nas_server(server_ip):
+    """判断是否为NAS服务器"""
+    is_nas = server_ip == "10.190.21.253"
+    print(f"🔍 检查是否为NAS服务器: {server_ip} -> {is_nas}")
+    return is_nas
+
+def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id):
+    """使用tar+ssh传输文件到NAS服务器（rsync替代方案）"""
+    try:
+        # 发送开始传输日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'🚀 开始tar+ssh传输 {file_name} 到NAS...'
+        })
+
+        target_config = SERVERS[target_server]
+        target_user = target_config['user']
+        target_password = target_config.get('password')
+        target_port = target_config.get('port', 22)
+
+        # 创建远程目录
+        ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+        if target_password:
+            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+        else:
+            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+
+        print(f"🔧 创建目录命令: {mkdir_cmd}")
+        mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        if mkdir_result.returncode != 0:
+            print(f"❌ 创建目录失败: {mkdir_result.stderr}")
+            raise Exception(f"创建目录失败: {mkdir_result.stderr}")
+        else:
+            print(f"✅ 目录创建成功: {target_path}")
+
+        # 使用tar+ssh传输
+        if is_directory:
+            # 目录传输
+            if target_password:
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+            else:
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+        else:
+            # 文件传输
+            if target_password:
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+            else:
+                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+
+        print(f"🚀 执行tar+ssh传输: {file_name}")
+        print(f"🔧 源路径: {source_path}")
+        print(f"🔧 目标路径: {target_path}")
+        print(f"🔧 是否目录: {is_directory}")
+        print(f"🔧 源目录: {os.path.dirname(source_path)}")
+        print(f"🔧 源文件名: {os.path.basename(source_path)}")
+
+        # 环境调试信息
+        import pwd
+        import grp
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+        current_group = grp.getgrgid(os.getgid()).gr_name
+        current_cwd = os.getcwd()
+
+        print(f"🔧 当前用户: {current_user}")
+        print(f"🔧 当前组: {current_group}")
+        print(f"🔧 当前工作目录: {current_cwd}")
+        print(f"🔧 /tmp目录是否存在: {os.path.exists('/tmp')}")
+        print(f"🔧 /tmp目录权限: {oct(os.stat('/tmp').st_mode) if os.path.exists('/tmp') else 'N/A'}")
+
+        # 检查源文件是否存在
+        if os.path.exists(source_path):
+            print(f"✅ 源文件存在: {source_path}")
+            file_stat = os.stat(source_path)
+            file_size = file_stat.st_size if os.path.isfile(source_path) else "目录"
+            file_mode = oct(file_stat.st_mode)
+            file_owner = pwd.getpwuid(file_stat.st_uid).pw_name
+            file_group = grp.getgrgid(file_stat.st_gid).gr_name
+            print(f"🔧 文件大小: {file_size}")
+            print(f"🔧 文件权限: {file_mode}")
+            print(f"🔧 文件所有者: {file_owner}:{file_group}")
+        else:
+            print(f"❌ 源文件不存在: {source_path}")
+            # 尝试列出父目录内容
+            parent_dir = os.path.dirname(source_path)
+            if os.path.exists(parent_dir):
+                print(f"🔧 父目录内容: {os.listdir(parent_dir)}")
+            else:
+                print(f"🔧 父目录也不存在: {parent_dir}")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ 源文件不存在: {source_path}'
+            })
+            return False
+
+        print(f"🔧 执行命令: {tar_cmd}")
+
+        # 发送详细调试日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'🔧 调试: 执行命令 {tar_cmd}'
+        })
+
+        # 发送进度更新
+        socketio.emit('transfer_progress', {
+            'transfer_id': transfer_id,
+            'progress': 50,  # 模拟50%进度
+            'current_file': file_name
+        })
+
+        # 记录开始时间
+        import time
+        start_time = time.time()
+
+        result = subprocess.run(tar_cmd, shell=True, capture_output=True, text=True, timeout=300)
+
+        print(f"🔧 命令返回码: {result.returncode}")
+        if result.stdout:
+            print(f"🔧 标准输出: {result.stdout}")
+        if result.stderr:
+            print(f"🔧 错误输出: {result.stderr}")
+
+        if result.returncode == 0:
+            # 计算传输耗时
+            end_time = time.time()
+            duration = end_time - start_time
+
+            # 格式化耗时显示
+            if duration < 60:
+                time_str = f"{duration:.1f}秒"
+            elif duration < 3600:
+                minutes = int(duration // 60)
+                seconds = duration % 60
+                time_str = f"{minutes}分{seconds:.1f}秒"
+            else:
+                hours = int(duration // 3600)
+                minutes = int((duration % 3600) // 60)
+                seconds = duration % 60
+                time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
+
+            print(f"✅ tar+ssh传输成功: {file_name}")
+
+            # 发送成功日志（包含耗时）
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ {file_name} tar+ssh传输完成，耗时: {time_str}'
+            })
+
+            return True
+        else:
+            print(f"❌ tar+ssh传输失败: {result.stderr}")
+
+            # 发送错误日志
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ {file_name} tar+ssh传输失败: {result.stderr}'
+            })
+
+            return False
+
+    except Exception as e:
+        print(f"❌ tar+ssh传输异常: {e}")
+
+        # 发送异常日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'❌ {file_name} tar+ssh传输异常: {str(e)}'
+        })
+
+        return False
+
+def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id):
+    """从远程服务器使用tar+ssh传输文件到NAS服务器"""
+    try:
+        source_config = SERVERS[source_server]
+        source_user = source_config['user']
+        source_port = source_config.get('port', 22)
+
+        target_config = SERVERS[target_server]
+        target_user = target_config['user']
+        target_port = target_config.get('port', 22)
+
+        print(f"🚀 执行远程到NAS tar+ssh传输: {file_name}")
+        print(f"🔧 源服务器: {source_server}:{source_port}")
+        print(f"🔧 目标服务器: {target_server}:{target_port}")
+        print(f"🔧 源路径: {source_path}")
+        print(f"🔧 目标路径: {target_path}")
+
+        # 发送开始传输日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'🚀 开始tar+ssh传输 {file_name} 到NAS...'
+        })
+
+        # 创建NAS目标目录
+        ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+        mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+
+        print(f"🔧 创建NAS目录命令: {mkdir_cmd}")
+        mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        if mkdir_result.returncode != 0:
+            print(f"❌ 创建NAS目录失败: {mkdir_result.stderr}")
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ 创建NAS目录失败: {mkdir_result.stderr}'
+            })
+            return False
+        else:
+            print(f"✅ NAS目录创建成功: {target_path}")
+
+        # 构建tar+ssh传输命令
+        if is_directory:
+            # 目录传输
+            tar_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no {source_user}@{source_server} 'cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}' | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+        else:
+            # 文件传输
+            tar_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no {source_user}@{source_server} 'cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}' | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+
+        print(f"🔧 执行命令: {tar_cmd}")
+
+        # 发送详细调试日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'🔧 调试: 执行命令 {tar_cmd}'
+        })
+
+        # 发送进度更新
+        socketio.emit('transfer_progress', {
+            'transfer_id': transfer_id,
+            'progress': 50,  # 模拟50%进度
+            'current_file': file_name
+        })
+
+        # 记录开始时间
+        import time
+        start_time = time.time()
+
+        result = subprocess.run(tar_cmd, shell=True, capture_output=True, text=True, timeout=300)
+
+        print(f"🔧 命令返回码: {result.returncode}")
+        if result.stdout:
+            print(f"🔧 标准输出: {result.stdout}")
+        if result.stderr:
+            print(f"🔧 错误输出: {result.stderr}")
+
+        if result.returncode == 0:
+            # 计算传输耗时
+            end_time = time.time()
+            duration = end_time - start_time
+
+            # 格式化耗时显示
+            if duration < 60:
+                time_str = f"{duration:.1f}秒"
+            elif duration < 3600:
+                minutes = int(duration // 60)
+                seconds = duration % 60
+                time_str = f"{minutes}分{seconds:.1f}秒"
+            else:
+                hours = int(duration // 3600)
+                minutes = int((duration % 3600) // 60)
+                seconds = duration % 60
+                time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
+
+            print(f"✅ 远程到NAS tar+ssh传输成功: {file_name}")
+
+            # 发送成功日志（包含耗时）
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ {file_name} 远程到NAS tar+ssh传输完成，耗时: {time_str}'
+            })
+
+            return True
+        else:
+            print(f"❌ 远程到NAS tar+ssh传输失败: {result.stderr}")
+
+            # 发送错误日志
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ {file_name} 远程到NAS tar+ssh传输失败: {result.stderr}'
+            })
+
+            return False
+
+    except Exception as e:
+        print(f"❌ 远程到NAS tar+ssh传输异常: {str(e)}")
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'❌ {file_name} 远程到NAS传输异常: {str(e)}'
+        })
+        return False
+
+def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id):
+    """从NAS服务器使用tar+ssh传输文件"""
+    try:
+        source_config = SERVERS[source_server]
+        source_user = source_config['user']
+        source_password = source_config.get('password')
+        source_port = source_config.get('port', 22)
+
+        target_config = SERVERS[target_server]
+        target_user = target_config['user']
+        target_password = target_config.get('password')
+        target_port = target_config.get('port', 22)
+
+        # 构建SSH命令
+        source_ssh = f"ssh -p {source_port} -o StrictHostKeyChecking=no"
+        target_ssh = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+
+        # 创建目标目录
+        if is_local_server(target_server):
+            # 目标是本地
+            os.makedirs(target_path, exist_ok=True)
+            if is_directory:
+                os.makedirs(os.path.join(target_path, file_name), exist_ok=True)
+        else:
+            # 目标是远程服务器
+            if is_directory:
+                remote_target = f"{target_path}/{file_name}"
+            else:
+                remote_target = target_path
+
+            if target_password:
+                mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+            else:
+                mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+            subprocess.run(mkdir_cmd, shell=True, check=True)
+
+        # 构建传输命令
+        if is_directory:
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}"
+        else:
+            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)}"
+
+        if is_local_server(target_server):
+            # NAS到本地
+            if is_directory:
+                target_extract_cmd = f"cd {target_path} && tar -xf -"
+            else:
+                target_extract_cmd = f"cd {target_path} && tar -xf -"
+
+            if source_password:
+                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_extract_cmd}"
+            else:
+                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_extract_cmd}"
+        else:
+            # NAS到远程服务器
+            if is_directory:
+                target_extract_cmd = f"cd {target_path} && tar -xf -"
+            else:
+                target_extract_cmd = f"cd {target_path} && tar -xf -"
+
+            if source_password and target_password:
+                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+            elif source_password:
+                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+            elif target_password:
+                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+            else:
+                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+
+        print(f"🚀 执行NAS tar+ssh传输: {file_name}")
+        print(f"🔧 执行命令: {full_cmd}")
+
+        # 发送开始传输日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'🚀 开始从NAS tar+ssh传输 {file_name}...'
+        })
+
+        # 记录开始时间
+        import time
+        start_time = time.time()
+
+        result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True, timeout=300)
+
+        print(f"🔧 命令返回码: {result.returncode}")
+        if result.stdout:
+            print(f"🔧 标准输出: {result.stdout}")
+        if result.stderr:
+            print(f"🔧 错误输出: {result.stderr}")
+
+        if result.returncode == 0:
+            # 计算传输耗时
+            end_time = time.time()
+            duration = end_time - start_time
+
+            # 格式化耗时显示
+            if duration < 60:
+                time_str = f"{duration:.1f}秒"
+            elif duration < 3600:
+                minutes = int(duration // 60)
+                seconds = duration % 60
+                time_str = f"{minutes}分{seconds:.1f}秒"
+            else:
+                hours = int(duration // 3600)
+                minutes = int((duration % 3600) // 60)
+                seconds = duration % 60
+                time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
+
+            print(f"✅ NAS tar+ssh传输成功: {file_name}")
+
+            # 发送成功日志（包含耗时）
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ {file_name} 从NAS tar+ssh传输完成，耗时: {time_str}'
+            })
+
+            return True
+        else:
+            print(f"❌ NAS tar+ssh传输失败: {result.stderr}")
+
+            # 发送错误日志
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ {file_name} 从NAS tar+ssh传输失败: {result.stderr}'
+            })
+
+            return False
+
+    except Exception as e:
+        print(f"❌ NAS tar+ssh传输异常: {e}")
+
+        # 发送异常日志
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'❌ {file_name} 从NAS传输异常: {str(e)}'
+        })
+
+        return False
+
+def get_default_path(server_ip):
+    """获取服务器的默认路径"""
+    server_config = SERVERS.get(server_ip, {})
+
+    # NAS服务器使用不同的默认路径
+    if server_ip == "10.190.21.253":  # NAS服务器
+        return "/var/services/homes/Algorithm"
+
+    # 其他服务器根据用户名确定默认路径
+    user = server_config.get("user", "th")
+    if user == "thgd":
+        return "/home/thgd"
+    else:
+        return "/home/th"
 
 class ParallelTransferManager:
     def __init__(self):
@@ -778,7 +1253,7 @@ def is_winscp_hidden_file(name, permissions="", path="/"):
 
     return False
 
-def get_directory_listing(server_ip, path="/home/th", show_hidden=False):
+def get_directory_listing(server_ip, path=None, show_hidden=False):
     """获取远程目录列表
 
     Args:
@@ -786,6 +1261,10 @@ def get_directory_listing(server_ip, path="/home/th", show_hidden=False):
         path: 目录路径
         show_hidden: 是否显示隐藏文件（包括WinSCP规则的隐藏文件）
     """
+    # 如果没有指定路径，使用默认路径
+    if path is None:
+        path = get_default_path(server_ip)
+
     # 首先检查缓存
     cached_result = get_cached_listing(server_ip, path, show_hidden)
     if cached_result is not None:
@@ -871,8 +1350,12 @@ def get_directory_listing(server_ip, path="/home/th", show_hidden=False):
         set_cached_listing(server_ip, path, show_hidden, items)
         return items
 
-def get_directory_listing_optimized(server_ip, path="/home/th", show_hidden=False):
+def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
     """优化的目录列表获取函数 - 专注于响应速度"""
+
+    # 如果没有指定路径，使用默认路径
+    if path is None:
+        path = get_default_path(server_ip)
 
     # 首先检查缓存 - 优先使用缓存
     cached_result = get_cached_listing(server_ip, path, show_hidden)
@@ -1082,10 +1565,14 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
             # 发送传输完成通知
             if failed_count > 0:
+                # 部分成功情况下也要显示总耗时
+                total_time = time_tracker.end_transfer(transfer_id)
+
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
                     'status': 'partial_success',
-                    'message': f'传输完成，成功: {completed_count}, 失败: {failed_count}'
+                    'message': f'传输完成，成功: {completed_count}, 失败: {failed_count}',
+                    'total_time': total_time
                 })
             else:
                 # 结束传输计时
@@ -1106,10 +1593,14 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 })
 
         except Exception as e:
+            # 即使传输失败，也要计算并显示总耗时
+            total_time = time_tracker.end_transfer(transfer_id)
+
             socketio.emit('transfer_complete', {
                 'transfer_id': transfer_id,
                 'status': 'error',
-                'message': str(e)
+                'message': str(e),
+                'total_time': total_time
             })
         finally:
             # 清理传输记录
@@ -1155,15 +1646,21 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         if transfer_mode == 'local_to_remote':
             # 从TurboFile主机传输到远程服务器
             print(f"📍 调用函数: transfer_file_via_local_rsync_instant")
-            transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            if not success:
+                raise Exception("本地到远程传输失败")
         elif transfer_mode == 'remote_to_local':
             # 从远程服务器传输到TurboFile主机
             print(f"📍 调用函数: transfer_file_via_remote_to_local_rsync_instant")
-            transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            if not success:
+                raise Exception("远程到本地传输失败")
         elif transfer_mode == 'remote_to_remote':
             # 从远程服务器传输到另一个远程服务器
             print(f"📍 调用函数: transfer_file_via_remote_rsync_instant")
-            transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            if not success:
+                raise Exception("远程到远程传输失败")
         else:
             # 本地到本地（同一台机器）
             print(f"📍 调用函数: transfer_file_via_local_to_local_instant")
@@ -1189,7 +1686,11 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         return {'success': False, 'message': str(e)}
 
 def transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
-    """即时本地rsync传输 - 支持目录内部并行"""
+    """即时本地rsync传输 - 支持目录内部并行和NAS服务器"""
+
+    # 如果目标是NAS服务器，使用tar+ssh方案
+    if is_nas_server(target_server):
+        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
 
     # 检查是否启用目录内部并行
     enable_folder_parallel = PARALLEL_TRANSFER_CONFIG.get('enable_folder_parallel', False)
@@ -1210,6 +1711,10 @@ def transfer_file_via_local_rsync_instant(source_path, target_server, target_pat
 
 def transfer_single_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """单rsync传输实现"""
+    # 如果目标是NAS服务器，使用tar+ssh方案
+    if is_nas_server(target_server):
+        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
@@ -1421,6 +1926,10 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
 
 def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """从远程服务器传输到TurboFile主机 - 使用rsync拉取模式"""
+    # 如果源是NAS服务器，使用tar+ssh方案
+    if is_nas_server(source_server):
+        return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
     source_user = SERVERS[source_server]['user']
     source_password = SERVERS[source_server].get('password')
 
@@ -1508,6 +2017,25 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
 
 def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """即时远程rsync传输 - 无进度监控版本，专注性能"""
+    print(f"🔍 远程传输检查: 源={source_server}, 目标={target_server}")
+
+    # 如果涉及NAS服务器，使用tar+ssh方案
+    source_is_nas = is_nas_server(source_server)
+    target_is_nas = is_nas_server(target_server)
+
+    print(f"🔍 NAS检测结果: 源是NAS={source_is_nas}, 目标是NAS={target_is_nas}")
+
+    if source_is_nas or target_is_nas:
+        print(f"🚀 使用tar+ssh传输方案")
+        if source_is_nas:
+            print(f"📤 从NAS传输: {source_server} -> {target_server}")
+            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+        else:
+            print(f"📥 传输到NAS: {source_server} -> {target_server}")
+            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
+    print(f"🔄 使用rsync传输方案")
+
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
@@ -1617,31 +2145,18 @@ def transfer_file_batch(transfer_id, source_server, file_batch, target_server, t
 
 def transfer_file_via_remote_rsync(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """通过远程rsync传输文件"""
+    # 如果涉及NAS服务器，使用tar+ssh方案
+    if is_nas_server(source_server) or is_nas_server(target_server):
+        if is_nas_server(source_server):
+            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+        else:
+            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
-    # 优化的SSH命令配置
-    ssh_cmd_parts = [
-        "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "PasswordAuthentication=yes",
-        "-o", "ConnectTimeout=10",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "TCPKeepAlive=yes",
-        "-o", "ControlMaster=auto",
-        "-o", "ControlPath=/tmp/ssh-%r@%h:%p",
-        "-o", "ControlPersist=300"
-    ]
-
-    if fast_ssh:
-        ssh_cmd_parts.extend([
-            "-o", "Compression=no",
-            "-o", "Ciphers=aes128-ctr,aes192-ctr,aes256-ctr",
-            "-o", "MACs=hmac-sha2-256,hmac-sha2-512"
-        ])
-
-    ssh_cmd = " ".join(ssh_cmd_parts)
+    # 使用统一的SSH命令构建函数（支持自定义端口）
+    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
 
     # 🚀 极速优化：精简rsync参数
     rsync_base_opts = [
@@ -1696,6 +2211,12 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
     total_files = len(source_files)
     completed_files = 0
 
+    # 启动传输计时器
+    time_tracker.start_transfer(transfer_id)
+
+    # 初始化速度模拟器
+    speed_simulator.init_transfer_speed(transfer_id)
+
     for file_info in source_files:
         # 检查是否被取消
         if transfer_id not in active_transfers:
@@ -1741,34 +2262,62 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
         if is_local_source:
             # 🚀 本地传输模式：完全使用rsync，移除Paramiko SFTP开销
-            transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files)
+            success = transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files)
+            if not success:
+                raise Exception("本地传输失败")
         else:
+                    # 远程到远程传输
+                    print(f"🔍 并行传输NAS检查: 源={source_server}, 目标={target_server}")
+
+                    # 如果涉及NAS服务器，使用tar+ssh方案
+                    source_is_nas = is_nas_server(source_server)
+                    target_is_nas = is_nas_server(target_server)
+
+                    print(f"🔍 并行传输NAS检测结果: 源是NAS={source_is_nas}, 目标是NAS={target_is_nas}")
+
+                    if source_is_nas or target_is_nas:
+                        print(f"🚀 并行传输使用tar+ssh方案")
+                        if source_is_nas:
+                            print(f"📤 并行传输从NAS: {source_server} -> {target_server}")
+                            success = transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+                        else:
+                            print(f"📥 并行传输到NAS: {source_server} -> {target_server}")
+                            # 对于远程到NAS的传输，使用专门的远程tar+ssh方法
+                            success = transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
+                        if not success:
+                            raise Exception("NAS tar+ssh传输失败")
+
+                        # 发送进度更新事件
+                        socketio.emit('transfer_progress', {
+                            'transfer_id': transfer_id,
+                            'progress': {
+                                'current_file': file_name,
+                                'completed_files': completed_files + 1,
+                                'total_files': total_files,
+                                'percentage': int(((completed_files + 1) / total_files) * 100),
+                                'speed': '0 MB/s',
+                                'elapsed_time': '00:00:00',
+                                'source_server': source_server,
+                                'target_server': target_server,
+                                'transfer_mode': transfer_mode
+                            }
+                        })
+
+                        # NAS传输成功，继续执行后续逻辑而不是直接返回
+                        print(f"✅ NAS传输成功，继续处理后续逻辑")
+
+                        # 跳过rsync逻辑，直接进入下一个文件
+                        completed_files += 1
+                        continue
+
+                    print(f"🔄 并行传输使用rsync方案")
                     # 远程到远程传输，直接在源服务器执行rsync（就像原始脚本）
                     target_user = SERVERS[target_server]['user']
                     target_password = SERVERS[target_server].get('password')
 
-                    # 优化的SSH命令配置
-                    ssh_cmd_parts = [
-                        "ssh",
-                        "-o", "StrictHostKeyChecking=no",
-                        "-o", "PasswordAuthentication=yes",
-                        "-o", "ConnectTimeout=10",
-                        "-o", "ServerAliveInterval=30",
-                        "-o", "ServerAliveCountMax=3",
-                        "-o", "TCPKeepAlive=yes",
-                        "-o", "ControlMaster=auto",
-                        "-o", "ControlPath=/tmp/ssh-%r@%h:%p",
-                        "-o", "ControlPersist=300"
-                    ]
-
-                    if fast_ssh:
-                        ssh_cmd_parts.extend([
-                            "-o", "Compression=no",
-                            "-o", "Ciphers=aes128-ctr,aes192-ctr,aes256-ctr",
-                            "-o", "MACs=hmac-sha2-256,hmac-sha2-512"
-                        ])
-
-                    ssh_cmd = " ".join(ssh_cmd_parts)
+                    # 使用统一的SSH命令构建函数（支持自定义端口）
+                    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
 
                     # 优化的rsync参数（兼容性优先）- 移除进度监控以提升性能
                     rsync_base_opts = [
@@ -1859,11 +2408,20 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
             delete_cmd = f"rm -rf '{source_path}'"
             ssh_manager.execute_command(source_server, delete_cmd)
 
+    # 结束传输计时
+    total_time = time_tracker.end_transfer(transfer_id)
+
+    # 🚀 性能监控：记录传输性能数据
+    print(f"[性能监控] 传输ID: {transfer_id}")
+    print(f"[性能监控] 文件数量: {len(source_files)}")
+    print(f"[性能监控] 传输时间: {total_time}")
+
     # 传输完成
     socketio.emit('transfer_complete', {
         'transfer_id': transfer_id,
         'status': 'success',
-        'message': f'成功传输 {len(source_files)} 个文件/文件夹'
+        'message': f'成功传输 {len(source_files)} 个文件/文件夹',
+        'total_time': total_time
     })
 
 def format_file_size(bytes_str):
@@ -2056,7 +2614,9 @@ def get_servers():
 
 @app.route('/api/browse/<server_ip>')
 def browse_directory(server_ip):
-    path = request.args.get('path', '/home/th')
+    # 使用动态默认路径
+    default_path = get_default_path(server_ip)
+    path = request.args.get('path', default_path)
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
     force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
 
@@ -2236,32 +2796,16 @@ def handle_disconnect():
 def transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files=0, total_files=1):
     """使用本地rsync高速传输（与原始脚本相同的方式）"""
     try:
+        # 如果目标是NAS服务器，使用tar+ssh方案
+        if is_nas_server(target_server):
+            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+
         target_config = SERVERS[target_server]
         target_user = target_config['user']
         target_password = target_config.get('password')
 
-        # 优化的SSH选项配置
-        ssh_opts = [
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "PasswordAuthentication=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3",
-            "-o", "TCPKeepAlive=yes",
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=/tmp/ssh-%r@%h:%p",
-            "-o", "ControlPersist=300",  # 连接复用5分钟
-        ]
-
-        if fast_ssh:
-            ssh_opts.extend([
-                "-o", "Compression=no",
-                "-o", "Ciphers=aes128-ctr,aes192-ctr,aes256-ctr",  # 快速加密算法
-                "-o", "MACs=hmac-sha2-256,hmac-sha2-512",  # 快速MAC算法
-            ])
-
-        ssh_opts_str = " ".join(ssh_opts)
+        # 使用统一的SSH命令构建函数（支持自定义端口）
+        ssh_opts_str = get_ssh_command_with_port(target_server, fast_ssh)
 
         # 构建rsync命令（与原始脚本完全相同）
         if is_directory:
