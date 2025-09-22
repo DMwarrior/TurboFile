@@ -1684,7 +1684,9 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         else:
             # 本地到本地（同一台机器）
             print(f"📍 调用函数: transfer_file_via_local_to_local_instant")
-            transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            if not success:
+                raise Exception("本地到本地传输失败")
 
         # 如果是移动模式，删除源文件
         if mode == "move" and not is_local_server(source_server):
@@ -1802,6 +1804,9 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
             except:
                 pass
         raise Exception("传输被用户取消")
+
+    # 传输成功
+    return True
 
 def transfer_directory_parallel(source_path, target_server, target_path, file_name, transfer_id, fast_ssh):
     """目录内部并行传输实现"""
@@ -2031,6 +2036,8 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
             'transfer_id': transfer_id,
             'message': f'📁 本地复制完成: {file_name}'
         })
+
+        return True  # 返回成功状态
 
     except Exception as e:
         raise Exception(f"本地复制失败: {str(e)}")
@@ -2933,6 +2940,8 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             'transfer_id': transfer_id,
             'message': f'✅ {file_name} 传输完成，耗时: {time_str}'
         })
+
+        return True  # 返回成功状态
 
     except Exception as e:
         raise Exception(f"本地rsync传输失败: {str(e)}")
