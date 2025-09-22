@@ -108,18 +108,18 @@
 
         .file-item {
             cursor: pointer;
-            padding: 6px 10px;
+            padding: 4px 8px;
             border-bottom: 1px solid #f1f5f9;
-            font-size: 0.85rem;
-            line-height: 1.4;
+            font-size: 0.8rem;
+            line-height: 1.3;
             user-select: none;
             display: flex;
             align-items: center;
             /* 完全移除transition动画 */
-            border-radius: 4px;
-            margin: 1px 2px 1px 2px;
+            border-radius: 3px;
+            margin: 0px 1px 0px 1px;
             /* 确保最后一个文件项有足够的底部间距 */
-            min-height: 36px;
+            min-height: 28px;
         }
 
         .file-item:hover {
@@ -141,10 +141,10 @@
         }
 
         .file-item i {
-            margin-right: 8px;
-            width: 16px;
+            margin-right: 6px;
+            width: 14px;
             text-align: center;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
         }
 
         .file-info {
@@ -160,9 +160,9 @@
         }
 
         .file-details {
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             opacity: 0.7;
-            margin-left: 10px;
+            margin-left: 8px;
             font-weight: 400;
         }
 
@@ -221,7 +221,7 @@
         .file-item[title*="双击返回"] {
             background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
             border: 1px solid #bfdbfe;
-            margin-bottom: 8px;
+            margin-bottom: 4px;
         }
 
         .file-item[title*="双击返回"]:hover {
@@ -237,7 +237,7 @@
 
         /* 确保最后一个文件项有足够的底部间距 */
         .file-item:last-child {
-            margin-bottom: 15px;
+            margin-bottom: 8px;
         }
 
         /* 刷新状态动画已移除 */
@@ -263,6 +263,50 @@
             transform: none !important;
             border-color: var(--border-color) !important;
         }
+
+        /* 刷新按钮颜色交互行为修复与优化（仅限文件浏览器区域） */
+        /* 悬停时不变色，仅保留我们已有的轻微浮起与阴影反馈 */
+        #sourcePanel .btn-outline-primary,
+        #targetPanel .btn-outline-success {
+            /* 为点击反馈提供平滑过渡 */
+            transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+        }
+
+        #sourcePanel .btn-outline-primary:hover {
+            background-color: transparent !important;
+            color: var(--primary-color) !important;
+            border-color: var(--primary-color) !important;
+        }
+        #targetPanel .btn-outline-success:hover {
+            background-color: transparent !important;
+            color: var(--success-color) !important;
+            border-color: var(--success-color) !important;
+        }
+
+        /* 点击按下时明确的颜色反馈，松开后迅速恢复 */
+        #sourcePanel .btn-outline-primary:active {
+            background-color: var(--primary-dark) !important;
+            color: #fff !important;
+            border-color: var(--primary-dark) !important;
+        }
+        #targetPanel .btn-outline-success:active {
+            background-color: var(--success-color) !important;
+            color: #fff !important;
+            border-color: var(--success-color) !important;
+        }
+
+        /* 焦点但非按下/悬停时保持原始外观，避免残留变色 */
+        #sourcePanel .btn-outline-primary:focus:not(:active):not(:hover) {
+            background-color: transparent !important;
+            color: var(--primary-color) !important;
+            border-color: var(--primary-color) !important;
+        }
+        #targetPanel .btn-outline-success:focus:not(:active):not(:hover) {
+            background-color: transparent !important;
+            color: var(--success-color) !important;
+            border-color: var(--success-color) !important;
+        }
+
 
         /* 强制保持默认光标样式 */
         body, html {
@@ -721,8 +765,9 @@
             }
 
             .file-item {
-                padding: 4px 6px;
-                font-size: 0.8rem;
+                padding: 3px 5px;
+                font-size: 0.75rem;
+                min-height: 24px;
             }
 
             .btn {
@@ -749,8 +794,9 @@
             }
 
             .file-item {
-                font-size: 0.75rem;
-                padding: 3px 5px;
+                font-size: 0.7rem;
+                padding: 2px 4px;
+                min-height: 20px;
             }
         }
 
@@ -771,7 +817,8 @@
             }
 
             .file-item {
-                padding: 4px 6px;
+                padding: 3px 5px;
+                min-height: 24px;
             }
 
             .btn {
@@ -1490,6 +1537,29 @@
             }
         }
 
+        // WinSCP风格的文件排序函数
+        function sortFilesWinSCPStyle(files) {
+            return files.sort((a, b) => {
+                // 1. 文件夹优先显示在文件之前
+                if (a.is_directory && !b.is_directory) {
+                    return -1;
+                }
+                if (!a.is_directory && b.is_directory) {
+                    return 1;
+                }
+
+                // 2. 同类型内按文件名字母顺序排序（大小写不敏感）
+                const nameA = a.name.toLowerCase();
+                const nameB = b.name.toLowerCase();
+
+                // 3. 自然排序（正确处理数字）
+                return nameA.localeCompare(nameB, undefined, {
+                    numeric: true,
+                    sensitivity: 'base'
+                });
+            });
+        }
+
         // 显示文件列表
         function displayFiles(containerId, files, currentPath, isSource) {
             const container = document.getElementById(containerId);
@@ -1510,8 +1580,11 @@
                 </div>`;
             }
 
+            // 应用WinSCP风格排序
+            const sortedFiles = sortFilesWinSCPStyle([...files]);
+
             // 文件和文件夹
-            files.forEach((file, index) => {
+            sortedFiles.forEach((file, index) => {
                 const icon = file.is_directory ? 'bi-folder-fill text-warning' : 'bi-file-earmark text-info';
                 const size = file.is_directory ? '' : formatFileSize(file.size);
                 const fileId = `file_${containerId}_${index}`;
