@@ -268,18 +268,8 @@ class ProgressManager:
                 simulated_speed = speed_simulator.get_simulated_speed(transfer_id)
                 elapsed_time = time_tracker.get_elapsed_time(transfer_id)
 
-                socketio.emit('transfer_progress', {
-                    'transfer_id': transfer_id,
-                    'progress': {
-                        'percentage': overall_percentage,
-                        'completed_files': completed_files,
-                        'total_files': total_files,
-                        'current_file': file_name,
-                        'current_file_progress': percentage,
-                        'speed': simulated_speed,
-                        'elapsed_time': elapsed_time
-                    }
-                })
+                # 进度更新已移除以提升性能
+                pass
 
     def complete_file(self, transfer_id, file_name, success=True):
         """标记文件传输完成"""
@@ -297,17 +287,8 @@ class ProgressManager:
             if file_name in progress['file_progress']:
                 del progress['file_progress'][file_name]
 
-            # 发送更新
-            overall_percentage = int((progress['completed_files'] / progress['total_files']) * 100)
-            socketio.emit('transfer_progress', {
-                'transfer_id': transfer_id,
-                'progress': {
-                    'percentage': overall_percentage,
-                    'completed_files': progress['completed_files'],
-                    'total_files': progress['total_files'],
-                    'failed_files': progress['failed_files']
-                }
-            })
+            # 进度更新已移除以提升性能
+            pass
 
     def cleanup_transfer(self, transfer_id):
         """清理传输进度记录"""
@@ -564,12 +545,7 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
             'message': f'🔧 调试: 执行命令 {tar_cmd}'
         })
 
-        # 发送进度更新
-        socketio.emit('transfer_progress', {
-            'transfer_id': transfer_id,
-            'progress': 50,  # 模拟50%进度
-            'current_file': file_name
-        })
+        # 进度更新已移除以提升性能
 
         # 记录开始时间
         import time
@@ -707,12 +683,7 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
             'message': f'🔧 调试: 执行命令 {tar_cmd}'
         })
 
-        # 发送进度更新
-        socketio.emit('transfer_progress', {
-            'transfer_id': transfer_id,
-            'progress': 50,  # 模拟50%进度
-            'current_file': file_name
-        })
+        # 进度更新已移除以提升性能
 
         # 记录开始时间
         import time
@@ -1552,42 +1523,62 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
                     try:
                         result = future.result()
-                        if result and result.get('success', False):
+                        # 🔧 BUG修复：添加详细日志以诊断返回值问题
+                        print(f"[DEBUG] 传输任务返回值: {result}, 类型: {type(result)}")
+
+                        # 🔧 BUG修复：健壮的返回值判断逻辑
+                        # 确保result是字典且包含success字段
+                        is_success = False
+                        if result is not None:
+                            if isinstance(result, dict):
+                                is_success = result.get('success', False)
+                                print(f"[DEBUG] 字典返回值，success={is_success}")
+                            else:
+                                # 如果返回值不是字典，记录警告
+                                print(f"[WARNING] 传输函数返回了非字典值: {result}, 类型: {type(result)}")
+                                # 假设非False/None的值表示成功
+                                is_success = bool(result)
+                        else:
+                            print(f"[WARNING] 传输函数返回了None")
+
+                        if is_success:
                             completed_count += 1
+                            print(f"[DEBUG] 传输成功，已完成: {completed_count}/{total_files}")
                         else:
                             failed_count += 1
+                            error_msg = result.get('message', '未知错误') if isinstance(result, dict) else str(result)
+                            print(f"[DEBUG] 传输失败，失败数: {failed_count}, 原因: {error_msg}")
 
-                        # 更新总体进度
-                        progress_percentage = int((completed_count / total_files) * 100)
-                        simulated_speed = speed_simulator.get_simulated_speed(transfer_id)
-                        elapsed_time = time_tracker.get_elapsed_time(transfer_id)
-
-                        socketio.emit('transfer_progress', {
-                            'transfer_id': transfer_id,
-                            'progress': {
-                                'percentage': progress_percentage,
-                                'completed_files': completed_count,
-                                'total_files': total_files,
-                                'failed_files': failed_count,
-                                'speed': simulated_speed,
-                                'elapsed_time': elapsed_time,
-                                'source_server': source_server,
-                                'target_server': target_server
-                            }
-                        })
+                        # 进度更新已移除以提升性能 - 只在传输完成时发送状态
 
                     except Exception as e:
+                        # 🔧 BUG修复：区分future.result()的异常和判断逻辑的异常
                         failed_count += 1
+                        print(f"[ERROR] 传输任务异常: {str(e)}, 类型: {type(e).__name__}")
+                        import traceback
+                        print(f"[ERROR] 异常堆栈: {traceback.format_exc()}")
                         socketio.emit('transfer_log', {
                             'transfer_id': transfer_id,
                             'message': f'❌ 传输任务失败: {str(e)}'
                         })
 
             # 发送传输完成通知
+            # 🔧 BUG修复：添加详细日志以诊断完成状态
+            print(f"[DEBUG] 传输完成统计 - 成功: {completed_count}, 失败: {failed_count}, 总数: {total_files}")
+
+            # 🔧 BUG修复：验证所有任务都被处理
+            processed_count = completed_count + failed_count
+            if processed_count != total_files:
+                print(f"[WARNING] 任务处理数量不匹配！已处理: {processed_count}, 总数: {total_files}")
+                # 将未处理的任务计入失败
+                failed_count += (total_files - processed_count)
+                print(f"[WARNING] 调整后失败数: {failed_count}")
+
             if failed_count > 0:
                 # 部分成功情况下也要显示总耗时
                 total_time = time_tracker.end_transfer(transfer_id)
 
+                print(f"[DEBUG] 发送部分成功事件: transfer_id={transfer_id}, status=partial_success")
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
                     'status': 'partial_success',
@@ -1605,6 +1596,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 print(f"[性能监控] 平均速度: {completed_count/float(total_time.replace('秒', '')):.1f}文件/秒")
                 print(f"[性能监控] 速度更新间隔: {PERFORMANCE_CONFIG['speed_update_interval']}秒")
 
+                print(f"[DEBUG] 发送成功事件: transfer_id={transfer_id}, status=success")
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
                     'status': 'success',
@@ -1615,6 +1607,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         except Exception as e:
             # 即使传输失败，也要计算并显示总耗时
             total_time = time_tracker.end_transfer(transfer_id)
+
+            # 🔧 BUG修复：添加详细异常日志
+            print(f"[DEBUG] 传输异常: {str(e)}")
+            print(f"[DEBUG] 发送错误事件: transfer_id={transfer_id}, status=error")
 
             socketio.emit('transfer_complete', {
                 'transfer_id': transfer_id,
@@ -1684,9 +1680,12 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         else:
             # 本地到本地（同一台机器）
             print(f"📍 调用函数: transfer_file_via_local_to_local_instant")
+            print(f"[DEBUG] 参数: source_path={source_path}, target_path={target_path}, file_name={file_name}, is_directory={is_directory}")
             success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            print(f"[DEBUG] transfer_file_via_local_to_local_instant返回值: {success}, 类型: {type(success)}")
             if not success:
                 raise Exception("本地到本地传输失败")
+            print(f"[DEBUG] 本地到本地传输成功，准备返回字典")
 
         # 如果是移动模式，删除源文件
         if mode == "move" and not is_local_server(source_server):
@@ -2005,6 +2004,9 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         return_code = process.wait()
         if return_code != 0:
             raise Exception(f"rsync传输失败，退出码: {return_code}")
+
+        # 🔧 BUG修复：添加返回True表示传输成功
+        return True
     except KeyboardInterrupt:
         # 处理取消操作
         try:
@@ -2021,26 +2023,69 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
 def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id):
     """本地到本地传输 - 使用cp命令"""
     import shutil
+    import subprocess
 
     try:
+        dest_path = os.path.join(target_path, file_name)
+
         if is_directory:
-            # 目录复制
-            dest_path = os.path.join(target_path, file_name)
-            shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
+            # 🔧 BUG修复：使用rsync代替shutil.copytree，避免目标已存在时的异常
+            # rsync更可靠，支持增量复制，不会因为目标已存在而失败
+            print(f"[DEBUG] 本地目录复制: {source_path} -> {dest_path}")
+
+            # 确保源路径以/结尾（rsync语法：复制目录内容而非目录本身）
+            source_with_slash = source_path if source_path.endswith('/') else source_path + '/'
+
+            # 使用rsync进行本地复制（更可靠）
+            rsync_cmd = [
+                'rsync', '-a',  # 归档模式（保留权限、时间戳等）
+                '--delete',     # 删除目标中多余的文件
+                source_with_slash,
+                dest_path
+            ]
+
+            print(f"[DEBUG] 执行命令: {' '.join(rsync_cmd)}")
+            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=300)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                print(f"[ERROR] rsync失败: returncode={result.returncode}, stderr={error_msg}")
+                raise Exception(f"本地目录复制失败: {error_msg}")
+
+            print(f"[DEBUG] rsync成功: {file_name}")
         else:
-            # 文件复制
-            dest_path = os.path.join(target_path, file_name)
-            shutil.copy2(source_path, dest_path)
+            # 文件复制 - 使用cp命令更可靠
+            print(f"[DEBUG] 本地文件复制: {source_path} -> {dest_path}")
+
+            # 使用cp命令（支持覆盖）
+            cp_cmd = ['cp', '-f', source_path, dest_path]
+
+            print(f"[DEBUG] 执行命令: {' '.join(cp_cmd)}")
+            result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=60)
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                print(f"[ERROR] cp失败: returncode={result.returncode}, stderr={error_msg}")
+                raise Exception(f"本地文件复制失败: {error_msg}")
+
+            print(f"[DEBUG] cp成功: {file_name}")
 
         socketio.emit('transfer_log', {
             'transfer_id': transfer_id,
             'message': f'📁 本地复制完成: {file_name}'
         })
 
+        print(f"[DEBUG] transfer_file_via_local_to_local_instant返回True")
         return True  # 返回成功状态
 
+    except subprocess.TimeoutExpired:
+        error_msg = f"本地复制超时: {file_name}"
+        print(f"[ERROR] {error_msg}")
+        raise Exception(error_msg)
     except Exception as e:
-        raise Exception(f"本地复制失败: {str(e)}")
+        error_msg = f"本地复制失败: {str(e)}"
+        print(f"[ERROR] {error_msg}")
+        raise Exception(error_msg)
 
 def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """即时远程rsync传输 - 无进度监控版本，专注性能"""
@@ -2138,13 +2183,9 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     if exit_status != 0:
         raise Exception(f"rsync传输失败，退出码: {exit_status}, 错误: {error}")
 
-    return {
-        'success': True,
-        'duration': transfer_duration,
-        'exit_status': exit_status,
-        'output': output,
-        'error': error
-    }
+    # 🔧 BUG修复：统一返回布尔值True，而不是字典
+    # 原因：调用方使用 if not success 判断，字典永远为True导致判断失效
+    return True
 
 def transfer_file_batch(transfer_id, source_server, file_batch, target_server, target_path, mode="copy", fast_ssh=True):
     """批量传输小文件"""
@@ -2268,20 +2309,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         simulated_speed = speed_simulator.get_simulated_speed(transfer_id)
         elapsed_time = time_tracker.get_elapsed_time(transfer_id)
 
-        socketio.emit('transfer_progress', {
-            'transfer_id': transfer_id,
-            'progress': {
-                'current_file': file_name,
-                'completed_files': completed_files,
-                'total_files': total_files,
-                'percentage': int((completed_files / total_files) * 100),
-                'speed': simulated_speed,
-                'elapsed_time': elapsed_time,
-                'source_server': source_server,
-                'target_server': target_server,
-                'transfer_mode': transfer_mode
-            }
-        })
+        # 进度更新已移除以提升性能
 
         # 构建rsync命令
         # 智能判断传输模式
@@ -2315,21 +2343,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         if not success:
                             raise Exception("NAS tar+ssh传输失败")
 
-                        # 发送进度更新事件
-                        socketio.emit('transfer_progress', {
-                            'transfer_id': transfer_id,
-                            'progress': {
-                                'current_file': file_name,
-                                'completed_files': completed_files + 1,
-                                'total_files': total_files,
-                                'percentage': int(((completed_files + 1) / total_files) * 100),
-                                'speed': '0 MB/s',
-                                'elapsed_time': '00:00:00',
-                                'source_server': source_server,
-                                'target_server': target_server,
-                                'transfer_mode': transfer_mode
-                            }
-                        })
+                        # 进度更新已移除以提升性能
 
                         # NAS传输成功，继续执行后续逻辑而不是直接返回
                         print(f"✅ NAS传输成功，继续处理后续逻辑")

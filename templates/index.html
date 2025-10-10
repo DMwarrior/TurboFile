@@ -192,21 +192,7 @@
 
 
         /* 拖拽相关样式 - 移除transform动画 */
-        .file-item.dragging {
-            opacity: 0.6;
-            /* 移除transform动画，保持静态拖拽效果 */
-        }
-
-        .file-browser.drag-over {
-            border: 3px dashed var(--primary-color);
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-            animation: pulse 1s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.02); }
-        }
+        /* 拖拽相关样式已移除以提升性能 */
 
         /* 加载状态样式已移除，实现无感双击 */
 
@@ -1590,15 +1576,12 @@
                 const fileId = `file_${containerId}_${index}`;
 
                 if (isSource) {
-                    // 源文件支持多选、双击进入目录和拖拽 - 优化事件处理
+                    // 源文件支持多选、双击进入目录 - 移除拖拽功能以提升性能
                     html += `<div class="file-item selectable" id="${fileId}"
-                             draggable="true"
                              data-path="${file.path}"
                              data-name="${file.name}"
                              data-is-directory="${file.is_directory}"
                              onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}', ${isSource})"
-                             ondragstart="handleDragStart(event)"
-                             ondragend="handleDragEnd(event)"
                              ondblclick="handleFileItemDblClick(this, ${isSource})">
                         <i class="bi ${icon}"></i>
                         <div class="file-info">
@@ -1638,10 +1621,7 @@
                 if (el) el.textContent = `共 ${count} 项`;
             }
 
-            // 为目标文件浏览器添加拖拽接收功能
-            if (!isSource) {
-                setupDropZone(container);
-            }
+            // 拖拽功能已移除以提升性能
         }
 
         // 格式化文件大小
@@ -1668,7 +1648,7 @@
 
         // 双击配置 - 参考WinSCP等专业文件管理器的标准
         const DOUBLE_CLICK_CONFIG = {
-            timeWindow: 400,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
+            timeWindow: 300,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
             debounceDelay: 50 // 防抖延迟（毫秒）- 提高响应速度
         };
 
@@ -1878,98 +1858,7 @@
             }
         }
 
-        // 拖拽开始
-        function handleDragStart(event) {
-            const fileElement = event.target.closest('.file-item');
-            const path = fileElement.dataset.path;
-            const name = fileElement.dataset.name;
-            const isDirectory = String(fileElement.dataset.isDirectory).toLowerCase() === 'true';
-
-            // 如果拖拽的文件没有被选中，则选中它
-            if (!fileElement.classList.contains('selected')) {
-                clearAllSelections();
-                fileElement.classList.add('selected');
-                selectedSourceFiles = [{path, name, is_directory: isDirectory}];
-            }
-
-            // 设置拖拽数据
-            event.dataTransfer.setData('text/plain', JSON.stringify(selectedSourceFiles));
-            event.dataTransfer.effectAllowed = 'copy';
-
-            // 创建拖拽预览
-            const dragPreview = document.createElement('div');
-            dragPreview.className = 'drag-preview';
-            dragPreview.textContent = selectedSourceFiles.length > 1
-                ? `${selectedSourceFiles.length} 个项目`
-                : name;
-            document.body.appendChild(dragPreview);
-
-            // 设置拖拽图像
-            event.dataTransfer.setDragImage(dragPreview, 10, 10);
-
-            // 延迟移除预览元素
-            setTimeout(() => {
-                if (document.body.contains(dragPreview)) {
-                    document.body.removeChild(dragPreview);
-                }
-            }, 0);
-
-            fileElement.classList.add('dragging');
-        }
-
-        // 拖拽结束
-        function handleDragEnd(event) {
-            event.target.classList.remove('dragging');
-            document.querySelectorAll('.file-browser.drag-over').forEach(browser => {
-                browser.classList.remove('drag-over');
-            });
-        }
-
-        // 设置拖放区域
-        function setupDropZone(container) {
-            container.addEventListener('dragover', function(event) {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = 'copy';
-                container.classList.add('drag-over');
-            });
-
-            container.addEventListener('dragleave', function(event) {
-                if (!container.contains(event.relatedTarget)) {
-                    container.classList.remove('drag-over');
-                }
-            });
-
-            container.addEventListener('drop', function(event) {
-                event.preventDefault();
-                container.classList.remove('drag-over');
-
-                try {
-                    const draggedFiles = JSON.parse(event.dataTransfer.getData('text/plain'));
-                    if (draggedFiles && draggedFiles.length > 0) {
-                        // 自动开始传输
-                        selectedSourceFiles = draggedFiles;
-                        startTransferFromDrag();
-                    }
-                } catch (e) {
-                    console.error('拖拽数据解析失败:', e);
-                }
-            });
-        }
-
-        // 从拖拽开始传输
-        function startTransferFromDrag() {
-            const sourceServer = document.getElementById('sourceServer').value;
-            const targetServer = document.getElementById('targetServer').value;
-            const targetPath = currentTargetPath;
-
-            if (!sourceServer || !targetServer || !targetPath) {
-                alert('请确保已选择源服务器、目标服务器和目标路径');
-                return;
-            }
-
-            addLog('通过拖拽开始传输...');
-            startTransfer();
-        }
+        // 拖拽功能已移除以提升性能
 
         // 开始传输
         function startTransfer() {
@@ -2114,111 +2003,7 @@
             addLogSuccess(`✅ 传输任务已启动 (ID: ${data.transfer_id})`);
         });
 
-        socket.on('transfer_progress', function(data) {
-            if (data.transfer_id === currentTransferId) {
-                const progress = data.progress;
-
-                // 更新传输路径显示
-                if (progress.source_server && progress.target_server) {
-                    const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
-                    const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
-
-                    let routeIcon = '🔄';
-                    if (progress.transfer_mode === 'local_to_remote') {
-                        routeIcon = '📤';
-                    } else if (progress.transfer_mode === 'remote_to_local') {
-                        routeIcon = '📥';
-                    }
-
-                    document.getElementById('transferRoute').innerHTML =
-                        `${routeIcon} ${sourceDisplay} → ${targetDisplay}`;
-                }
-
-                // 更新状态信息，包含传输模式
-                let statusText = '';
-                let modeIcon = '';
-
-                // 根据传输模式设置图标
-                if (progress.transfer_mode) {
-                    switch (progress.transfer_mode) {
-                        case 'local_to_remote':
-                            modeIcon = '📤';
-                            break;
-                        case 'remote_to_local':
-                            modeIcon = '📥';
-                            break;
-                        case 'remote_to_remote':
-                            modeIcon = '🔄';
-                            break;
-                        default:
-                            modeIcon = '📁';
-                    }
-                }
-
-                if (progress.current_file) {
-                    statusText = `${modeIcon} 传输中: ${progress.current_file}`;
-                    if (progress.completed_files !== undefined && progress.total_files !== undefined) {
-                        statusText += ` (${progress.completed_files}/${progress.total_files})`;
-                    }
-
-                    // 添加服务器信息
-                    if (progress.source_server && progress.target_server) {
-                        const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
-                        const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
-                        statusText += ` [${sourceDisplay}→${targetDisplay}]`;
-                    }
-
-                    document.getElementById('transferStatus').textContent = statusText;
-                } else if (progress.files_transferred && progress.total_files) {
-                    document.getElementById('transferStatus').textContent =
-                        `${modeIcon} 传输中: ${progress.files_transferred}/${progress.total_files} 文件`;
-                }
-
-                // 更新传输速度
-                if (progress.speed) {
-                    document.getElementById('transferSpeed').textContent = progress.speed;
-                }
-
-                // 更新已传输字节数 - 显示为"传输中..."
-                document.getElementById('transferredBytes').textContent = '传输中...';
-
-                // 更新已用时间
-                if (progress.elapsed_time) {
-                    document.getElementById('elapsedTime').textContent = progress.elapsed_time;
-                }
-
-                // 如果有消息，也添加到日志
-                if (progress.message) {
-                    addLog(progress.message);
-                }
-
-                // 首次显示传输模式信息
-                if (progress.transfer_mode && !window.transferModeLogged) {
-                    let modeDescription = '';
-                    switch (progress.transfer_mode) {
-                        case 'local_to_remote':
-                            modeDescription = '本地到远程传输';
-                            break;
-                        case 'remote_to_local':
-                            modeDescription = '远程到本地传输';
-                            break;
-                        case 'remote_to_remote':
-                            modeDescription = '远程到远程传输';
-                            break;
-                        default:
-                            modeDescription = '本地传输';
-                    }
-
-                    if (progress.source_server && progress.target_server) {
-                        const sourceDisplay = progress.source_server === 'localhost' ? '本地' : progress.source_server;
-                        const targetDisplay = progress.target_server === 'localhost' ? '本地' : progress.target_server;
-                        addLogInfo(`🔄 传输模式: ${modeDescription} (${sourceDisplay} → ${targetDisplay})`);
-                    }
-
-                    window.transferModeLogged = true;
-                }
-            }
-        });
+        // 进度更新事件已移除以提升性能 - 只在传输完成时更新状态
 
         socket.on('transfer_log', function(data) {
             if (data.transfer_id === currentTransferId) {
@@ -2294,7 +2079,30 @@
                             refreshTargetAsync();
                         }
                     }, 1000); // 延迟1秒后刷新，确保文件系统同步
+                } else if (data.status === 'partial_success') {
+                    // 🔧 BUG修复：处理部分成功状态
+                    document.getElementById('transferStatus').textContent = '传输部分完成';
+                    document.getElementById('transferRoute').innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>部分成功';
+                    document.getElementById('progressBar').classList.add('bg-warning');
+
+                    // 显示总耗时
+                    if (data.total_time) {
+                        document.getElementById('elapsedTime').textContent = data.total_time;
+                    }
+
+                    addLogWarning(`⚠️ ${data.message}`);
+
+                    // 部分成功也刷新目标目录
+                    setTimeout(() => {
+                        const targetServer = document.getElementById('targetServer').value;
+
+                        if (targetServer && currentTargetPath) {
+                            addLogInfo('🔄 自动刷新目标目录以显示已传输的文件...');
+                            refreshTargetAsync();
+                        }
+                    }, 1000);
                 } else {
+                    // 完全失败
                     document.getElementById('transferStatus').textContent = '传输失败';
                     document.getElementById('progressBar').classList.add('bg-danger');
                     addLogError(`❌ 传输失败: ${data.message}`);
