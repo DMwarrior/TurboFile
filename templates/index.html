@@ -904,9 +904,14 @@
                             </div>
                         </div>
                     </div>
-                    <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
+                    <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;">
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
+                        <button type="button" class="btn btn-sm" title="复制当前路径"
+                                onclick="copyPath('source')"
+                                style="position:absolute; right:6px; top:50%; transform: translateY(-50%); padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                            <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
+                        </button>
                     </div>
                     <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
@@ -936,9 +941,14 @@
                             </div>
                         </div>
                     </div>
-                    <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;">
+                    <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;">
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
+                        <button type="button" class="btn btn-sm" title="复制当前路径"
+                                onclick="copyPath('target')"
+                                style="position:absolute; right:6px; top:50%; transform: translateY(-50%); padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                            <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
+                        </button>
                     </div>
                     <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
@@ -1200,6 +1210,41 @@
 
         function addLogSuccess(message) {
             addLog(message, 'success');
+        }
+
+        // 复制到剪贴板（优先使用安全API）
+        function copyTextToClipboard(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                try {
+                    document.execCommand('copy');
+                    return Promise.resolve();
+                } catch (e) {
+                    return Promise.reject(e);
+                } finally {
+                    document.body.removeChild(textarea);
+                }
+            }
+        }
+
+        // 复制当前面板路径（source/target）
+        function copyPath(type) {
+            const text = type === 'source' ? (currentSourcePath || '') : (currentTargetPath || '');
+            if (!text) {
+                addLogWarning('⚠️ 当前路径为空，无法复制');
+                return;
+            }
+            copyTextToClipboard(text)
+                .then(() => addLogSuccess(`📋 已复制路径: ${text}`))
+                .catch(() => addLogWarning('⚠️ 复制失败，请手动复制'));
         }
 
         function addLogWarning(message) {
@@ -2078,7 +2123,7 @@
                             addLogInfo('🔄 自动刷新目标目录以显示最新文件...');
                             refreshTargetAsync();
                         }
-                    }, 1000); // 延迟1秒后刷新，确保文件系统同步
+                    }, 100); // 将刷新延迟从1秒缩短为200ms，提升结束流畅度
                 } else if (data.status === 'partial_success') {
                     // 🔧 BUG修复：处理部分成功状态
                     document.getElementById('transferStatus').textContent = '传输部分完成';
@@ -2108,7 +2153,8 @@
                     addLogError(`❌ 传输失败: ${data.message}`);
                 }
 
-                setTimeout(resetTransferUI, 3000);
+                // 将UI重置延迟从3秒缩短为800ms，使结束更“丝滑”
+                setTimeout(resetTransferUI, 100);
             }
         });
 
@@ -2195,7 +2241,7 @@
                 return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
             }
             function isTextEditable(name) {
-                return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml)$/i.test(name);
+                return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh)$/i.test(name);
             }
 
             async function previewImage(server, path, name) {
@@ -2408,15 +2454,12 @@
             <div class="d-flex justify-content-between align-items-center" style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">
                 <strong class="modal-title" style="font-size: 0.95rem;">在线编辑</strong>
                 <div>
-                    <button class="btn btn-sm btn-outline-secondary" onclick="toggleHighlightPreview()">高亮预览</button>
-                    <button class="btn btn-sm btn-outline-secondary" onclick="document.querySelector('#editorModal textarea').value='';">清空</button>
                     <button class="btn btn-sm btn-primary" onclick="saveEditorContent()">保存</button>
                     <button class="btn btn-sm btn-danger" onclick="closeEditorModal()">关闭</button>
                 </div>
             </div>
             <div style="max-height: 80vh; overflow: hidden;">
                 <textarea style="width: 100%; height: 60vh; padding: 10px; font-family: Consolas, 'Courier New', monospace; font-size: 13px; line-height: 1.5; border: none; outline: none; resize: none;"></textarea>
-                <pre id="editorPreview" style="display:none; width:100%; height:60vh; margin:0;"><code class="language-clike"></code></pre>
             </div>
         </div>
     </div>

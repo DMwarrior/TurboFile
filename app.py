@@ -28,11 +28,11 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # 服务器配置
 SERVERS = {
-    "192.168.9.62": {"name": "训练服务器1", "user": "th", "password": "th123456"},
-    "192.168.9.61": {"name": "训练服务器2", "user": "th", "password": "th123456"},
-    "192.168.9.60": {"name": "数据服务器", "user": "th", "password": "taiho603656_0"},
-    "192.168.9.57": {"name": "备份服务器", "user": "thgd", "password": "123456"},
-    "10.190.21.253": {"name": "NAS存储服务器", "user": "Algorithm", "password": "Ai123456", "port": 8000}
+    "192.168.9.62": {"name": "62服务器", "user": "th", "password": "th123456"},
+    "192.168.9.61": {"name": "61服务器", "user": "th", "password": "th123456"},
+    "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0"},
+    "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456"},
+    "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -352,15 +352,23 @@ class SSHManager:
                 'channel_timeout': 5
             }
 
-            # 先尝试密钥认证
-            try:
+            # 针对NAS服务器（通常未配置密钥认证）直接使用密码连接，避免密钥尝试导致的超时卡顿
+            if is_nas_server(server_ip):
+                connect_kwargs['password'] = server_config.get("password")
+                connect_kwargs['look_for_keys'] = False
+                connect_kwargs['allow_agent'] = False
                 ssh.connect(**connect_kwargs)
-                print(f"✅ 使用密钥连接到服务器 {server_ip}")
-            except:
-                # 密钥认证失败，使用密码认证
-                connect_kwargs['password'] = server_config["password"]
-                ssh.connect(**connect_kwargs)
-                print(f"✅ 使用密码连接到服务器 {server_ip}")
+                print(f"✅ 使用密码直连到NAS服务器 {server_ip}")
+            else:
+                # 其他服务器：先尝试密钥，失败再回退密码（保持原有逻辑）
+                try:
+                    ssh.connect(**connect_kwargs)
+                    print(f"✅ 使用密钥连接到服务器 {server_ip}")
+                except:
+                    # 密钥认证失败，使用密码认证
+                    connect_kwargs['password'] = server_config["password"]
+                    ssh.connect(**connect_kwargs)
+                    print(f"✅ 使用密码连接到服务器 {server_ip}")
 
             # 添加到连接池
             if len(pool) >= self.connection_pool_size:
@@ -1593,7 +1601,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 print(f"[性能监控] 传输ID: {transfer_id}")
                 print(f"[性能监控] 文件数量: {completed_count}")
                 print(f"[性能监控] 传输时间: {total_time}")
-                print(f"[性能监控] 平均速度: {completed_count/float(total_time.replace('秒', '')):.1f}文件/秒")
+                # [安全] 已移除平均速度计算，避免格式转换错误（total_time 为 HH:MM:SS 格式）
                 print(f"[性能监控] 速度更新间隔: {PERFORMANCE_CONFIG['speed_update_interval']}秒")
 
                 print(f"[DEBUG] 发送成功事件: transfer_id={transfer_id}, status=success")
