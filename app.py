@@ -114,21 +114,22 @@ class SpeedSimulator:
         self.transfer_speeds = {}  # 每个传输的速度状态
         self.lock = threading.Lock()
 
-    def init_transfer_speed(self, transfer_id):
-        """初始化传输速度"""
+    def init_transfer_speed(self, transfer_id, min_speed: float = 110.0, max_speed: float = 114.0):
+        """初始化传输速度；可按场景设置波动区间"""
         with self.lock:
-            # 初始速度在110-114之间
-            initial_speed = random.uniform(110.0, 114.0)
+            # 初始速度在[min_speed, max_speed]之间
+            initial_speed = random.uniform(min_speed, max_speed)
             self.transfer_speeds[transfer_id] = {
                 'current_speed': initial_speed,
                 'last_update': time.time(),
                 'trend': random.choice(['up', 'down', 'stable']),
                 'trend_duration': 0,
-                'base_speed': initial_speed
+                'min_speed': min_speed,
+                'max_speed': max_speed
             }
 
     def get_simulated_speed(self, transfer_id):
-        """获取模拟的传输速度 - 性能优化版本"""
+        """获取模拟的传输速度 - 支持每个传输自定义速度区间"""
         with self.lock:
             if transfer_id not in self.transfer_speeds:
                 self.init_transfer_speed(transfer_id)
@@ -136,32 +137,37 @@ class SpeedSimulator:
             speed_data = self.transfer_speeds[transfer_id]
             current_time = time.time()
 
+            # 区间参数
+            min_s = speed_data.get('min_speed', 110.0)
+            max_s = speed_data.get('max_speed', 114.0)
+            width = max(0.1, max_s - min_s)
+            edge = max(0.2, 0.25 * width)  # 边缘阈值
+
             # 🚀 性能优化：降低更新频率从10ms到100ms，减少CPU占用
             if current_time - speed_data['last_update'] >= 0.1:  # 100ms间隔
                 speed_data['last_update'] = current_time
                 speed_data['trend_duration'] += 1
 
-                # 🚀 性能优化：简化趋势变化逻辑，减少随机计算
+                # 🚀 简化趋势变化逻辑
                 if speed_data['trend_duration'] >= 20:  # 每2秒改变趋势
                     speed_data['trend'] = random.choice(['up', 'down', 'stable'])
                     speed_data['trend_duration'] = 0
 
-                # 🚀 性能优化：简化速度计算，减少分支判断
                 current_speed = speed_data['current_speed']
 
                 if speed_data['trend'] == 'up':
-                    change = random.uniform(0.1, 0.3)
-                    new_speed = min(114.0, current_speed + change)
-                    if new_speed >= 113.5:
+                    change = random.uniform(0.05 * width, 0.15 * width)
+                    new_speed = min(max_s, current_speed + change)
+                    if new_speed >= max_s - edge:
                         speed_data['trend'] = 'down'
                 elif speed_data['trend'] == 'down':
-                    change = random.uniform(0.1, 0.3)
-                    new_speed = max(110.0, current_speed - change)
-                    if new_speed <= 110.5:
+                    change = random.uniform(0.05 * width, 0.15 * width)
+                    new_speed = max(min_s, current_speed - change)
+                    if new_speed <= min_s + edge:
                         speed_data['trend'] = 'up'
                 else:  # stable
-                    change = random.uniform(-0.2, 0.2)
-                    new_speed = max(110.0, min(114.0, current_speed + change))
+                    change = random.uniform(-0.05 * width, 0.05 * width)
+                    new_speed = max(min_s, min(max_s, current_speed + change))
 
                 speed_data['current_speed'] = new_speed
 
@@ -1477,8 +1483,11 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             # 启动传输计时器
             time_tracker.start_transfer(transfer_id)
 
-            # 初始化速度模拟器
-            speed_simulator.init_transfer_speed(transfer_id)
+            # 初始化速度模拟器（NAS传输使用38~40MB/s波动）
+            if is_nas_server(source_server) or is_nas_server(target_server):
+                speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
+            else:
+                speed_simulator.init_transfer_speed(transfer_id)
 
             # 启动速度更新定时器
             start_speed_update_timer(transfer_id, source_server, target_server)
@@ -2290,8 +2299,11 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
     # 启动传输计时器
     time_tracker.start_transfer(transfer_id)
 
-    # 初始化速度模拟器
-    speed_simulator.init_transfer_speed(transfer_id)
+    # 初始化速度模拟器（NAS传输使用38~40MB/s波动）
+    if is_nas_server(source_server) or is_nas_server(target_server):
+        speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
+    else:
+        speed_simulator.init_transfer_speed(transfer_id)
 
     for file_info in source_files:
         # 检查是否被取消
