@@ -1860,6 +1860,12 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
             # 本地到本地（同一台机器）
             print(f"📍 调用函数: transfer_file_via_local_to_local_instant")
             print(f"[DEBUG] 参数: source_path={source_path}, target_path={target_path}, file_name={file_name}, is_directory={is_directory}")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'🔄 传输模式: local_to_local (本地到本地，使用cp命令)'
+            })
+
             success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
             print(f"[DEBUG] transfer_file_via_local_to_local_instant返回值: {success}, 类型: {type(success)}")
             if not success:
@@ -2221,39 +2227,41 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
 
 def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id):
     """本地到本地传输 - 使用cp命令"""
-    import shutil
     import subprocess
 
     try:
         dest_path = os.path.join(target_path, file_name)
 
         if is_directory:
-            # 🔧 BUG修复：使用rsync代替shutil.copytree，避免目标已存在时的异常
-            # rsync更可靠，支持增量复制，不会因为目标已存在而失败
+            # 使用 cp -r 进行目录复制（按用户要求）
             print(f"[DEBUG] 本地目录复制: {source_path} -> {dest_path}")
 
-            # 确保源路径以/结尾（rsync语法：复制目录内容而非目录本身）
-            source_with_slash = source_path if source_path.endswith('/') else source_path + '/'
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'🐧 本地到本地传输，使用 cp -r 命令'
+            })
 
-            # 使用rsync进行本地复制（更可靠）
-            rsync_cmd = [
-                'rsync', '-a',  # 归档模式（保留权限、时间戳等）
-                '--delete',     # 删除目标中多余的文件
-                source_with_slash,
-                dest_path
-            ]
+            # 使用 cp -r 命令复制目录
+            cp_cmd = ['cp', '-r', source_path, target_path + '/']
 
-            print(f"[DEBUG] 执行命令: {' '.join(rsync_cmd)}")
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=300)
+            cmd_str = ' '.join(cp_cmd)
+            print(f"[DEBUG] 执行命令: {cmd_str}")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'📝 执行命令: {cmd_str}'
+            })
+
+            result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=300)
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "未知错误"
-                print(f"[ERROR] rsync失败: returncode={result.returncode}, stderr={error_msg}")
+                print(f"[ERROR] cp -r失败: returncode={result.returncode}, stderr={error_msg}")
                 raise Exception(f"本地目录复制失败: {error_msg}")
 
-            print(f"[DEBUG] rsync成功: {file_name}")
+            print(f"[DEBUG] cp -r成功: {file_name}")
         else:
-            # 文件复制 - 使用cp命令更可靠
+            # 文件复制 - 使用cp命令
             print(f"[DEBUG] 本地文件复制: {source_path} -> {dest_path}")
 
             # 使用cp命令（支持覆盖）
@@ -2289,6 +2297,91 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
 def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
     """即时远程rsync传输 - 无进度监控版本，专注性能"""
     print(f"🔍 远程传输检查: 源={source_server}, 目标={target_server}")
+
+    # 检查是否为同一台服务器（远程到远程但是同一台机器）
+    if source_server == target_server:
+        print(f"🔍 检测到源和目标是同一台服务器: {source_server}")
+
+        # 检查是否为Windows服务器
+        is_windows = is_windows_server(source_server)
+        server_user = SERVERS[source_server]['user']
+        server_password = SERVERS[source_server].get('password')
+
+        dest_path = os.path.join(target_path, file_name)
+
+        if is_windows:
+            # Windows服务器使用robocopy
+            print(f"🪟 Windows服务器使用robocopy进行本地复制")
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'🪟 在Windows服务器上使用robocopy复制: {file_name}'
+            })
+
+            if is_directory:
+                # robocopy语法: robocopy <源目录> <目标目录> /E /MT:8
+                # /E: 复制所有子目录（包括空目录）
+                # /MT:8: 使用8个线程
+                remote_cmd = f'robocopy "{source_path}" "{dest_path}" /E /MT:8 /R:3 /W:5'
+            else:
+                # 复制单个文件
+                source_dir = os.path.dirname(source_path)
+                source_file = os.path.basename(source_path)
+                target_dir = target_path
+                remote_cmd = f'robocopy "{source_dir}" "{target_dir}" "{source_file}" /MT:8 /R:3 /W:5'
+        else:
+            # Linux服务器使用cp -r
+            print(f"🐧 Linux服务器使用cp命令进行本地复制")
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'🐧 在Linux服务器上使用cp复制: {file_name}'
+            })
+
+            if is_directory:
+                # cp -r 复制目录
+                remote_cmd = f"cp -r '{source_path}' '{target_path}/'"
+            else:
+                # cp 复制文件
+                remote_cmd = f"cp -f '{source_path}' '{dest_path}'"
+
+        print(f"[DEBUG] 同服务器复制命令: {remote_cmd}")
+
+        # 通过SSH执行命令
+        try:
+            ssh_client = get_ssh_connection(source_server)
+            stdin, stdout, stderr = ssh_client.exec_command(remote_cmd, timeout=600)
+            exit_status = stdout.channel.recv_exit_status()
+
+            # robocopy的返回码特殊处理：0-7都是成功
+            if is_windows:
+                if exit_status > 7:
+                    error_output = stderr.read().decode('utf-8', errors='ignore')
+                    print(f"[ERROR] robocopy失败: exit_status={exit_status}, stderr={error_output}")
+                    raise Exception(f"robocopy复制失败: {error_output}")
+                else:
+                    print(f"[DEBUG] robocopy成功: exit_status={exit_status}")
+            else:
+                if exit_status != 0:
+                    error_output = stderr.read().decode('utf-8', errors='ignore')
+                    print(f"[ERROR] cp失败: exit_status={exit_status}, stderr={error_output}")
+                    raise Exception(f"cp复制失败: {error_output}")
+                else:
+                    print(f"[DEBUG] cp成功")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ 同服务器复制完成: {file_name}'
+            })
+
+            return True
+
+        except Exception as e:
+            error_msg = f"同服务器复制失败: {str(e)}"
+            print(f"[ERROR] {error_msg}")
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'❌ {error_msg}'
+            })
+            raise Exception(error_msg)
 
     # 如果涉及NAS服务器，使用tar+ssh方案
     source_is_nas = is_nas_server(source_server)
@@ -2547,6 +2640,8 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
             transfer_mode = 'local_to_remote'
         elif not is_local_source and is_local_target:
             transfer_mode = 'remote_to_local'
+        elif is_local_source and is_local_target:
+            transfer_mode = 'local_to_local'
         else:
             transfer_mode = 'remote_to_remote'
 
@@ -2558,8 +2653,19 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         # 构建rsync命令
         # 智能判断传输模式
         is_local_source = is_local_server(source_server)
+        is_local_target = is_local_server(target_server)
 
-        if is_local_source:
+        if transfer_mode == 'local_to_local':
+            # 本地到本地传输，使用 cp 命令
+            print(f"📍 顺序传输-本地到本地: {source_path} -> {target_path}")
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'🔄 本地到本地传输，使用cp命令'
+            })
+            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            if not success:
+                raise Exception("本地到本地传输失败")
+        elif is_local_source:
             # 🚀 本地传输模式：完全使用rsync，移除Paramiko SFTP开销
             success = transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files)
             if not success:
