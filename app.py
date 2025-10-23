@@ -109,6 +109,10 @@ PERFORMANCE_CONFIG = {
     'optimize_rsync_params': True         # 优化rsync参数
 }
 
+# 统一的 rsync SSH 参数（按用户要求统一为 aes128-gcm）
+RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-gcm@openssh.com"
+
+
 # 模拟速度生成器
 class SpeedSimulator:
     def __init__(self):
@@ -1940,7 +1944,7 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         print(f"🔄 Windows目标路径转换: {target_path} -> {rsync_target_path}")
 
     # 构建完整命令（显式指定SSH，避免首次连接/known_hosts等交互问题）
-    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
+    ssh_cmd = RSYNC_SSH_CMD
     if is_directory:
         if target_password:
             cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
@@ -2060,22 +2064,22 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
             if task['type'] == 'subdir':
                 # 传输子目录
                 if target_password:
-                    cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + [
+                    cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
                         f"{task['source']}/", f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
                     ]
                 else:
-                    cmd = ['rsync'] + rsync_opts + [
+                    cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
                         f"{task['source']}/", f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
                     ]
             else:
                 # 传输文件组
                 file_paths = [os.path.join(task['source_dir'], f) for f in task['files']]
                 if target_password:
-                    cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + file_paths + [
+                    cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
                         f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
                     ]
                 else:
-                    cmd = ['rsync'] + rsync_opts + file_paths + [
+                    cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
                         f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
                     ]
 
@@ -2165,14 +2169,14 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
     # 构建完整命令（从远程拉取到本地）
     if is_directory:
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
     else:
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
 
     # 执行rsync命令
     import subprocess
@@ -2335,7 +2339,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         print(f"🔄 Windows源路径转换: {source_path} -> {rsync_source_path}")
 
         # rsync通过SSH连接到Windows源服务器
-        ssh_to_source = get_ssh_command_with_port(source_server, fast_ssh)
+        ssh_to_source = RSYNC_SSH_CMD
         if is_directory:
             if source_password:
                 remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
@@ -2391,14 +2395,14 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     # 构建rsync命令，优先使用sshpass，回退到SSH密钥
     if is_directory:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
     else:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
 
     print(f"🔄 远程rsync命令: {remote_cmd}")
 
@@ -2461,7 +2465,7 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     target_password = SERVERS[target_server].get('password')
 
     # 使用统一的SSH命令构建函数（支持自定义端口）
-    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
+    ssh_cmd = RSYNC_SSH_CMD
 
     # 🚀 极速优化：精简rsync参数
     rsync_base_opts = [
@@ -2600,29 +2604,24 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     source_password = SERVERS[source_server].get('password')
 
                     # 使用统一的SSH命令构建函数（支持自定义端口）
-                    ssh_to_target = get_ssh_command_with_port(target_server, fast_ssh)
+                    ssh_to_target = RSYNC_SSH_CMD
 
-                    # 优化的rsync参数（兼容性优先）- 移除进度监控以提升性能
+                    # 统一rsync参数（按用户要求）
                     rsync_base_opts = [
-                        "-a",                    # 归档模式
-                        "--inplace",             # 就地更新
-                        "--whole-file",          # 整文件传输
-                        "--timeout=300",         # 超时设置
-                        "--partial",             # 断点续传
-                        "--numeric-ids",         # 数字ID
+                        "-a",
+                        "--inplace",
+                        "--whole-file",
+                        "--no-compress",
+                        "--numeric-ids",
+                        "--timeout=600",
                     ]
-
-                    if fast_ssh:
-                        rsync_base_opts.append("--no-compress")
-                    else:
-                        rsync_base_opts.append("-z")
 
                     source_is_windows = is_windows_server(source_server)
                     target_is_windows = is_windows_server(target_server)
 
                     # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
                     if source_is_windows and not target_is_windows:
-                        ssh_to_source = get_ssh_command_with_port(source_server, fast_ssh)
+                        ssh_to_source = RSYNC_SSH_CMD
                         rsync_source_path = convert_windows_path_to_cygwin(source_path)
                         if is_directory:
                             if source_password:
@@ -3185,7 +3184,7 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
         target_password = target_config.get('password')
 
         # 使用统一的SSH命令构建函数（支持自定义端口）
-        ssh_opts_str = get_ssh_command_with_port(target_server, fast_ssh)
+        ssh_opts_str = RSYNC_SSH_CMD
 
         # 目标为Windows时，规范化并转换为Cygwin路径
         final_target_path = target_path
