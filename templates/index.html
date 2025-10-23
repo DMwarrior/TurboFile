@@ -866,6 +866,12 @@
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
                         {% endfor %}
                     </select>
+                    <!-- Windows磁盘选择器 -->
+                    <div id="sourceDriveSelector" style="display: none; margin-top: 4px;">
+                        <select id="sourceDrive" class="form-select form-select-sm" style="font-size: 0.8rem;">
+                            <option value="">💾 选择磁盘...</option>
+                        </select>
+                    </div>
                 </div>
             </div>
             <div class="col-md-6">
@@ -879,6 +885,12 @@
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
                         {% endfor %}
                     </select>
+                    <!-- Windows磁盘选择器 -->
+                    <div id="targetDriveSelector" style="display: none; margin-top: 4px;">
+                        <select id="targetDrive" class="form-select form-select-sm" style="font-size: 0.8rem;">
+                            <option value="">💾 选择磁盘...</option>
+                        </select>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1599,9 +1611,9 @@
             // 更新路径导航
             updatePathNavigation(currentPath, isSource);
 
-            // 返回上级目录 - 修改为双击操作
+            // 返回上级目录 - 修改为双击操作（兼容Windows路径）
             if (currentPath !== '/') {
-                const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/';
+                const parentPath = getParentPath(currentPath);
                 html += `<div class="file-item" ondblclick="navigateTo('${containerId}', '${parentPath}', ${isSource})" title="双击返回上级目录">
                     <i class="bi bi-arrow-up-circle text-primary"></i>
                     <div class="file-info">
@@ -1823,24 +1835,69 @@
             const nav = document.getElementById(navId);
             const display = document.getElementById(displayId);
 
+            const isWindows = currentPath && currentPath.includes(':');
+
             if (currentPath && currentPath !== '/') {
                 nav.style.display = 'block';
-                const pathParts = currentPath.split('/').filter(part => part);
-                let html = '<a href="#" class="path-segment" onclick="navigateToPath(\'/\', ' + isSource + ')">根目录</a>';
+                const parts = currentPath.split('/').filter(part => part);
+                let html = '';
 
-                let buildPath = '';
-                pathParts.forEach((part, index) => {
-                    buildPath += '/' + part;
-                    html += '<span class="path-separator">/</span>';
-                    html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
-                });
-
-                display.innerHTML = html;
+                if (isWindows) {
+                    // Windows路径导航：以驱动器为根，例如 C:/
+                    const drive = parts[0]; // 例如 C:
+                    // 驱动器根
+                    html += `<a href="#" class="path-segment" onclick="navigateToPath('${drive}/', ${isSource})">${drive}/</a>`;
+                    let buildPath = drive;
+                    // 其他子路径
+                    parts.slice(1).forEach(part => {
+                        buildPath += '/' + part;
+                        html += '<span class="path-separator">/</span>';
+                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
+                    });
+                    display.innerHTML = html;
+                } else {
+                    // Linux路径导航：以/为根
+                    let buildPath = '';
+                    html = '<a href="#" class="path-segment" onclick="navigateToPath(\'/\', ' + isSource + ')">根目录</a>';
+                    parts.forEach(part => {
+                        buildPath += '/' + part;
+                        html += '<span class="path-separator">/</span>';
+                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
+                    });
+                    display.innerHTML = html;
+                }
             } else {
                 nav.style.display = 'block';
                 display.innerHTML = '<span class="path-segment">根目录</span>';
             }
         }
+
+            // Windows路径检测
+            function isWindowsPath(p) {
+                return !!(p && p.includes(':'));
+            }
+
+            // 计算父级路径（兼容Windows与Linux）
+            function getParentPath(p) {
+                if (!p) return '/';
+                if (isWindowsPath(p)) {
+                    const parts = p.split('/').filter(Boolean); // 例如: ['C:', 'Users', 'Alice']
+                    if (parts.length <= 1) {
+                        // 已在驱动器根，比如 'C:/'
+                        return parts[0] + '/';
+                    }
+                    const parentParts = parts.slice(0, -1);
+                    let parent = parentParts.join('/');
+                    if (parentParts.length === 1) {
+                        // 保持驱动器根为 'C:/'
+                        parent += '/';
+                    }
+                    return parent;
+                }
+                // Linux: 普通上级
+                return p.split('/').slice(0, -1).join('/') || '/';
+            }
+
 
         // 导航到指定路径（无加载动画版本）
         function navigateToPath(path, isSource) {
@@ -2018,23 +2075,28 @@
 
         // 重置传输界面
         function resetTransferUI() {
-            document.getElementById('progressContainer').style.display = 'none';
-            document.getElementById('startTransferBtn').style.display = 'inline-block';
+            const pc = document.getElementById('progressContainer');
+            if (pc) pc.style.display = 'none';
+            const startBtn = document.getElementById('startTransferBtn');
+            if (startBtn) startBtn.style.display = 'inline-block';
 
             // 重置取消按钮
             const cancelBtn = document.getElementById('cancelTransferBtn');
-            cancelBtn.style.display = 'none';
-            cancelBtn.disabled = false;
-            cancelBtn.innerHTML = '<i class="bi bi-stop-circle-fill"></i> 取消';
+            if (cancelBtn) {
+                cancelBtn.style.display = 'none';
+                cancelBtn.disabled = false;
+                cancelBtn.innerHTML = '<i class="bi bi-stop-circle-fill"></i> 取消';
+            }
 
             // 重置传输路径显示
-            document.getElementById('transferRoute').innerHTML = '<i class="bi bi-arrow-right-circle-fill me-1"></i>准备传输...';
+            const routeEl0 = document.getElementById('transferRoute');
+            if (routeEl0) routeEl0.innerHTML = '<i class="bi bi-arrow-right-circle-fill me-1"></i>准备传输...';
 
             // 重置状态信息
-            document.getElementById('transferStatus').textContent = '准备中';
-            document.getElementById('transferSpeed').textContent = '-';
-            document.getElementById('transferredBytes').textContent = '-';
-            document.getElementById('eta').textContent = '-';
+            { const el = document.getElementById('transferStatus'); if (el) el.textContent = '准备中'; }
+            { const el = document.getElementById('transferSpeed'); if (el) el.textContent = '-'; }
+            { const el = document.getElementById('transferredBytes'); if (el) el.textContent = '-'; }
+            { const el = document.getElementById('eta'); if (el) el.textContent = '-'; }
 
             currentTransferId = null;
         }
@@ -2044,7 +2106,7 @@
             isTransferring = true;
             currentTransferId = data.transfer_id;
             window.transferModeLogged = false; // 重置传输模式日志标志
-            document.getElementById('transferStatus').textContent = '传输中...';
+            { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输中...'; }
             addLogSuccess(`✅ 传输任务已启动 (ID: ${data.transfer_id})`);
         });
 
@@ -2062,12 +2124,14 @@
             if (data.transfer_id === currentTransferId) {
                 // 更新传输速度（每10ms）
                 if (data.speed) {
-                    document.getElementById('transferSpeed').textContent = data.speed;
+                    const el = document.getElementById('transferSpeed');
+                    if (el) el.textContent = data.speed;
                 }
 
                 // 更新已用时间（仅当有新时间数据时）
                 if (data.elapsed_time) {
-                    document.getElementById('elapsedTime').textContent = data.elapsed_time;
+                    const el = document.getElementById('elapsedTime');
+                    if (el) el.textContent = data.elapsed_time;
                 }
 
                 // 更新传输路径显示（仅在首次或变化时）
@@ -2083,11 +2147,13 @@
                     }
 
                     const newRoute = `${routeIcon} ${sourceDisplay} → ${targetDisplay}`;
-                    const currentRoute = document.getElementById('transferRoute').innerHTML;
-
-                    // 只在路径变化时更新，避免不必要的DOM操作
-                    if (currentRoute !== newRoute) {
-                        document.getElementById('transferRoute').innerHTML = newRoute;
+                    const routeEl = document.getElementById('transferRoute');
+                    if (routeEl) {
+                        const currentRoute = routeEl.innerHTML;
+                        // 只在路径变化时更新，避免不必要的DOM操作
+                        if (currentRoute !== newRoute) {
+                            routeEl.innerHTML = newRoute;
+                        }
                     }
                 }
             }
@@ -2099,12 +2165,13 @@
                 isTransferring = false;
 
                 if (data.status === 'success') {
-                    document.getElementById('transferStatus').textContent = '传输完成';
-                    document.getElementById('transferRoute').innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成';
+                    { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
+                    { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
 
                     // 显示总耗时
                     if (data.total_time) {
-                        document.getElementById('elapsedTime').textContent = data.total_time;
+                        const el = document.getElementById('elapsedTime');
+                        if (el) el.textContent = data.total_time;
                     }
 
                     addLogSuccess('🎉 传输成功完成');
@@ -2126,13 +2193,14 @@
                     }, 100); // 将刷新延迟从1秒缩短为200ms，提升结束流畅度
                 } else if (data.status === 'partial_success') {
                     // 🔧 BUG修复：处理部分成功状态
-                    document.getElementById('transferStatus').textContent = '传输部分完成';
-                    document.getElementById('transferRoute').innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>部分成功';
-                    document.getElementById('progressBar').classList.add('bg-warning');
+                    { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输部分完成'; }
+                    { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>部分成功'; }
+                    { const pb = document.getElementById('progressBar'); if (pb) pb.classList.add('bg-warning'); }
 
                     // 显示总耗时
                     if (data.total_time) {
-                        document.getElementById('elapsedTime').textContent = data.total_time;
+                        const el = document.getElementById('elapsedTime');
+                        if (el) el.textContent = data.total_time;
                     }
 
                     addLogWarning(`⚠️ ${data.message}`);
@@ -2148,8 +2216,8 @@
                     }, 1000);
                 } else {
                     // 完全失败
-                    document.getElementById('transferStatus').textContent = '传输失败';
-                    document.getElementById('progressBar').classList.add('bg-danger');
+                    { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输失败'; }
+                    { const pb = document.getElementById('progressBar'); if (pb) pb.classList.add('bg-danger'); }
                     addLogError(`❌ 传输失败: ${data.message}`);
                 }
 
@@ -2165,9 +2233,8 @@
                 isTransferring = false;
 
                 if (data.status === 'success') {
-                    document.getElementById('transferStatus').textContent = '传输已取消';
-                    document.getElementById('progressBar').classList.remove('progress-bar-animated');
-                    document.getElementById('progressBar').classList.add('bg-warning');
+                    { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输已取消'; }
+                    { const pb = document.getElementById('progressBar'); if (pb) { pb.classList.remove('progress-bar-animated'); pb.classList.add('bg-warning'); } }
                     addLogWarning('⚠️ 传输已取消');
                 } else {
                     addLogError(`❌ 取消传输失败: ${data.message}`);
@@ -2222,9 +2289,64 @@
                 '192.168.9.61': '/home/th',
                 '192.168.9.60': '/home/th',
                 '192.168.9.57': '/home/thgd',
-                '10.190.21.253': '/var/services/homes/Algorithm'  // NAS存储服务器
+                '10.190.21.253': '/var/services/homes/Algorithm',  // NAS存储服务器
+                '10.190.129.29': 'C:/'  // Windows服务器默认路径（将通过API动态获取）
             };
             return serverPaths[serverIP] || '/home/th';
+        }
+
+        // 检查是否为Windows服务器
+        async function isWindowsServer(serverIP) {
+            try {
+                const response = await fetch('/api/servers');
+                const servers = await response.json();
+                return servers[serverIP] && servers[serverIP].os_type === 'windows';
+            } catch (error) {
+                console.error('检查服务器类型失败:', error);
+                return false;
+            }
+        }
+
+        // 加载Windows磁盘列表
+        async function loadWindowsDrives(serverIP, isSource) {
+            const driveSelector = document.getElementById(isSource ? 'sourceDriveSelector' : 'targetDriveSelector');
+            const driveSelect = document.getElementById(isSource ? 'sourceDrive' : 'targetDrive');
+
+            try {
+                const response = await fetch(`/api/windows_drives/${serverIP}`);
+                const data = await response.json();
+
+                if (data.success && data.drives) {
+                    // 清空现有选项
+                    driveSelect.innerHTML = '<option value="">💾 选择磁盘...</option>';
+
+                    // 添加磁盘选项
+                    data.drives.forEach(drive => {
+                        const option = document.createElement('option');
+                        option.value = drive.letter;
+                        const icon = drive.type === 'network' ? '🌐' : '💿';
+                        option.textContent = `${icon} ${drive.name}`;
+                        driveSelect.appendChild(option);
+                    });
+
+                    // 显示磁盘选择器
+                    driveSelector.style.display = 'block';
+
+                    addLogInfo(`💾 已加载Windows磁盘列表: ${data.drives.length}个磁盘`);
+                } else {
+                    console.error('加载磁盘列表失败:', data.error);
+                    driveSelector.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('加载Windows磁盘列表异常:', error);
+                driveSelector.style.display = 'none';
+            }
+        }
+
+        // 隐藏Windows磁盘选择器
+        function hideWindowsDriveSelector(isSource) {
+            const driveSelector = document.getElementById(isSource ? 'sourceDriveSelector' : 'targetDriveSelector');
+            driveSelector.style.display = 'none';
         }
 
         // LOGO显示方案切换函数（保留备用）
@@ -2419,8 +2541,21 @@
             initializeResizers();
 
             // 服务器选择变化时自动浏览
-            document.getElementById('sourceServer').addEventListener('change', function() {
+            document.getElementById('sourceServer').addEventListener('change', async function() {
                 if (this.value) {
+                    // 检查是否为Windows服务器
+                    const isWindows = await isWindowsServer(this.value);
+
+                    if (isWindows) {
+                        // Windows服务器：加载磁盘列表
+                        await loadWindowsDrives(this.value, true);
+                        // 不自动浏览，等待用户选择磁盘或使用默认路径
+                        addLogInfo('💡 检测到Windows服务器，请选择磁盘或直接浏览默认路径');
+                    } else {
+                        // Linux服务器：隐藏磁盘选择器，直接浏览
+                        hideWindowsDriveSelector(true);
+                    }
+
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     currentSourcePath = defaultPath;
@@ -2428,12 +2563,44 @@
                 }
             });
 
-            document.getElementById('targetServer').addEventListener('change', function() {
+            document.getElementById('targetServer').addEventListener('change', async function() {
                 if (this.value) {
+                    // 检查是否为Windows服务器
+                    const isWindows = await isWindowsServer(this.value);
+
+                    if (isWindows) {
+                        // Windows服务器：加载磁盘列表
+                        await loadWindowsDrives(this.value, false);
+                        // 不自动浏览，等待用户选择磁盘或使用默认路径
+                        addLogInfo('💡 检测到Windows服务器，请选择磁盘或直接浏览默认路径');
+                    } else {
+                        // Linux服务器：隐藏磁盘选择器，直接浏览
+                        hideWindowsDriveSelector(false);
+                    }
+
                     // 根据服务器设置默认路径
                     const defaultPath = getDefaultPath(this.value);
                     currentTargetPath = defaultPath;
                     setTimeout(browseTarget, 100);
+                }
+            });
+
+            // 磁盘选择变化时浏览磁盘根目录
+            document.getElementById('sourceDrive').addEventListener('change', function() {
+                if (this.value) {
+                    const drivePath = this.value + '/';  // 例如: C:/
+                    currentSourcePath = drivePath;
+                    browseSource();
+                    addLogInfo(`💾 切换到源磁盘: ${this.value}`);
+                }
+            });
+
+            document.getElementById('targetDrive').addEventListener('change', function() {
+                if (this.value) {
+                    const drivePath = this.value + '/';  // 例如: D:/
+                    currentTargetPath = drivePath;
+                    browseTarget();
+                    addLogInfo(`💾 切换到目标磁盘: ${this.value}`);
                 }
             });
         });

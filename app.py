@@ -32,7 +32,8 @@ SERVERS = {
     "192.168.9.61": {"name": "61服务器", "user": "th", "password": "th123456"},
     "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0"},
     "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456"},
-    "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000}
+    "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000},
+    "10.190.129.29": {"name": "Windows服务器", "user": "warrior", "password": "Fkcay929", "os_type": "windows"}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -398,10 +399,14 @@ class SSHManager:
         if not ssh:
             return None, f"无法连接到服务器 {server_ip}"
 
+        # 检查是否为Windows服务器，使用不同的编码
+        is_win = is_windows_server(server_ip)
+        encoding = 'gbk' if is_win else 'utf-8'
+
         try:
             stdin, stdout, stderr = ssh.exec_command(command)
-            output = stdout.read().decode('utf-8')
-            error = stderr.read().decode('utf-8')
+            output = stdout.read().decode(encoding, errors='ignore')
+            error = stderr.read().decode(encoding, errors='ignore')
             return output, error
         except Exception as e:
             # 连接可能已断开，尝试重新连接
@@ -418,8 +423,8 @@ class SSHManager:
             if ssh:
                 try:
                     stdin, stdout, stderr = ssh.exec_command(command)
-                    output = stdout.read().decode('utf-8')
-                    error = stderr.read().decode('utf-8')
+                    output = stdout.read().decode(encoding, errors='ignore')
+                    error = stderr.read().decode(encoding, errors='ignore')
                     return output, error
                 except Exception as retry_e:
                     return None, f"重连后仍然失败: {str(retry_e)}"
@@ -461,6 +466,57 @@ def is_nas_server(server_ip):
     is_nas = server_ip == "10.190.21.253"
     print(f"🔍 检查是否为NAS服务器: {server_ip} -> {is_nas}")
     return is_nas
+
+def is_windows_server(server_ip):
+    """判断是否为Windows服务器"""
+    server_config = SERVERS.get(server_ip, {})
+    is_windows = server_config.get("os_type") == "windows"
+    print(f"🔍 检查是否为Windows服务器: {server_ip} -> {is_windows}")
+    return is_windows
+
+def convert_windows_path_to_cygwin(windows_path):
+    """将Windows路径转换为Cygwin格式
+    例如: C:\\Users\\warrior\\Documents -> /cygdrive/c/Users/warrior/Documents
+    """
+    import re
+    # 处理盘符路径 (C:\path 或 C:/path)
+    match = re.match(r'^([A-Za-z]):[/\\](.*)$', windows_path)
+    if match:
+        drive = match.group(1).lower()
+        path = match.group(2).replace('\\', '/')
+        return f"/cygdrive/{drive}/{path}"
+    # 如果已经是Unix风格路径，直接返回
+    return windows_path.replace('\\', '/')
+
+def convert_cygwin_path_to_windows(cygwin_path):
+    """将Cygwin路径转换为Windows格式
+    例如: /cygdrive/c/Users/warrior/Documents -> C:/Users/warrior/Documents
+    """
+    import re
+    match = re.match(r'^/cygdrive/([a-z])/(.*)$', cygwin_path)
+    if match:
+        drive = match.group(1).upper()
+        path = match.group(2)
+        return f"{drive}:/{path}"
+    return cygwin_path
+
+# 规范化 Windows 路径用于传输（处理例如 "D:"、"/D:"、反斜杠等情况）
+def normalize_windows_path_for_transfer(p: str) -> str:
+    try:
+        if not p:
+            return p
+        s = p.replace('\\', '/')
+        import re
+        # 去掉前导斜杠形式的盘符，如 "/D:" -> "D:"
+        if s.startswith('/') and re.match(r'^/[A-Za-z]:/?$', s):
+            s = s[1:]
+        # 盘符根保证为 "D:/" 形式
+        if re.match(r'^[A-Za-z]:$', s):
+            s = s + '/'
+        return s
+    except Exception:
+        return p
+
 
 def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id):
     """使用tar+ssh传输文件到NAS服务器（rsync替代方案）"""
@@ -900,6 +956,22 @@ def get_default_path(server_ip):
     """获取服务器的默认路径"""
     server_config = SERVERS.get(server_ip, {})
 
+    # Windows服务器使用Windows路径 - 动态获取用户主目录
+    if is_windows_server(server_ip):
+        try:
+            # 通过SSH执行命令获取Windows用户主目录
+            output, error = ssh_manager.execute_command(server_ip, 'echo %USERPROFILE%')
+            if output and not error:
+                # 转换为正斜杠格式
+                user_profile = output.strip().replace('\\', '/')
+                print(f"🏠 Windows用户主目录: {user_profile}")
+                return user_profile
+        except Exception as e:
+            print(f"⚠️  无法获取Windows用户主目录: {e}")
+
+        # 如果获取失败，使用C盘根目录作为默认值
+        return "C:/"
+
     # NAS服务器使用不同的默认路径
     if server_ip == "10.190.21.253":  # NAS服务器
         return "/var/services/homes/Algorithm"
@@ -1310,50 +1382,136 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
             return []
     else:
         # 远程目录
-        # 使用ls -la命令以便正确识别符号链接和隐藏文件
-        command = f"ls -la '{path}' | tail -n +2"  # 总是使用-a选项以获取完整信息
+        # 判断是否为Windows服务器
+        if is_windows_server(server_ip):
+            # Windows服务器使用dir命令
+            # 先规范化Windows路径，避免出现如"/C:"或"C:"（无斜杠）等异常
+            import re
+            normalized_path = path or ''
+            # 去掉可能的前导斜杠：/C: -> C:
+            if normalized_path.startswith('/') and re.match(r'^/[A-Za-z]:', normalized_path):
+                normalized_path = normalized_path[1:]
+            # 驱动器根保持为 C:/ 形式
+            if re.match(r'^[A-Za-z]:$', normalized_path):
+                normalized_path = normalized_path + '/'
+            # 构造用于CMD的反斜杠路径
+            win_path = normalized_path.replace('/', '\\')
+            # 使用/a显示所有文件，/-c去除千位分隔符，统一解析
+            command = f'dir "{win_path}" /a /-c'
 
-        output, error = ssh_manager.execute_command(server_ip, command)
+            output, error = ssh_manager.execute_command(server_ip, command)
 
-        if error:
-            return []
+            if error and "找不到文件" not in error and "File Not Found" not in error:
+                print(f"Windows dir命令错误: {error}")
+                return []
 
-        items = []
-        for line in output.strip().split('\n'):
-            if not line:
-                continue
+            items = []
+            lines = output.strip().split('\n')
 
-            parts = line.split()
-            if len(parts) < 9:
-                continue
-
-            permissions = parts[0]
-            size = parts[4]
-            date_parts = parts[5:8]
-            name = ' '.join(parts[8:])
-
-            # 跳过当前目录和父目录
-            if name in ['.', '..']:
-                continue
-
-            # 应用WinSCP过滤规则
-            if not show_hidden:
-                if is_winscp_hidden_file(name, permissions, path):
+            # 解析Windows dir命令输出
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
 
-            is_directory = permissions.startswith('d')
+                # 跳过标题行和统计行
+                if 'Directory of' in line or '个文件' in line or '个目录' in line or 'File(s)' in line or 'Dir(s)' in line or 'bytes free' in line:
+                    continue
 
-            items.append({
-                "name": name,
-                "path": os.path.join(path, name),
-                "is_directory": is_directory,
-                "size": int(size) if size.isdigit() else 0,
-                "modified": ' '.join(date_parts)
-            })
+                # 解析dir输出格式: 日期 时间 <DIR>或大小 文件名
+                # 例如: 2024-01-15  10:30    <DIR>          Documents
+                #      2024-01-15  10:30         1,234 file.txt
+                import re
+                match = re.match(r'(\d{4}[-/]\d{2}[-/]\d{2})\s+(\d{2}:\d{2})\s+(<DIR>|\d[\d,]*)\s+(.+)$', line)
 
-        # 缓存结果
-        set_cached_listing(server_ip, path, show_hidden, items)
-        return items
+                if match:
+                    date_str = match.group(1)
+                    time_str = match.group(2)
+                    size_or_dir = match.group(3)
+                    name = match.group(4).strip()
+
+                    # 跳过当前目录和父目录
+                    if name in ['.', '..']:
+                        continue
+
+                    # 判断是否为目录
+                    is_directory = (size_or_dir == '<DIR>')
+
+                    # 解析大小
+                    if is_directory:
+                        size = 0
+                    else:
+                        try:
+                            size = int(size_or_dir.replace(',', ''))
+                        except:
+                            size = 0
+
+                    # 应用WinSCP过滤规则（Windows不需要permissions参数）
+                    if not show_hidden:
+                        if is_winscp_hidden_file(name, "", path):
+                            continue
+
+                    # 构建完整路径（使用正斜杠以保持一致性）
+                    base_path = normalized_path if 'normalized_path' in locals() and normalized_path else path
+                    full_path = f"{base_path.rstrip('/')}/{name}".replace('\\', '/')
+
+                    items.append({
+                        "name": name,
+                        "path": full_path,
+                        "is_directory": is_directory,
+                        "size": size,
+                        "modified": f"{date_str} {time_str}"
+                    })
+
+            # 缓存结果
+            set_cached_listing(server_ip, path, show_hidden, items)
+            return items
+        else:
+            # Linux服务器使用ls命令
+            # 使用ls -la命令以便正确识别符号链接和隐藏文件
+            command = f"ls -la '{path}' | tail -n +2"  # 总是使用-a选项以获取完整信息
+
+            output, error = ssh_manager.execute_command(server_ip, command)
+
+            if error:
+                return []
+
+            items = []
+            for line in output.strip().split('\n'):
+                if not line:
+                    continue
+
+                parts = line.split()
+                if len(parts) < 9:
+                    continue
+
+                permissions = parts[0]
+                size = parts[4]
+                date_parts = parts[5:8]
+                name = ' '.join(parts[8:])
+
+                # 跳过当前目录和父目录
+                if name in ['.', '..']:
+                    continue
+
+                # 应用WinSCP过滤规则
+                if not show_hidden:
+                    if is_winscp_hidden_file(name, permissions, path):
+                        continue
+
+                is_directory = permissions.startswith('d')
+
+                items.append({
+                    "name": name,
+                    "path": os.path.join(path, name),
+                    "is_directory": is_directory,
+                    "size": int(size) if size.isdigit() else 0,
+                    "modified": ' '.join(date_parts)
+                })
+
+            # 缓存结果
+            set_cached_listing(server_ip, path, show_hidden, items)
+            return items
 
 def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
     """优化的目录列表获取函数 - 专注于响应速度"""
@@ -1756,6 +1914,9 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
+    # 检查目标是否为Windows服务器
+    target_is_windows = is_windows_server(target_server)
+
     # 🚀 极速优化：精简rsync参数，移除所有性能开销
     rsync_opts = [
         '-a',                    # 归档模式（必需）
@@ -1771,17 +1932,25 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     # 移除 --progress - 避免进度监控开销
     # 强制禁用压缩 - 局域网环境下压缩反而降低速度
 
-    # 构建完整命令
+    # 处理目标路径（如果是Windows，转换为Cygwin格式），并统一加上SSH参数
+    rsync_target_path = target_path
+    if target_is_windows:
+        normalized_target = normalize_windows_path_for_transfer(target_path)
+        rsync_target_path = convert_windows_path_to_cygwin(normalized_target)
+        print(f"🔄 Windows目标路径转换: {target_path} -> {rsync_target_path}")
+
+    # 构建完整命令（显式指定SSH，避免首次连接/known_hosts等交互问题）
+    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
     if is_directory:
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + [f'{source_path}/', f'{target_user}@{target_server}:{target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [f'{source_path}/', f'{target_user}@{target_server}:{target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
     else:
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + [source_path, f'{target_user}@{target_server}:{target_path}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [source_path, f'{target_user}@{target_server}:{target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
 
     # 执行rsync命令
     import subprocess
@@ -1974,6 +2143,9 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
     source_user = SERVERS[source_server]['user']
     source_password = SERVERS[source_server].get('password')
 
+    # 检查源是否为Windows服务器
+    source_is_windows = is_windows_server(source_server)
+
     # 🚀 极速优化：构建本地rsync命令（拉取模式）
     rsync_opts = [
         '-a',                    # 归档模式（必需）
@@ -1984,17 +2156,23 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         '--timeout=600',         # 增加超时时间
     ]
 
+    # 处理源路径（如果是Windows，转换为Cygwin格式）
+    rsync_source_path = source_path
+    if source_is_windows:
+        rsync_source_path = convert_windows_path_to_cygwin(source_path)
+        print(f"🔄 Windows源路径转换: {source_path} -> {rsync_source_path}")
+
     # 构建完整命令（从远程拉取到本地）
     if is_directory:
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
     else:
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}', f'{target_path}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
         else:
-            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{source_path}', f'{target_path}/']
+            cmd = ['rsync'] + rsync_opts + [f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
 
     # 执行rsync命令
     import subprocess
@@ -2125,8 +2303,16 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
     print(f"🔄 使用rsync传输方案")
 
+    # 检查是否涉及Windows服务器
+    source_is_windows = is_windows_server(source_server)
+    target_is_windows = is_windows_server(target_server)
+
+    print(f"🔍 Windows检测结果: 源是Windows={source_is_windows}, 目标是Windows={target_is_windows}")
+
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
+    source_user = SERVERS[source_server]['user']
+    source_password = SERVERS[source_server].get('password')
 
     # 🚀 极速优化：精简rsync参数
     rsync_base_opts = [
@@ -2138,70 +2324,104 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         "--timeout=600",         # 增加超时时间
     ]
 
+    # 如果是“Windows作为源、Linux作为目标”，改为在目标Linux上发起拉取
+    if source_is_windows and not target_is_windows:
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': '🔁 检测到Windows作为源，切换为在目标Linux上运行rsync从Windows拉取'
+        })
+
+        rsync_source_path = convert_windows_path_to_cygwin(source_path)
+        print(f"🔄 Windows源路径转换: {source_path} -> {rsync_source_path}")
+
+        # rsync通过SSH连接到Windows源服务器
+        ssh_to_source = get_ssh_command_with_port(source_server, fast_ssh)
+        if is_directory:
+            if source_password:
+                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+            else:
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+        else:
+            if source_password:
+                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+            else:
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+
+        print(f"🔄 目标服务器执行的拉取命令: {remote_cmd}")
+
+        # 在目标服务器上执行命令
+        ssh = ssh_manager.get_connection(target_server)
+        if not ssh:
+            raise Exception(f"无法连接到目标服务器 {target_server}")
+
+        start_time = time.time()
+        stdin, stdout, stderr = ssh.exec_command(remote_cmd)
+        transfer_processes[transfer_id] = {'type': 'ssh', 'channel': stdout.channel}
+        exit_status = stdout.channel.recv_exit_status()
+        end_time = time.time()
+        transfer_duration = end_time - start_time
+        output = stdout.read().decode('utf-8', errors='ignore')
+        error = stderr.read().decode('utf-8', errors='ignore')
+        print(f"📊 拉取完成 - 耗时: {transfer_duration:.2f}秒, 状态: {exit_status}")
+        if output:
+            print(f"📊 输出: {output}")
+        if error:
+            print(f"⚠️ 错误信息: {error}")
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒'
+        })
+        if exit_status != 0:
+            raise Exception(f"rsync拉取失败，退出码: {exit_status}, 错误: {error}")
+        return True
+
+    # —— 其他情况依旧：在源服务器执行rsync推送到目标 ——
+
+    # 处理路径格式
+    rsync_source_path = source_path
+    if source_is_windows:
+        rsync_source_path = convert_windows_path_to_cygwin(source_path)
+        print(f"🔄 Windows源路径转换: {source_path} -> {rsync_source_path}")
+
+    rsync_target_path = target_path
+    if target_is_windows:
+        rsync_target_path = convert_windows_path_to_cygwin(target_path)
+        print(f"🔄 Windows目标路径转换: {target_path} -> {rsync_target_path}")
+
     # 构建rsync命令，优先使用sshpass，回退到SSH密钥
     if is_directory:
         if target_password:
-            # 使用sshpass进行密码认证
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
         else:
-            # 使用SSH密钥认证
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
     else:
         if target_password:
-            # 使用sshpass进行密码认证
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
         else:
-            # 使用SSH密钥认证
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
 
     print(f"🔄 远程rsync命令: {remote_cmd}")
 
-    # 记录开始时间
     start_time = time.time()
-
-    # 在源服务器上执行rsync命令
     ssh = ssh_manager.get_connection(source_server)
     if not ssh:
         raise Exception(f"无法连接到源服务器 {source_server}")
-
-    # 执行rsync - 直接等待完成，不读取进度
     stdin, stdout, stderr = ssh.exec_command(remote_cmd)
-
-    # 存储SSH通道用于取消操作
-    transfer_processes[transfer_id] = {
-        'type': 'ssh',
-        'channel': stdout.channel
-    }
-
-    # 等待命令完成
+    transfer_processes[transfer_id] = {'type': 'ssh', 'channel': stdout.channel}
     exit_status = stdout.channel.recv_exit_status()
-
-    # 记录结束时间
     end_time = time.time()
     transfer_duration = end_time - start_time
-
-    # 读取输出和错误信息
     output = stdout.read().decode('utf-8')
     error = stderr.read().decode('utf-8')
-
     print(f"📊 传输完成 - 耗时: {transfer_duration:.2f}秒")
     print(f"📊 退出状态: {exit_status}")
     if output:
         print(f"📊 输出: {output}")
     if error:
         print(f"⚠️ 错误信息: {error}")
-
-    # 发送传输完成通知
-    socketio.emit('transfer_log', {
-        'transfer_id': transfer_id,
-        'message': f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒'
-    })
-
+    socketio.emit('transfer_log', {'transfer_id': transfer_id,'message': f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒'})
     if exit_status != 0:
         raise Exception(f"rsync传输失败，退出码: {exit_status}, 错误: {error}")
-
-    # 🔧 BUG修复：统一返回布尔值True，而不是字典
-    # 原因：调用方使用 if not success 判断，字典永远为True导致判断失效
     return True
 
 def transfer_file_batch(transfer_id, source_server, file_batch, target_server, target_path, mode="copy", fast_ssh=True):
@@ -2373,12 +2593,14 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         continue
 
                     print(f"🔄 并行传输使用rsync方案")
-                    # 远程到远程传输，直接在源服务器执行rsync（就像原始脚本）
+                    # 远程到远程：根据Windows参与方选择推送或拉取策略
                     target_user = SERVERS[target_server]['user']
                     target_password = SERVERS[target_server].get('password')
+                    source_user = SERVERS[source_server]['user']
+                    source_password = SERVERS[source_server].get('password')
 
                     # 使用统一的SSH命令构建函数（支持自定义端口）
-                    ssh_cmd = get_ssh_command_with_port(target_server, fast_ssh)
+                    ssh_to_target = get_ssh_command_with_port(target_server, fast_ssh)
 
                     # 优化的rsync参数（兼容性优先）- 移除进度监控以提升性能
                     rsync_base_opts = [
@@ -2390,28 +2612,54 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         "--numeric-ids",         # 数字ID
                     ]
 
-                    # 根据网络环境添加压缩选项
                     if fast_ssh:
-                        rsync_base_opts.append("--no-compress")  # 局域网不压缩
+                        rsync_base_opts.append("--no-compress")
                     else:
-                        rsync_base_opts.append("-z")  # WAN环境使用压缩
+                        rsync_base_opts.append("-z")
 
-                    # 构建rsync命令
-                    if is_directory:
-                        if target_password:
-                            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+                    source_is_windows = is_windows_server(source_server)
+                    target_is_windows = is_windows_server(target_server)
+
+                    # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
+                    if source_is_windows and not target_is_windows:
+                        ssh_to_source = get_ssh_command_with_port(source_server, fast_ssh)
+                        rsync_source_path = convert_windows_path_to_cygwin(source_path)
+                        if is_directory:
+                            if source_password:
+                                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+                            else:
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+                            if source_password:
+                                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+                            else:
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+
+                        # 在目标服务器上执行拉取命令
+                        ssh = ssh_manager.get_connection(target_server)
+                        if not ssh:
+                            raise Exception(f"无法连接到目标服务器 {target_server}")
                     else:
-                        if target_password:
-                            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}' '{target_user}@{target_server}:{target_path}/'"
-                        else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+                        # 其他情况保持原逻辑：在源服务器上执行rsync推送到目标
+                        # 路径适配：若目标为Windows则转换目标路径；若源为Windows则转换源路径
+                        rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
+                        rsync_source_path = convert_windows_path_to_cygwin(source_path) if source_is_windows else source_path
 
-                    # 在源服务器上执行rsync命令
-                    ssh = ssh_manager.get_connection(source_server)
-                    if not ssh:
-                        raise Exception(f"无法连接到源服务器 {source_server}")
+                        if is_directory:
+                            if target_password:
+                                remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+                            else:
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+                        else:
+                            if target_password:
+                                remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+                            else:
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+
+                        # 在源服务器上执行推送命令
+                        ssh = ssh_manager.get_connection(source_server)
+                        if not ssh:
+                            raise Exception(f"无法连接到源服务器 {source_server}")
 
                     import time
                     start_time = time.time()
@@ -2421,7 +2669,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         'message': f'⚡️ 开始传输 {file_name}...'
                     })
 
-                    # 执行rsync并实时读取进度
+                    # 执行rsync
                     _, stdout, stderr = ssh.exec_command(remote_cmd)
 
                     # 存储SSH通道用于取消操作
@@ -2430,12 +2678,12 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         'channel': stdout.channel
                     }
 
-                    # 等待传输完成（无进度读取，提升性能）
+                    # 等待传输完成
                     exit_status = stdout.channel.recv_exit_status()
 
                     # 读取输出和错误信息
-                    output = stdout.read().decode('utf-8')
-                    error = stderr.read().decode('utf-8')
+                    output = stdout.read().decode('utf-8', errors='ignore')
+                    error = stderr.read().decode('utf-8', errors='ignore')
 
                     if exit_status != 0:
                         raise Exception(f"传输 {file_name} 失败: {error}")
@@ -2673,6 +2921,77 @@ def api_file_save():
 def get_servers():
     return jsonify(SERVERS)
 
+@app.route('/api/windows_drives/<server_ip>')
+def get_windows_drives(server_ip):
+    """获取Windows服务器的磁盘列表"""
+    if not is_windows_server(server_ip):
+        return jsonify({
+            'success': False,
+            'error': '不是Windows服务器'
+        })
+
+    try:
+        # 使用wmic命令获取逻辑磁盘列表
+        command = 'wmic logicaldisk get caption,drivetype,volumename'
+        output, error = ssh_manager.execute_command(server_ip, command)
+
+        if error:
+            print(f"获取磁盘列表失败: {error}")
+            # 如果wmic失败，返回常见的磁盘列表
+            return jsonify({
+                'success': True,
+                'drives': [
+                    {'letter': 'C:', 'name': 'C盘', 'type': 'local'},
+                    {'letter': 'D:', 'name': 'D盘', 'type': 'local'},
+                    {'letter': 'E:', 'name': 'E盘', 'type': 'local'}
+                ]
+            })
+
+        drives = []
+        lines = output.strip().split('\n')
+
+        # 跳过标题行
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            if len(parts) >= 2:
+                caption = parts[0]  # 例如: C:
+                drive_type = parts[1]  # 3=本地磁盘, 4=网络驱动器, 5=CD-ROM
+                volume_name = ' '.join(parts[2:]) if len(parts) > 2 else ''
+
+                # 只返回本地磁盘和网络驱动器
+                if drive_type in ['3', '4']:
+                    drive_name = f"{caption}"
+                    if volume_name:
+                        drive_name += f" ({volume_name})"
+
+                    drives.append({
+                        'letter': caption,
+                        'name': drive_name,
+                        'type': 'local' if drive_type == '3' else 'network'
+                    })
+
+        # 如果没有找到磁盘，返回默认列表
+        if not drives:
+            drives = [
+                {'letter': 'C:', 'name': 'C盘', 'type': 'local'},
+                {'letter': 'D:', 'name': 'D盘', 'type': 'local'}
+            ]
+
+        return jsonify({
+            'success': True,
+            'drives': drives
+        })
+    except Exception as e:
+        print(f"获取Windows磁盘列表异常: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        })
+
 @app.route('/api/browse/<server_ip>')
 def browse_directory(server_ip):
     # 使用动态默认路径
@@ -2868,15 +3187,22 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
         # 使用统一的SSH命令构建函数（支持自定义端口）
         ssh_opts_str = get_ssh_command_with_port(target_server, fast_ssh)
 
-        # 构建rsync命令（与原始脚本完全相同）
+        # 目标为Windows时，规范化并转换为Cygwin路径
+        final_target_path = target_path
+        if is_windows_server(target_server):
+            normalized = normalize_windows_path_for_transfer(target_path)
+            final_target_path = convert_windows_path_to_cygwin(normalized)
+            print(f"🔄 Windows目标路径转换(本地rsync): {target_path} -> {final_target_path}")
+
+        # 构建rsync命令
         if is_directory:
             # 目录传输，确保以/结尾
             source_with_slash = source_path.rstrip('/') + '/'
-            target_full_path = f"{target_path}/{file_name}/"
+            target_full_path = f"{final_target_path}/{file_name}/"
         else:
             # 文件传输
             source_with_slash = source_path
-            target_full_path = f"{target_path}/"
+            target_full_path = f"{final_target_path}/"
 
         # 🚀 极速优化：精简rsync参数，最大化传输速度
         rsync_opts = [
