@@ -33,7 +33,11 @@ SERVERS = {
     "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0"},
     "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456"},
     "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000},
-    "10.190.129.29": {"name": "Windows服务器", "user": "warrior", "password": "Fkcay929", "os_type": "windows"}
+    "10.190.129.29": {"name": "樊坤的windows", "user": "warrior", "password": "Fkcay929", "os_type": "windows"},
+    "10.190.78.30": {"name": "李园的windows", "user": "LY981", "password": "taihe", "os_type": "windows"},
+    "10.190.79.12": {"name": "张帅的windows", "user": "Administrator", "password": "     0", "os_type": "windows"},
+    "10.190.78.32": {"name": "梁颖蕙的windows", "user": "amy", "password": "123456", "os_type": "windows"},
+    "10.190.22.114": {"name": "黄海婷的windows", "user": "admin", "password": "123456", "os_type": "windows"}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
