@@ -2919,7 +2919,30 @@ def parse_rsync_progress(line):
 # Web路由
 @app.route('/')
 def index():
-    return render_template('index.html', servers=SERVERS)
+    # 获取访问设备的 IPv4 地址，用于前端日志展示
+    # 依次尝试 X-Forwarded-For / X-Real-IP / remote_addr，并提取首个 IPv4
+    import re
+    def _extract_ipv4(s: str):
+        if not s:
+            return None
+        # X-Forwarded-For 可能为 "ip1, ip2"，取第一个并提取 IPv4
+        first = s.split(',')[0].strip()
+        m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
+        return m.group(1) if m else None
+
+    candidates = [
+        request.headers.get('X-Forwarded-For', ''),
+        request.headers.get('X-Real-IP', ''),
+        request.remote_addr
+    ]
+    client_ipv4 = None
+    for c in candidates:
+        ip = _extract_ipv4(c)
+        if ip:
+            client_ipv4 = ip
+            break
+
+    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4)
 
 @app.route('/api/image/stream')
 def api_image_stream():

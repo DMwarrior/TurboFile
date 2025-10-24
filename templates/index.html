@@ -863,7 +863,9 @@
                     <select id="sourceServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🔍 请选择源服务器</option>
                         {% for ip, info in servers.items() %}
+                        {% if info.get('os_type') != 'windows' or (client_ipv4 and ip == client_ipv4) %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% endif %}
                         {% endfor %}
                     </select>
                     <!-- Windows磁盘选择器 -->
@@ -882,7 +884,9 @@
                     <select id="targetServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🎯 请选择目标服务器</option>
                         {% for ip, info in servers.items() %}
+                        {% if info.get('os_type') != 'windows' or (client_ipv4 and ip == client_ipv4) %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% endif %}
                         {% endfor %}
                     </select>
                     <!-- Windows磁盘选择器 -->
@@ -2533,6 +2537,9 @@
             addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
             addLogInfo(`⚡ 双击优化: 时间窗口${DOUBLE_CLICK_CONFIG.timeWindow}ms，响应更宽容友好`);
             addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
+            const CLIENT_IPV4 = JSON.parse('{{ client_ipv4|tojson|default("null") }}');
+            if (CLIENT_IPV4) { addLogInfo('🖥️ 访问设备 IPv4: ' + CLIENT_IPV4); }
+
 
             // 默认使用标题并排模式，您可以调用 switchLogoDisplay('watermark') 或 switchLogoDisplay('footer') 切换
             switchLogoDisplay('header');
