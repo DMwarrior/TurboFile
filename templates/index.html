@@ -723,6 +723,36 @@
             box-shadow: var(--shadow-sm);
         }
 
+        /* Windows 磁盘下拉视觉优化：更小字体，风格与整体融合 */
+        .path-nav .dropdown-toggle {
+            font-size: 0.80rem; /* 与路径段接近的字号，避免突兀 */
+            padding: 1px 6px;
+            line-height: 1.2;
+        }
+        .path-nav .dropdown-menu {
+            font-size: 0.85rem; /* 下拉项略大于路径段，便于阅读 */
+            padding: 4px 0;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-sm);
+        }
+        .path-nav .dropdown-item {
+            padding: 4px 10px;
+            line-height: 1.25;
+        }
+        .path-nav .dropdown-item.active,
+        .path-nav .dropdown-item:active {
+            background-color: #eef2ff;
+            color: #111827;
+        }
+        /* 自定义 Windows 风格硬盘 SVG 图标尺寸与对齐 */
+        .path-nav .drive-icon {
+            width: 0.95rem;
+            height: 0.8rem;
+            vertical-align: -0.15em;
+        }
+
+
+
         /* 响应式设计 */
         @media (max-width: 768px) {
             .container-fluid {
@@ -863,17 +893,11 @@
                     <select id="sourceServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🔍 请选择源服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or (client_ipv4 and ip == client_ipv4) %}
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
-                    <!-- Windows磁盘选择器 -->
-                    <div id="sourceDriveSelector" style="display: none; margin-top: 4px;">
-                        <select id="sourceDrive" class="form-select form-select-sm" style="font-size: 0.8rem;">
-                            <option value="">💾 选择磁盘...</option>
-                        </select>
-                    </div>
                 </div>
             </div>
             <div class="col-md-6">
@@ -884,17 +908,11 @@
                     <select id="targetServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🎯 请选择目标服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or (client_ipv4 and ip == client_ipv4) %}
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
-                    <!-- Windows磁盘选择器 -->
-                    <div id="targetDriveSelector" style="display: none; margin-top: 4px;">
-                        <select id="targetDrive" class="form-select form-select-sm" style="font-size: 0.8rem;">
-                            <option value="">💾 选择磁盘...</option>
-                        </select>
-                    </div>
                 </div>
             </div>
         </div>
@@ -1099,6 +1117,13 @@
         let selectedSourceFiles = [];
         let currentSourcePath = '/home/th';
         let currentTargetPath = '/home/thgd';
+
+        // Windows 磁盘缓存（分别用于源/目标），供路径导航下拉使用
+        let windowsDrivesSource = [];
+        let windowsDrivesTarget = [];
+
+        // 预置服务器元数据（用于本地判定 Windows/Linux，避免额外网络请求）
+        const SERVERS_DATA = JSON.parse('{{ servers|tojson }}');
 
         // 日志系统配置
         let logBuffer = [];
@@ -1847,10 +1872,32 @@
                 let html = '';
 
                 if (isWindows) {
-                    // Windows路径导航：以驱动器为根，例如 C:/
+                    // Windows路径导航：以驱动器为根，例如 C:/，并在驱动器处提供下拉磁盘切换
                     const drive = parts[0]; // 例如 C:
-                    // 驱动器根
-                    html += `<a href="#" class="path-segment" onclick="navigateToPath('${drive}/', ${isSource})">${drive}/</a>`;
+
+                    // 动态构建磁盘下拉（仅当已拿到磁盘列表时才展示下拉；否则保持普通链接，不显示任何占位文案）
+                    const drives = (isSource ? windowsDrivesSource : windowsDrivesTarget) || [];
+                    if (drives.length > 0) {
+                        const driveMenuItems = drives.map(d => {
+                            const letterRaw = (d.letter || '').toUpperCase();
+                            const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
+                            const iconHtml = d.type === 'network'
+                                ? '<i class="bi bi-globe2 me-2 text-secondary"></i>'
+                                : '<svg class="drive-icon me-2" width="14" height="12" viewBox="0 0 64 48" aria-hidden="true"><rect x="4" y="4" width="56" height="18" rx="4" fill="#e9eef5"></rect><rect x="4" y="20" width="56" height="24" rx="4" fill="#8b95a5"></rect><circle cx="12" cy="32" r="3.5" fill="#2ecc71"></circle></svg>';
+                            const active = letter === drive.toUpperCase() ? ' active' : '';
+                            return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive('${letter}', ${isSource}); return false;">${iconHtml}${d.name}</a></li>`;
+                        }).join('');
+                        html += `
+                            <div class="dropdown d-inline-block">
+                                <a href="#" class="path-segment dropdown-toggle" data-bs-toggle="dropdown" onclick="event.preventDefault();">${drive}/</a>
+                                <ul class="dropdown-menu">${driveMenuItems}</ul>
+                            </div>
+                        `;
+                    } else {
+                        // 未加载磁盘列表：显示为普通可点击路径段，不展示任何“加载中”字样
+                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${drive}/', ${isSource})">${drive}/</a>`;
+                    }
+
                     let buildPath = drive;
                     // 其他子路径
                     parts.slice(1).forEach(part => {
@@ -1901,6 +1948,22 @@
                 // Linux: 普通上级
                 return p.split('/').slice(0, -1).join('/') || '/';
             }
+
+
+        // 在路径导航中切换Windows磁盘
+        function switchWindowsDrive(letter, isSource) {
+            const driveLetter = letter.endsWith(':') ? letter : (letter + ':');
+            const drivePath = driveLetter + '/';
+            if (isSource) {
+                currentSourcePath = drivePath;
+                browseSourceInstant(currentSourcePath);
+                updatePathNavigation(currentSourcePath, true);
+            } else {
+                currentTargetPath = drivePath;
+                browseTargetInstant(currentTargetPath);
+                updatePathNavigation(currentTargetPath, false);
+            }
+        }
 
 
         // 导航到指定路径（无加载动画版本）
@@ -2299,58 +2362,62 @@
             return serverPaths[serverIP] || '/home/th';
         }
 
-        // 检查是否为Windows服务器
-        async function isWindowsServer(serverIP) {
+        // 检查是否为Windows服务器（使用模板内置数据，避免额外网络请求）
+        function isWindowsServer(serverIP) {
             try {
-                const response = await fetch('/api/servers');
-                const servers = await response.json();
-                return servers[serverIP] && servers[serverIP].os_type === 'windows';
+                return SERVERS_DATA[serverIP] && SERVERS_DATA[serverIP].os_type === 'windows';
             } catch (error) {
                 console.error('检查服务器类型失败:', error);
                 return false;
             }
         }
 
-        // 加载Windows磁盘列表
+        // 加载Windows磁盘列表（存入内存，供路径导航下拉使用）
         async function loadWindowsDrives(serverIP, isSource) {
-            const driveSelector = document.getElementById(isSource ? 'sourceDriveSelector' : 'targetDriveSelector');
-            const driveSelect = document.getElementById(isSource ? 'sourceDrive' : 'targetDrive');
-
             try {
                 const response = await fetch(`/api/windows_drives/${serverIP}`);
                 const data = await response.json();
 
                 if (data.success && data.drives) {
-                    // 清空现有选项
-                    driveSelect.innerHTML = '<option value="">💾 选择磁盘...</option>';
+                    if (isSource) {
+                        windowsDrivesSource = data.drives;
+                    } else {
+                        windowsDrivesTarget = data.drives;
+                    }
 
-                    // 添加磁盘选项
-                    data.drives.forEach(drive => {
-                        const option = document.createElement('option');
-                        option.value = drive.letter;
-                        const icon = drive.type === 'network' ? '🌐' : '💿';
-                        option.textContent = `${icon} ${drive.name}`;
-                        driveSelect.appendChild(option);
-                    });
-
-                    // 显示磁盘选择器
-                    driveSelector.style.display = 'block';
+                    // 自动选择 C 盘；若无 C 盘则选择第一个磁盘，并立即浏览该磁盘根目录
+                    const preferred = data.drives.find(d => (d.letter || '').toUpperCase() === 'C:' || (d.letter || '').toUpperCase() === 'C') || data.drives[0];
+                    if (preferred) {
+                        const drivePath = (preferred.letter.endsWith(':') ? preferred.letter : (preferred.letter + ':')) + '/';
+                        if (isSource) {
+                            if (currentSourcePath !== drivePath) {
+                                currentSourcePath = drivePath;
+                                browseSourceInstant(currentSourcePath);
+                            }
+                            updatePathNavigation(currentSourcePath, true);
+                        } else {
+                            if (currentTargetPath !== drivePath) {
+                                currentTargetPath = drivePath;
+                                browseTargetInstant(currentTargetPath);
+                            }
+                            updatePathNavigation(currentTargetPath, false);
+                        }
+                        addLogInfo(`💾 默认选择磁盘: ${preferred.letter}`);
+                    }
 
                     addLogInfo(`💾 已加载Windows磁盘列表: ${data.drives.length}个磁盘`);
                 } else {
                     console.error('加载磁盘列表失败:', data.error);
-                    driveSelector.style.display = 'none';
                 }
             } catch (error) {
                 console.error('加载Windows磁盘列表异常:', error);
-                driveSelector.style.display = 'none';
             }
         }
 
-        // 隐藏Windows磁盘选择器
+        // 兼容保留：若旧选择器不存在则什么也不做
         function hideWindowsDriveSelector(isSource) {
-            const driveSelector = document.getElementById(isSource ? 'sourceDriveSelector' : 'targetDriveSelector');
-            driveSelector.style.display = 'none';
+            const el = document.getElementById(isSource ? 'sourceDriveSelector' : 'targetDriveSelector');
+            if (el) el.style.display = 'none';
         }
 
         // LOGO显示方案切换函数（保留备用）
@@ -2550,66 +2617,43 @@
             // 服务器选择变化时自动浏览
             document.getElementById('sourceServer').addEventListener('change', async function() {
                 if (this.value) {
-                    // 检查是否为Windows服务器
-                    const isWindows = await isWindowsServer(this.value);
+                    const isWindows = isWindowsServer(this.value);
 
-                    if (isWindows) {
-                        // Windows服务器：加载磁盘列表
-                        await loadWindowsDrives(this.value, true);
-                        // 不自动浏览，等待用户选择磁盘或使用默认路径
-                        addLogInfo('💡 检测到Windows服务器，请选择磁盘或直接浏览默认路径');
-                    } else {
-                        // Linux服务器：隐藏磁盘选择器，直接浏览
-                        hideWindowsDriveSelector(true);
-                    }
-
-                    // 根据服务器设置默认路径
+                    // 先确定默认路径并立即开始浏览（零延迟）
                     const defaultPath = getDefaultPath(this.value);
                     currentSourcePath = defaultPath;
-                    setTimeout(browseSource, 100);
+                    browseSourceInstant(currentSourcePath);
+
+                    // Windows磁盘列表异步加载，不阻塞文件显示
+                    if (isWindows) {
+                        loadWindowsDrives(this.value, true);
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                    } else {
+                        hideWindowsDriveSelector(true);
+                    }
                 }
             });
 
             document.getElementById('targetServer').addEventListener('change', async function() {
                 if (this.value) {
-                    // 检查是否为Windows服务器
-                    const isWindows = await isWindowsServer(this.value);
+                    const isWindows = isWindowsServer(this.value);
 
-                    if (isWindows) {
-                        // Windows服务器：加载磁盘列表
-                        await loadWindowsDrives(this.value, false);
-                        // 不自动浏览，等待用户选择磁盘或使用默认路径
-                        addLogInfo('💡 检测到Windows服务器，请选择磁盘或直接浏览默认路径');
-                    } else {
-                        // Linux服务器：隐藏磁盘选择器，直接浏览
-                        hideWindowsDriveSelector(false);
-                    }
-
-                    // 根据服务器设置默认路径
+                    // 先确定默认路径并立即开始浏览（零延迟）
                     const defaultPath = getDefaultPath(this.value);
                     currentTargetPath = defaultPath;
-                    setTimeout(browseTarget, 100);
+                    browseTargetInstant(currentTargetPath);
+
+                    // Windows磁盘列表异步加载，不阻塞文件显示
+                    if (isWindows) {
+                        loadWindowsDrives(this.value, false);
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                    } else {
+                        hideWindowsDriveSelector(false);
+                    }
                 }
             });
 
-            // 磁盘选择变化时浏览磁盘根目录
-            document.getElementById('sourceDrive').addEventListener('change', function() {
-                if (this.value) {
-                    const drivePath = this.value + '/';  // 例如: C:/
-                    currentSourcePath = drivePath;
-                    browseSource();
-                    addLogInfo(`💾 切换到源磁盘: ${this.value}`);
-                }
-            });
 
-            document.getElementById('targetDrive').addEventListener('change', function() {
-                if (this.value) {
-                    const drivePath = this.value + '/';  // 例如: D:/
-                    currentTargetPath = drivePath;
-                    browseTarget();
-                    addLogInfo(`💾 切换到目标磁盘: ${this.value}`);
-                }
-            });
         });
     </script>
 

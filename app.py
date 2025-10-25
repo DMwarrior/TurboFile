@@ -22,6 +22,8 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 
+import shlex
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -33,15 +35,26 @@ SERVERS = {
     "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0"},
     "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456"},
     "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000},
-    "10.190.129.29": {"name": "樊坤的windows", "user": "warrior", "password": "Fkcay929", "os_type": "windows"},
-    "10.190.78.30": {"name": "李园的windows", "user": "LY981", "password": "taihe", "os_type": "windows"},
-    "10.190.79.12": {"name": "张帅的windows", "user": "Administrator", "password": "     0", "os_type": "windows"},
-    "10.190.78.32": {"name": "梁颖蕙的windows", "user": "amy", "password": "123456", "os_type": "windows"},
-    "10.190.22.114": {"name": "黄海婷的windows", "user": "admin", "password": "123456", "os_type": "windows"}
+    "10.190.129.29": {"name": "樊坤", "user": "warrior", "password": "Fkcay929", "os_type": "windows"},
+    "10.190.78.30": {"name": "李园", "user": "LY981", "password": "taihe", "os_type": "windows"},
+    "10.190.79.12": {"name": "张帅", "user": "Administrator", "password": "     0", "os_type": "windows"},
+    "10.190.78.32": {"name": "梁颖蕙", "user": "amy", "password": "123456", "os_type": "windows"},
+    "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows"}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
 TURBOFILE_HOST_IP = "192.168.9.62"
+
+# 管理员权限开关（仅用于调试/排障）：开启后指定客户端IP可查看所有Windows服务器
+ADMIN_MODE_ENABLED = False  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
+ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
+
+def is_admin_client_ip(ip: str) -> bool:
+    try:
+        return bool(ADMIN_MODE_ENABLED and ip and ip in ADMIN_CLIENT_IPS)
+    except Exception:
+        return False
+
 
 # 获取当前主机的实际IP地址
 def get_current_host_ip():
@@ -114,7 +127,8 @@ PERFORMANCE_CONFIG = {
 }
 
 # 统一的 rsync SSH 参数（按用户要求统一为 aes128-gcm）
-RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-gcm@openssh.com"
+# 添加 StrictHostKeyChecking=no 和 UserKnownHostsFile=/dev/null 避免首次连接时的主机密钥验证失败
+RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-gcm@openssh.com -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 
 # 模拟速度生成器
@@ -1423,27 +1437,31 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     continue
 
                 # 跳过标题行和统计行
-                if 'Directory of' in line or '个文件' in line or '个目录' in line or 'File(s)' in line or 'Dir(s)' in line or 'bytes free' in line:
+                if 'Directory of' in line or '个文件' in line or '个目录' in line or 'File(s)' in line or 'Dir(s)' in line or 'bytes free' in line or '的目录' in line or '可用字节' in line:
                     continue
 
                 # 解析dir输出格式: 日期 时间 <DIR>或大小 文件名
-                # 例如: 2024-01-15  10:30    <DIR>          Documents
-                #      2024-01-15  10:30         1,234 file.txt
+                # 支持多种日期格式：
+                # 英文格式: 2024-01-15  10:30    <DIR>          Documents
+                # 中文格式: 24/10/2025  下午 03:21    <DIR>          .
+                # 通用格式: 日期(含-或/)  时间(可能含上午/下午)  <DIR>或大小  文件名
                 import re
-                match = re.match(r'(\d{4}[-/]\d{2}[-/]\d{2})\s+(\d{2}:\d{2})\s+(<DIR>|\d[\d,]*)\s+(.+)$', line)
+                # 更宽松的正则：匹配日期(数字+分隔符)、时间部分(可能含中文)、大小/DIR标记、文件名
+                match = re.match(r'(\d{2,4}[-/]\d{2}[-/]\d{2,4})\s+(上午|下午)?\s*(\d{2}:\d{2})\s+(<DIR>|<JUNCTION>|\d[\d,]*)\s+(.+)$', line)
 
                 if match:
                     date_str = match.group(1)
-                    time_str = match.group(2)
-                    size_or_dir = match.group(3)
-                    name = match.group(4).strip()
+                    am_pm = match.group(2) or ''  # 上午/下午（可能为空）
+                    time_str = match.group(3)
+                    size_or_dir = match.group(4)
+                    name = match.group(5).strip()
 
                     # 跳过当前目录和父目录
                     if name in ['.', '..']:
                         continue
 
-                    # 判断是否为目录
-                    is_directory = (size_or_dir == '<DIR>')
+                    # 判断是否为目录或链接点
+                    is_directory = (size_or_dir in ['<DIR>', '<JUNCTION>'])
 
                     # 解析大小
                     if is_directory:
@@ -1463,12 +1481,15 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     base_path = normalized_path if 'normalized_path' in locals() and normalized_path else path
                     full_path = f"{base_path.rstrip('/')}/{name}".replace('\\', '/')
 
+                    # 组合完整时间字符串
+                    full_time = f"{am_pm} {time_str}".strip() if am_pm else time_str
+
                     items.append({
                         "name": name,
                         "path": full_path,
                         "is_directory": is_directory,
                         "size": size,
-                        "modified": f"{date_str} {time_str}"
+                        "modified": f"{date_str} {full_time}"
                     })
 
             # 缓存结果
@@ -1939,6 +1960,7 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         '--no-compress',         # 禁用压缩（局域网环境）
         '--numeric-ids',         # 数字ID，避免用户名解析
         '--timeout=600',         # 增加超时时间，避免传输中断
+        '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
     ]
 
     # 🚀 性能优化：移除可能影响速度的选项
@@ -2168,6 +2190,7 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         '--no-compress',         # 禁用压缩（局域网环境）
         '--numeric-ids',         # 数字ID，避免用户名解析
         '--timeout=600',         # 增加超时时间
+        '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
     ]
 
     # 处理源路径（如果是Windows，转换为Cygwin格式）
@@ -2342,10 +2365,10 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
             if is_directory:
                 # cp -r 复制目录
-                remote_cmd = f"cp -r '{source_path}' '{target_path}/'"
+                remote_cmd = f"cp -r {shlex.quote(source_path)} {shlex.quote(target_path + '/')}"
             else:
                 # cp 复制文件
-                remote_cmd = f"cp -f '{source_path}' '{dest_path}'"
+                remote_cmd = f"cp -f {shlex.quote(source_path)} {shlex.quote(dest_path)}"
 
         print(f"[DEBUG] 同服务器复制命令: {remote_cmd}")
 
@@ -2423,6 +2446,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         "--no-compress",         # 禁用压缩（局域网环境）
         "--numeric-ids",         # 数字ID，避免用户名解析
         "--timeout=600",         # 增加超时时间
+        "-s",                    # 保护参数，避免空格/中文在远端shell被拆分
     ]
 
     # 如果是“Windows作为源、Linux作为目标”，改为在目标Linux上发起拉取
@@ -2439,14 +2463,14 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         ssh_to_source = RSYNC_SSH_CMD
         if is_directory:
             if source_password:
-                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+                remote_cmd = f"sshpass -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
         else:
             if source_password:
-                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+                remote_cmd = f"sshpass -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
 
         print(f"🔄 目标服务器执行的拉取命令: {remote_cmd}")
 
@@ -2492,14 +2516,14 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     # 构建rsync命令，优先使用sshpass，回退到SSH密钥
     if is_directory:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+            remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(RSYNC_SSH_CMD)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(RSYNC_SSH_CMD)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
     else:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+            remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(RSYNC_SSH_CMD)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{RSYNC_SSH_CMD}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(RSYNC_SSH_CMD)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
 
     print(f"🔄 远程rsync命令: {remote_cmd}")
 
@@ -2577,14 +2601,14 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     # 构建rsync命令
     if is_directory:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+            remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}/' '{target_user}@{target_server}:{target_path}/{file_name}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
     else:
         if target_password:
-            remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+            remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_cmd}' '{source_path}' '{target_user}@{target_server}:{target_path}/'"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
 
     # 在源服务器上执行rsync命令
     ssh = ssh_manager.get_connection(source_server)
@@ -2735,14 +2759,14 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         rsync_source_path = convert_windows_path_to_cygwin(source_path)
                         if is_directory:
                             if source_password:
-                                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+                                remote_cmd = f"sshpass -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
                             else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}/' '{target_path}/{file_name}/'"
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
                         else:
                             if source_password:
-                                remote_cmd = f"sshpass -p '{source_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+                                remote_cmd = f"sshpass -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
                             else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_source}' '{source_user}@{source_server}:{rsync_source_path}' '{target_path}/'"
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
 
                         # 在目标服务器上执行拉取命令
                         ssh = ssh_manager.get_connection(target_server)
@@ -2756,14 +2780,14 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                         if is_directory:
                             if target_password:
-                                remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+                                remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
                             else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}/' '{target_user}@{target_server}:{rsync_target_path}/{file_name}/'"
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
                         else:
                             if target_password:
-                                remote_cmd = f"sshpass -p '{target_password}' rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+                                remote_cmd = f"sshpass -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
                             else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e '{ssh_to_target}' '{rsync_source_path}' '{target_user}@{target_server}:{rsync_target_path}/'"
+                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
 
                         # 在源服务器上执行推送命令
                         ssh = ssh_manager.get_connection(source_server)
@@ -2942,7 +2966,10 @@ def index():
             client_ipv4 = ip
             break
 
-    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4)
+    # 判断是否为管理员客户端（基于IP且受开关控制）
+    is_admin_client = is_admin_client_ip(client_ipv4)
+
+    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4, is_admin_client=is_admin_client)
 
 @app.route('/api/image/stream')
 def api_image_stream():
@@ -3344,6 +3371,7 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             '--no-compress',         # 禁用压缩（局域网环境）
             '--numeric-ids',         # 数字ID，避免用户名解析
             '--timeout=600',         # 增加超时时间
+            '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
         ]
 
         if target_password:
