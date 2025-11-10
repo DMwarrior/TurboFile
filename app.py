@@ -38,7 +38,7 @@ SERVERS = {
     "10.190.129.29": {"name": "樊坤", "user": "warrior", "password": "Fkcay929", "os_type": "windows"},
     "10.190.78.30": {"name": "李园", "user": "LY981", "password": "taihe", "os_type": "windows"},
     "10.190.79.12": {"name": "张帅", "user": "Administrator", "password": "     0", "os_type": "windows"},
-    "10.190.78.32": {"name": "梁颖蕙", "user": "amy", "password": "123456", "os_type": "windows"},
+    "10.190.78.32": {"name": "梁颖蕙", "user": "Administrator", "password": "123456", "os_type": "windows"},
     "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows"}
 }
 
@@ -46,7 +46,7 @@ SERVERS = {
 TURBOFILE_HOST_IP = "192.168.9.62"
 
 # 管理员权限开关（仅用于调试/排障）：开启后指定客户端IP可查看所有Windows服务器
-ADMIN_MODE_ENABLED = False  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
+ADMIN_MODE_ENABLED = True  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
 ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
 
 def is_admin_client_ip(ip: str) -> bool:
