@@ -749,14 +749,22 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         source_ssh_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no"
         target_ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
 
-        if is_directory:
-            # 目录传输
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
-            target_extract_cmd = f"cd {target_path} && tar -xf -"
+        # 构建源端 tar 命令（Windows 使用 cmd 语法，Linux 使用 POSIX 语法）
+        target_path_cmd = target_path  # NAS 为 Linux，无需转换
+        if is_windows_server(source_server):
+            import ntpath
+            win_dir = ntpath.dirname(source_path)
+            win_name = ntpath.basename(source_path)
+            # Windows: 使用 cmd /C，/d 允许切换盘符，2>nul 静默错误
+            source_tar_cmd = f'cmd /C "cd /d \"{win_dir}\" && tar -cf - \"{win_name}\" 2>nul"'
         else:
-            # 文件传输
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
-            target_extract_cmd = f"cd {target_path} && tar -xf -"
+            source_path_cmd = source_path
+            if is_directory:
+                source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+            else:
+                source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+        # 目标侧在 NAS 解包
+        target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
 
         # 根据密码配置构建完整命令
         if source_password and target_password:
@@ -782,13 +790,22 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         import time
         start_time = time.time()
 
-        result = subprocess.run(tar_cmd, shell=True, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(
+            tar_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            timeout=300,
+        )
 
         print(f"🔧 命令返回码: {result.returncode}")
-        if result.stdout:
-            print(f"🔧 标准输出: {result.stdout}")
-        if result.stderr:
-            print(f"🔧 错误输出: {result.stderr}")
+        stdout = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ''
+        stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ''
+        if stdout:
+            print(f"🔧 标准输出: {stdout}")
+        if stderr:
+            print(f"🔧 错误输出: {stderr}")
 
         if result.returncode == 0:
             # 计算传输耗时
@@ -818,12 +835,12 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
 
             return True
         else:
-            print(f"❌ 远程到NAS tar+ssh传输失败: {result.stderr}")
+            print(f"❌ 远程到NAS tar+ssh传输失败: {stderr}")
 
             # 发送错误日志
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
-                'message': f'❌ {file_name} 远程到NAS tar+ssh传输失败: {result.stderr}'
+                'message': f'❌ {file_name} 远程到NAS tar+ssh传输失败: {stderr}'
             })
 
             return False
@@ -861,29 +878,44 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 os.makedirs(os.path.join(target_path, file_name), exist_ok=True)
         else:
             # 目标是远程服务器
-            if is_directory:
-                remote_target = f"{target_path}/{file_name}"
+            if is_windows_server(target_server):
+                # Windows 目标：使用 cmd 创建目录
+                import ntpath
+                base_dir = target_path
+                mkdir_target = ntpath.join(base_dir, file_name) if is_directory else base_dir
+                mkdir_inner = f'cmd /C "if not exist \"{mkdir_target}\" mkdir \"{mkdir_target}\""'
+                if target_password:
+                    mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{mkdir_inner}'"
+                else:
+                    mkdir_cmd = f"{target_ssh} {target_user}@{target_server} '{mkdir_inner}'"
+                subprocess.run(mkdir_cmd, shell=True, check=True)
+                target_path_cmd = base_dir  # 供后续解包 cd 使用
             else:
-                remote_target = target_path
-
-            if target_password:
-                mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
-            else:
-                mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
-            subprocess.run(mkdir_cmd, shell=True, check=True)
+                # Linux/Unix 目标
+                target_path_cmd = target_path
+                remote_target = f"{target_path_cmd}/{file_name}" if is_directory else target_path_cmd
+                if target_password:
+                    mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+                else:
+                    mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+                subprocess.run(mkdir_cmd, shell=True, check=True)
 
         # 构建传输命令，添加静默选项避免输出干扰
+        # 源为NAS（Linux），无需转换
+        source_path_cmd = source_path
+
         if is_directory:
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
+            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
         else:
-            source_tar_cmd = f"cd {os.path.dirname(source_path)} && tar -cf - {os.path.basename(source_path)} 2>/dev/null"
+            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
 
         if is_local_server(target_server):
             # NAS到本地
+            target_path_cmd_local = target_path
             if is_directory:
-                target_extract_cmd = f"cd {target_path} && tar -xf -"
+                target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
             else:
-                target_extract_cmd = f"cd {target_path} && tar -xf -"
+                target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
 
             if source_password:
                 full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
@@ -891,10 +923,11 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
         else:
             # NAS到远程服务器
-            if is_directory:
-                target_extract_cmd = f"cd {target_path} && tar -xf -"
+            if is_windows_server(target_server):
+                # Windows 提取：在目标基础目录解包
+                target_extract_cmd = f'cmd /C "cd /d \"{target_path_cmd}\" && tar -xf -"'
             else:
-                target_extract_cmd = f"cd {target_path} && tar -xf -"
+                target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
 
             if source_password and target_password:
                 full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
@@ -918,13 +951,22 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
         import time
         start_time = time.time()
 
-        result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(
+            full_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            timeout=300,
+        )
 
         print(f"🔧 命令返回码: {result.returncode}")
-        if result.stdout:
-            print(f"🔧 标准输出: {result.stdout}")
-        if result.stderr:
-            print(f"🔧 错误输出: {result.stderr}")
+        stdout = result.stdout.decode('utf-8', errors='ignore') if result.stdout else ''
+        stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ''
+        if stdout:
+            print(f"🔧 标准输出: {stdout}")
+        if stderr:
+            print(f"🔧 错误输出: {stderr}")
 
         if result.returncode == 0:
             # 计算传输耗时
@@ -954,12 +996,12 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
 
             return True
         else:
-            print(f"❌ NAS tar+ssh传输失败: {result.stderr}")
+            print(f"❌ NAS tar+ssh传输失败: {stderr}")
 
             # 发送错误日志
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
-                'message': f'❌ {file_name} 从NAS tar+ssh传输失败: {result.stderr}'
+                'message': f'❌ {file_name} 从NAS tar+ssh传输失败: {stderr}'
             })
 
             return False
@@ -1879,27 +1921,32 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         elif transfer_mode == 'remote_to_remote':
             # 从远程服务器传输到另一个远程服务器
             print(f"📍 调用函数: transfer_file_via_remote_rsync_instant")
-            success = transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode)
             if not success:
                 raise Exception("远程到远程传输失败")
         else:
             # 本地到本地（同一台机器）
             print(f"📍 调用函数: transfer_file_via_local_to_local_instant")
-            print(f"[DEBUG] 参数: source_path={source_path}, target_path={target_path}, file_name={file_name}, is_directory={is_directory}")
+            print(f"[DEBUG] 参数: source_path={source_path}, target_path={target_path}, file_name={file_name}, is_directory={is_directory}, mode={mode}")
 
+            operation = "剪切" if mode == "move" else "复制"
+            cmd_name = "mv" if mode == "move" else "cp"
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
-                'message': f'🔄 传输模式: local_to_local (本地到本地，使用cp命令)'
+                'message': f'🔄 传输模式: local_to_local (本地到本地{operation}，使用{cmd_name}命令)'
             })
 
-            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode)
             print(f"[DEBUG] transfer_file_via_local_to_local_instant返回值: {success}, 类型: {type(success)}")
             if not success:
-                raise Exception("本地到本地传输失败")
-            print(f"[DEBUG] 本地到本地传输成功，准备返回字典")
+                raise Exception(f"本地到本地{operation}失败")
+            print(f"[DEBUG] 本地到本地{operation}成功，准备返回字典")
 
         # 如果是移动模式，删除源文件
-        if mode == "move":
+        # 注意：同一服务器的剪切(local_to_local或source_server==target_server)已经在mv/move命令中完成，不需要再删除
+        need_delete_source = mode == "move" and not (transfer_mode == 'local_to_local' or (transfer_mode == 'remote_to_remote' and source_server == target_server))
+
+        if need_delete_source:
             try:
                 if is_local_server(source_server):
                     # 本地删除
@@ -2286,26 +2333,35 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
                 pass
         raise Exception("传输被用户取消")
 
-def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id):
-    """本地到本地传输 - 使用cp命令"""
+def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode='copy'):
+    """本地到本地传输 - 使用cp命令(复制)或mv命令(剪切)
+
+    Args:
+        source_path: 源文件路径
+        target_path: 目标目录路径
+        file_name: 文件名
+        is_directory: 是否为目录
+        transfer_id: 传输ID
+        mode: 传输模式，'copy'(复制)或'move'(剪切)
+    """
     import subprocess
 
     try:
         dest_path = os.path.join(target_path, file_name)
 
-        if is_directory:
-            # 使用 cp -r 进行目录复制（按用户要求）
-            print(f"[DEBUG] 本地目录复制: {source_path} -> {dest_path}")
+        if mode == 'move':
+            # 剪切模式：使用 mv 命令
+            print(f"[DEBUG] 本地剪切: {source_path} -> {dest_path}")
 
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
-                'message': f'🐧 本地到本地传输，使用 cp -r 命令'
+                'message': f'✂️ 本地到本地剪切，使用 mv 命令'
             })
 
-            # 使用 cp -r 命令复制目录
-            cp_cmd = ['cp', '-r', source_path, target_path + '/']
+            # 使用 mv 命令移动文件/目录
+            mv_cmd = ['mv', '-f', source_path, target_path + '/']
 
-            cmd_str = ' '.join(cp_cmd)
+            cmd_str = ' '.join(mv_cmd)
             print(f"[DEBUG] 执行命令: {cmd_str}")
 
             socketio.emit('transfer_log', {
@@ -2313,51 +2369,90 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
                 'message': f'📝 执行命令: {cmd_str}'
             })
 
-            result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(mv_cmd, capture_output=True, text=True, timeout=300)
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "未知错误"
-                print(f"[ERROR] cp -r失败: returncode={result.returncode}, stderr={error_msg}")
-                raise Exception(f"本地目录复制失败: {error_msg}")
+                print(f"[ERROR] mv失败: returncode={result.returncode}, stderr={error_msg}")
+                raise Exception(f"本地剪切失败: {error_msg}")
 
-            print(f"[DEBUG] cp -r成功: {file_name}")
+            print(f"[DEBUG] mv成功: {file_name}")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ 本地剪切完成: {file_name}'
+            })
         else:
-            # 文件复制 - 使用cp命令
-            print(f"[DEBUG] 本地文件复制: {source_path} -> {dest_path}")
+            # 复制模式：使用 cp 命令
+            if is_directory:
+                # 使用 cp -r 进行目录复制
+                print(f"[DEBUG] 本地目录复制: {source_path} -> {dest_path}")
 
-            # 使用cp命令（支持覆盖）
-            cp_cmd = ['cp', '-f', source_path, dest_path]
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'📁 本地到本地复制，使用 cp -r 命令'
+                })
 
-            print(f"[DEBUG] 执行命令: {' '.join(cp_cmd)}")
-            result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=60)
+                # 使用 cp -r 命令复制目录
+                cp_cmd = ['cp', '-r', source_path, target_path + '/']
 
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() if result.stderr else "未知错误"
-                print(f"[ERROR] cp失败: returncode={result.returncode}, stderr={error_msg}")
-                raise Exception(f"本地文件复制失败: {error_msg}")
+                cmd_str = ' '.join(cp_cmd)
+                print(f"[DEBUG] 执行命令: {cmd_str}")
 
-            print(f"[DEBUG] cp成功: {file_name}")
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'📝 执行命令: {cmd_str}'
+                })
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'📁 本地复制完成: {file_name}'
-        })
+                result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=300)
+
+                if result.returncode != 0:
+                    error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                    print(f"[ERROR] cp -r失败: returncode={result.returncode}, stderr={error_msg}")
+                    raise Exception(f"本地目录复制失败: {error_msg}")
+
+                print(f"[DEBUG] cp -r成功: {file_name}")
+            else:
+                # 文件复制 - 使用cp命令
+                print(f"[DEBUG] 本地文件复制: {source_path} -> {dest_path}")
+
+                # 使用cp命令（支持覆盖）
+                cp_cmd = ['cp', '-f', source_path, dest_path]
+
+                print(f"[DEBUG] 执行命令: {' '.join(cp_cmd)}")
+                result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=60)
+
+                if result.returncode != 0:
+                    error_msg = result.stderr.strip() if result.stderr else "未知错误"
+                    print(f"[ERROR] cp失败: returncode={result.returncode}, stderr={error_msg}")
+                    raise Exception(f"本地文件复制失败: {error_msg}")
+
+                print(f"[DEBUG] cp成功: {file_name}")
+
+            socketio.emit('transfer_log', {
+                'transfer_id': transfer_id,
+                'message': f'✅ 本地复制完成: {file_name}'
+            })
 
         print(f"[DEBUG] transfer_file_via_local_to_local_instant返回True")
         return True  # 返回成功状态
 
     except subprocess.TimeoutExpired:
-        error_msg = f"本地复制超时: {file_name}"
+        error_msg = f"本地操作超时: {file_name}"
         print(f"[ERROR] {error_msg}")
         raise Exception(error_msg)
     except Exception as e:
-        error_msg = f"本地复制失败: {str(e)}"
+        error_msg = f"本地操作失败: {str(e)}"
         print(f"[ERROR] {error_msg}")
         raise Exception(error_msg)
 
-def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
-    """即时远程rsync传输 - 无进度监控版本，专注性能"""
-    print(f"🔍 远程传输检查: 源={source_server}, 目标={target_server}")
+def transfer_file_via_remote_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
+    """即时远程rsync传输 - 无进度监控版本，专注性能
+
+    Args:
+        mode: 传输模式，'copy'(复制)或'move'(剪切)
+    """
+    print(f"🔍 远程传输检查: 源={source_server}, 目标={target_server}, 模式={mode}")
 
     # 检查是否为同一台服务器（远程到远程但是同一台机器）
     if source_server == target_server:
@@ -2365,78 +2460,125 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
         # 检查是否为Windows服务器
         is_windows = is_windows_server(source_server)
-        server_user = SERVERS[source_server]['user']
-        server_password = SERVERS[source_server].get('password')
 
         dest_path = os.path.join(target_path, file_name)
 
-        if is_windows:
-            # Windows服务器使用robocopy
-            print(f"🪟 Windows服务器使用robocopy进行本地复制")
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'🪟 在Windows服务器上使用robocopy复制: {file_name}'
-            })
+        if mode == 'move':
+            # 剪切模式：使用 move 或 mv 命令
+            if is_windows:
+                # Windows使用move命令
+                print(f"🪟 Windows服务器使用move命令进行本地剪切")
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'✂️ 在Windows服务器上使用move剪切: {file_name}'
+                })
 
-            if is_directory:
-                # robocopy语法: robocopy <源目录> <目标目录> /E /MT:8
-                # /E: 复制所有子目录（包括空目录）
-                # /MT:8: 使用8个线程
-                remote_cmd = f'robocopy "{source_path}" "{dest_path}" /E /MT:8 /R:3 /W:5'
+                # Windows move命令语法: move /Y <源> <目标>
+                # /Y: 覆盖已存在的文件不提示
+                remote_cmd = f'move /Y "{source_path}" "{dest_path}"'
             else:
-                # 复制单个文件
-                source_dir = os.path.dirname(source_path)
-                source_file = os.path.basename(source_path)
-                target_dir = target_path
-                remote_cmd = f'robocopy "{source_dir}" "{target_dir}" "{source_file}" /MT:8 /R:3 /W:5'
+                # Linux使用mv命令
+                print(f"🐧 Linux服务器使用mv命令进行本地剪切")
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'✂️ 在Linux服务器上使用mv剪切: {file_name}'
+                })
+
+                # mv命令（文件和目录都适用）
+                remote_cmd = f"mv -f {shlex.quote(source_path)} {shlex.quote(target_path + '/')}"
+
+            print(f"[DEBUG] 同服务器剪切命令: {remote_cmd}")
         else:
-            # Linux服务器使用cp -r
-            print(f"🐧 Linux服务器使用cp命令进行本地复制")
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'🐧 在Linux服务器上使用cp复制: {file_name}'
-            })
+            # 复制模式：使用 robocopy 或 cp 命令
+            if is_windows:
+                # Windows服务器使用robocopy
+                print(f"🪟 Windows服务器使用robocopy进行本地复制")
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'📁 在Windows服务器上使用robocopy复制: {file_name}'
+                })
 
-            if is_directory:
-                # cp -r 复制目录
-                remote_cmd = f"cp -r {shlex.quote(source_path)} {shlex.quote(target_path + '/')}"
+                if is_directory:
+                    # robocopy语法: robocopy <源目录> <目标目录> /E /MT:8
+                    # /E: 复制所有子目录（包括空目录）
+                    # /MT:8: 使用8个线程
+                    remote_cmd = f'robocopy "{source_path}" "{dest_path}" /E /MT:8 /R:3 /W:5'
+                else:
+                    # 复制单个文件
+                    source_dir = os.path.dirname(source_path)
+                    source_file = os.path.basename(source_path)
+                    target_dir = target_path
+                    remote_cmd = f'robocopy "{source_dir}" "{target_dir}" "{source_file}" /MT:8 /R:3 /W:5'
             else:
-                # cp 复制文件
-                remote_cmd = f"cp -f {shlex.quote(source_path)} {shlex.quote(dest_path)}"
+                # Linux服务器使用cp -r
+                print(f"🐧 Linux服务器使用cp命令进行本地复制")
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'📁 在Linux服务器上使用cp复制: {file_name}'
+                })
 
-        print(f"[DEBUG] 同服务器复制命令: {remote_cmd}")
+                if is_directory:
+                    # cp -r 复制目录
+                    remote_cmd = f"cp -r {shlex.quote(source_path)} {shlex.quote(target_path + '/')}"
+                else:
+                    # cp 复制文件
+                    remote_cmd = f"cp -f {shlex.quote(source_path)} {shlex.quote(dest_path)}"
+
+            print(f"[DEBUG] 同服务器复制命令: {remote_cmd}")
 
         # 通过SSH执行命令
         try:
-            ssh_client = get_ssh_connection(source_server)
-            stdin, stdout, stderr = ssh_client.exec_command(remote_cmd, timeout=600)
-            exit_status = stdout.channel.recv_exit_status()
+            output, error = ssh_manager.execute_command(source_server, remote_cmd)
 
-            # robocopy的返回码特殊处理：0-7都是成功
-            if is_windows:
-                if exit_status > 7:
-                    error_output = stderr.read().decode('utf-8', errors='ignore')
-                    print(f"[ERROR] robocopy失败: exit_status={exit_status}, stderr={error_output}")
-                    raise Exception(f"robocopy复制失败: {error_output}")
+            # 检查命令执行结果
+            if mode == 'move':
+                # 剪切模式的成功判断
+                if is_windows:
+                    # Windows move命令成功时通常没有输出
+                    if error and 'cannot find' in error.lower():
+                        print(f"[ERROR] move失败: {error}")
+                        raise Exception(f"move剪切失败: {error}")
+                    else:
+                        print(f"[DEBUG] move成功")
                 else:
-                    print(f"[DEBUG] robocopy成功: exit_status={exit_status}")
+                    # Linux mv命令成功时没有输出
+                    if error:
+                        print(f"[ERROR] mv失败: {error}")
+                        raise Exception(f"mv剪切失败: {error}")
+                    else:
+                        print(f"[DEBUG] mv成功")
+
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'✅ 同服务器剪切完成: {file_name}'
+                })
             else:
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8', errors='ignore')
-                    print(f"[ERROR] cp失败: exit_status={exit_status}, stderr={error_output}")
-                    raise Exception(f"cp复制失败: {error_output}")
+                # 复制模式的成功判断
+                if is_windows:
+                    # robocopy的输出包含统计信息，检查是否有错误
+                    if error and 'error' in error.lower():
+                        print(f"[ERROR] robocopy失败: {error}")
+                        raise Exception(f"robocopy复制失败: {error}")
+                    else:
+                        print(f"[DEBUG] robocopy成功")
                 else:
-                    print(f"[DEBUG] cp成功")
+                    # Linux cp命令成功时没有输出
+                    if error:
+                        print(f"[ERROR] cp失败: {error}")
+                        raise Exception(f"cp复制失败: {error}")
+                    else:
+                        print(f"[DEBUG] cp成功")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ 同服务器复制完成: {file_name}'
-            })
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'✅ 同服务器复制完成: {file_name}'
+                })
 
             return True
 
         except Exception as e:
-            error_msg = f"同服务器复制失败: {str(e)}"
+            operation = "剪切" if mode == 'move' else "复制"
+            error_msg = f"同服务器{operation}失败: {str(e)}"
             print(f"[ERROR] {error_msg}")
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
@@ -2457,7 +2599,8 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
         else:
             print(f"📥 传输到NAS: {source_server} -> {target_server}")
-            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            # 源为远程服务器（可能是Windows/Linux），目标为NAS：在源侧打包，通过管道传到NAS解包
+            return transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
 
     print(f"🔄 使用rsync传输方案")
 
@@ -2718,15 +2861,17 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         is_local_target = is_local_server(target_server)
 
         if transfer_mode == 'local_to_local':
-            # 本地到本地传输，使用 cp 命令
-            print(f"📍 顺序传输-本地到本地: {source_path} -> {target_path}")
+            # 本地到本地传输，使用 cp 或 mv 命令
+            operation = "剪切" if mode == "move" else "复制"
+            cmd_name = "mv" if mode == "move" else "cp"
+            print(f"📍 顺序传输-本地到本地{operation}: {source_path} -> {target_path}")
             socketio.emit('transfer_log', {
                 'transfer_id': transfer_id,
-                'message': f'🔄 本地到本地传输，使用cp命令'
+                'message': f'🔄 本地到本地传输，使用{cmd_name}命令'
             })
-            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id)
+            success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode)
             if not success:
-                raise Exception("本地到本地传输失败")
+                raise Exception(f"本地到本地{operation}失败")
         elif is_local_source:
             # 🚀 本地传输模式：完全使用rsync，移除Paramiko SFTP开销
             success = transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files)
@@ -2880,7 +3025,10 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         completed_files += 1
 
         # 如果是移动模式，删除源文件
-        if mode == "move":
+        # 注意：同一服务器的剪切(local_to_local或source_server==target_server)已经在mv/move命令中完成，不需要再删除
+        need_delete_source = mode == "move" and not (transfer_mode == 'local_to_local' or (transfer_mode == 'remote_to_remote' and source_server == target_server))
+
+        if need_delete_source:
             try:
                 if is_local_server(source_server):
                     # 本地删除
