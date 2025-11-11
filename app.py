@@ -127,9 +127,11 @@ PERFORMANCE_CONFIG = {
     'optimize_rsync_params': True         # 优化rsync参数
 }
 
-# 统一的 rsync SSH 参数（按用户要求统一为 aes128-gcm）
-# 添加 StrictHostKeyChecking=no 和 UserKnownHostsFile=/dev/null 避免首次连接时的主机密钥验证失败
-RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-gcm@openssh.com -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+# 🚀 极限速度优化：rsync SSH 参数
+# - aes128-ctr 是最快且仍被支持的加密算法（CTR模式，可并行，低延迟）
+# - umac-64 是最快的 MAC 算法
+# - 禁用所有安全检查和压缩
+RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-ctr -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o MACs=umac-64@openssh.com"
 
 
 # 模拟速度生成器
@@ -478,8 +480,8 @@ def get_ssh_command_with_port(server_ip, fast_ssh=True):
     if fast_ssh:
         ssh_cmd_parts.extend([
             "-o", "Compression=no",
-            "-o", "Ciphers=aes128-ctr,aes192-ctr,aes256-ctr",
-            "-o", "MACs=hmac-sha2-256,hmac-sha2-512"
+            "-o", "Ciphers=aes128-ctr",
+            "-o", "MACs=umac-64@openssh.com"
         ])
 
     return " ".join(ssh_cmd_parts)
@@ -571,18 +573,21 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
             print(f"✅ 目录创建成功: {target_path}")
 
         # 使用tar+ssh传输，添加静默选项避免输出干扰
+        # 🚀 极限速度优化：使用最快的 SSH 加密和 tar 参数
+        fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
+
         if is_directory:
-            # 目录传输
+            # 目录传输：使用 --format=posix 避免扩展属性开销
             if target_password:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
             else:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
         else:
-            # 文件传输
+            # 文件传输：使用 --format=posix 避免扩展属性开销
             if target_password:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
             else:
-                tar_cmd = f"tar -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | {ssh_cmd} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
 
         print(f"🚀 执行tar+ssh传输: {file_name}")
         print(f"🔧 源路径: {source_path}")
@@ -749,32 +754,33 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         source_ssh_cmd = f"ssh -p {source_port} -o StrictHostKeyChecking=no"
         target_ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
 
-        # 构建源端 tar 命令（Windows 使用 cmd 语法，Linux 使用 POSIX 语法）
+        # 🚀 极限速度优化：构建源端 tar 命令（Windows 使用 cmd 语法，Linux 使用 POSIX 语法）
         target_path_cmd = target_path  # NAS 为 Linux，无需转换
         if is_windows_server(source_server):
             import ntpath
             win_dir = ntpath.dirname(source_path)
             win_name = ntpath.basename(source_path)
-            # Windows: 使用 cmd /C，/d 允许切换盘符，2>nul 静默错误
-            source_tar_cmd = f'cmd /C "cd /d \"{win_dir}\" && tar -cf - \"{win_name}\" 2>nul"'
+            # Windows: 使用 cmd /C，/d 允许切换盘符，--format=posix 最快
+            source_tar_cmd = f'cmd /C "cd /d \"{win_dir}\" && tar --format=posix -cf - \"{win_name}\" 2>nul"'
         else:
             source_path_cmd = source_path
-            if is_directory:
-                source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
-            else:
-                source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+            # Linux: 使用 --format=posix 避免扩展属性开销
+            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar --format=posix -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
         # 目标侧在 NAS 解包
         target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
 
+        # 🚀 极限速度优化：使用最快的 SSH 加密算法
+        fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
+
         # 根据密码配置构建完整命令
         if source_password and target_password:
-            tar_cmd = f"sshpass -p '{source_password}' {source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+            tar_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
         elif source_password:
-            tar_cmd = f"sshpass -p '{source_password}' {source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+            tar_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
         elif target_password:
-            tar_cmd = f"{source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+            tar_cmd = f"ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
         else:
-            tar_cmd = f"{source_ssh_cmd} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh_cmd} {target_user}@{target_server} '{target_extract_cmd}'"
+            tar_cmd = f"ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
 
         print(f"🔧 执行命令: {tar_cmd}")
 
@@ -900,27 +906,25 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                     mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
                 subprocess.run(mkdir_cmd, shell=True, check=True)
 
-        # 构建传输命令，添加静默选项避免输出干扰
+        # 🚀 极限速度优化：构建传输命令，添加静默选项避免输出干扰
         # 源为NAS（Linux），无需转换
         source_path_cmd = source_path
 
-        if is_directory:
-            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
-        else:
-            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+        # 使用 --format=posix 避免扩展属性开销
+        source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar --format=posix -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+
+        # 🚀 极限速度优化：使用最快的 SSH 加密算法
+        fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
 
         if is_local_server(target_server):
             # NAS到本地
             target_path_cmd_local = target_path
-            if is_directory:
-                target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
-            else:
-                target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
+            target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
 
             if source_password:
-                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
+                full_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
             else:
-                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
+                full_cmd = f"ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
         else:
             # NAS到远程服务器
             if is_windows_server(target_server):
@@ -930,13 +934,13 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
 
             if source_password and target_password:
-                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+                full_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
             elif source_password:
-                full_cmd = f"sshpass -p '{source_password}' {source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+                full_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
             elif target_password:
-                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+                full_cmd = f"ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
             else:
-                full_cmd = f"{source_ssh} {source_user}@{source_server} '{source_tar_cmd}' | {target_ssh} {target_user}@{target_server} '{target_extract_cmd}'"
+                full_cmd = f"ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
 
         print(f"🚀 执行NAS tar+ssh传输: {file_name}")
         print(f"🔧 执行命令: {full_cmd}")
@@ -2033,7 +2037,7 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     # 检查目标是否为Windows服务器
     target_is_windows = is_windows_server(target_server)
 
-    # 🚀 极速优化：精简rsync参数，移除所有性能开销
+    # 🚀 极限速度优化：精简rsync参数，移除所有性能开销
     rsync_opts = [
         '-a',                    # 归档模式（必需）
         '--inplace',             # 就地更新，减少磁盘I/O
@@ -2042,12 +2046,17 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         '--numeric-ids',         # 数字ID，避免用户名解析
         '--timeout=600',         # 增加超时时间，避免传输中断
         '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
+        '--no-perms',            # 不保留权限，减少开销
+        '--no-owner',            # 不保留所有者，减少开销
+        '--no-group',            # 不保留组，减少开销
+        '--omit-dir-times',      # 不同步目录时间戳，减少开销
     ]
 
     # 🚀 性能优化：移除可能影响速度的选项
     # 移除 --partial（断点续传）- 可能影响性能
     # 移除 --progress - 避免进度监控开销
     # 强制禁用压缩 - 局域网环境下压缩反而降低速度
+    # 禁用权限/所有者/组同步 - 减少系统调用开销
 
     # 处理目标路径（如果是Windows，转换为Cygwin格式），并统一加上SSH参数
     rsync_target_path = target_path
@@ -2171,8 +2180,8 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
 
         def execute_parallel_task(task):
             """执行单个并行任务"""
-            # 🚀 极速优化：统一使用最优rsync参数
-            rsync_opts = ['-a', '--inplace', '--whole-file', '--no-compress', '--numeric-ids', '--timeout=600']
+            # 🚀 极限速度优化：统一使用最优rsync参数
+            rsync_opts = ['-a', '--inplace', '--whole-file', '--no-compress', '--numeric-ids', '--timeout=600', '--no-perms', '--no-owner', '--no-group', '--omit-dir-times']
 
             if task['type'] == 'subdir':
                 # 传输子目录
@@ -2272,6 +2281,10 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         '--numeric-ids',         # 数字ID，避免用户名解析
         '--timeout=600',         # 增加超时时间
         '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
+        '--no-perms',            # 不保留权限，减少开销
+        '--no-owner',            # 不保留所有者，减少开销
+        '--no-group',            # 不保留组，减少开销
+        '--omit-dir-times',      # 不同步目录时间戳，减少开销
     ]
 
     # 处理源路径（如果是Windows，转换为Cygwin格式）
@@ -2615,7 +2628,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     source_user = SERVERS[source_server]['user']
     source_password = SERVERS[source_server].get('password')
 
-    # 🚀 极速优化：精简rsync参数
+    # 🚀 极限速度优化：精简rsync参数
     rsync_base_opts = [
         "-a",                    # 归档模式（必需）
         "--inplace",             # 就地更新，减少磁盘I/O
@@ -2624,6 +2637,10 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         "--numeric-ids",         # 数字ID，避免用户名解析
         "--timeout=600",         # 增加超时时间
         "-s",                    # 保护参数，避免空格/中文在远端shell被拆分
+        "--no-perms",            # 不保留权限，减少开销
+        "--no-owner",            # 不保留所有者，减少开销
+        "--no-group",            # 不保留组，减少开销
+        "--omit-dir-times",      # 不同步目录时间戳，减少开销
     ]
 
     # 如果是“Windows作为源、Linux作为目标”，改为在目标Linux上发起拉取
@@ -2765,7 +2782,7 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     # 使用统一的SSH命令构建函数（支持自定义端口）
     ssh_cmd = RSYNC_SSH_CMD
 
-    # 🚀 极速优化：精简rsync参数
+    # 🚀 极限速度优化：精简rsync参数
     rsync_base_opts = [
         "-a",                    # 归档模式（必需）
         "--inplace",             # 就地更新，减少磁盘I/O
@@ -2773,6 +2790,10 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
         "--no-compress",         # 禁用压缩（局域网环境）
         "--numeric-ids",         # 数字ID，避免用户名解析
         "--timeout=600",         # 增加超时时间
+        "--no-perms",            # 不保留权限，减少开销
+        "--no-owner",            # 不保留所有者，减少开销
+        "--no-group",            # 不保留组，减少开销
+        "--omit-dir-times",      # 不同步目录时间戳，减少开销
     ]
 
     # 构建rsync命令
@@ -2919,7 +2940,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     # 使用统一的SSH命令构建函数（支持自定义端口）
                     ssh_to_target = RSYNC_SSH_CMD
 
-                    # 统一rsync参数（按用户要求）
+                    # 🚀 极限速度优化：统一rsync参数
                     rsync_base_opts = [
                         "-a",
                         "--inplace",
@@ -2927,6 +2948,10 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         "--no-compress",
                         "--numeric-ids",
                         "--timeout=600",
+                        "--no-perms",
+                        "--no-owner",
+                        "--no-group",
+                        "--omit-dir-times",
                     ]
 
                     source_is_windows = is_windows_server(source_server)
@@ -3587,6 +3612,10 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             '--numeric-ids',         # 数字ID，避免用户名解析
             '--timeout=600',         # 增加超时时间
             '-s',                    # 保护参数，避免空格/中文在远端shell被拆分
+            '--no-perms',            # 不保留权限，减少开销
+            '--no-owner',            # 不保留所有者，减少开销
+            '--no-group',            # 不保留组，减少开销
+            '--omit-dir-times',      # 不同步目录时间戳，减少开销
         ]
 
         if target_password:
