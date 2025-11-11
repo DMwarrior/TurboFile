@@ -39,7 +39,8 @@ SERVERS = {
     "10.190.78.30": {"name": "李园", "user": "LY981", "password": "taihe", "os_type": "windows"},
     "10.190.79.12": {"name": "张帅", "user": "Administrator", "password": "     0", "os_type": "windows"},
     "10.190.78.32": {"name": "梁颖蕙", "user": "Administrator", "password": "123456", "os_type": "windows"},
-    "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows"}
+    "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows"},
+    "10.190.199.27": {"name": "王飞", "user": "wangfei", "password": "952416", "os_type": "windows"}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -110,7 +111,7 @@ transfer_processes = {}  # 存储传输进程，用于取消操作
 
 # 并行传输配置
 PARALLEL_TRANSFER_CONFIG = {
-    'max_workers': 4,  # 最大并行传输数
+    'max_workers': 8,  # 最大并行传输数
     'enable_parallel': True,  # 是否启用并行传输
     'instant_start': True,  # 立即开始传输，跳过所有预分析
     'enable_folder_parallel': False,  # 是否启用目录内部并行（实验性功能）
@@ -1898,9 +1899,42 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
             print(f"[DEBUG] 本地到本地传输成功，准备返回字典")
 
         # 如果是移动模式，删除源文件
-        if mode == "move" and not is_local_server(source_server):
-            delete_cmd = f"rm -rf '{source_path}'"
-            ssh_manager.execute_command(source_server, delete_cmd)
+        if mode == "move":
+            try:
+                if is_local_server(source_server):
+                    # 本地删除
+                    import shutil
+                    if is_directory:
+                        shutil.rmtree(source_path)
+                    else:
+                        os.remove(source_path)
+                    socketio.emit('transfer_log', {
+                        'transfer_id': transfer_id,
+                        'message': f'🗑️ 已删除源文件: {file_name}'
+                    })
+                else:
+                    # 远程删除
+                    is_windows = is_windows_server(source_server)
+                    if is_windows:
+                        # Windows 删除命令
+                        if is_directory:
+                            delete_cmd = f'rmdir /s /q "{source_path}"'
+                        else:
+                            delete_cmd = f'del /f /q "{source_path}"'
+                    else:
+                        # Linux 删除命令
+                        delete_cmd = f"rm -rf '{source_path}'"
+
+                    ssh_manager.execute_command(source_server, delete_cmd)
+                    socketio.emit('transfer_log', {
+                        'transfer_id': transfer_id,
+                        'message': f'🗑️ 已删除源文件: {file_name}'
+                    })
+            except Exception as e:
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'⚠️ 删除源文件失败: {str(e)}'
+                })
 
         socketio.emit('transfer_log', {
             'transfer_id': transfer_id,
@@ -2846,9 +2880,42 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         completed_files += 1
 
         # 如果是移动模式，删除源文件
-        if mode == "move" and not is_local_server(source_server):
-            delete_cmd = f"rm -rf '{source_path}'"
-            ssh_manager.execute_command(source_server, delete_cmd)
+        if mode == "move":
+            try:
+                if is_local_server(source_server):
+                    # 本地删除
+                    import shutil
+                    if is_directory:
+                        shutil.rmtree(source_path)
+                    else:
+                        os.remove(source_path)
+                    socketio.emit('transfer_log', {
+                        'transfer_id': transfer_id,
+                        'message': f'🗑️ 已删除源文件: {file_name}'
+                    })
+                else:
+                    # 远程删除
+                    is_windows = is_windows_server(source_server)
+                    if is_windows:
+                        # Windows 删除命令
+                        if is_directory:
+                            delete_cmd = f'rmdir /s /q "{source_path}"'
+                        else:
+                            delete_cmd = f'del /f /q "{source_path}"'
+                    else:
+                        # Linux 删除命令
+                        delete_cmd = f"rm -rf '{source_path}'"
+
+                    ssh_manager.execute_command(source_server, delete_cmd)
+                    socketio.emit('transfer_log', {
+                        'transfer_id': transfer_id,
+                        'message': f'🗑️ 已删除源文件: {file_name}'
+                    })
+            except Exception as e:
+                socketio.emit('transfer_log', {
+                    'transfer_id': transfer_id,
+                    'message': f'⚠️ 删除源文件失败: {str(e)}'
+                })
 
     # 结束传输计时
     total_time = time_tracker.end_transfer(transfer_id)

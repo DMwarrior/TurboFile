@@ -835,6 +835,36 @@
                 font-size: 0.85rem;
             }
         }
+
+        /* 传输模式选择器样式：禁用悬停加深，并保持独立圆角模块 */
+        .transfer-mode-btn {
+            padding: 6px 12px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            border-radius: 8px !important; /* 独立圆角 */
+            transition: none !important;   /* 禁用过渡导致的加深动画 */
+            box-shadow: none;              /* 默认无阴影 */
+        }
+        /* 悬停/按下时不要加深颜色，不改变背景，仅保持描边与文字颜色 */
+        .transfer-mode-btn:hover,
+        .transfer-mode-btn:active {
+            /*    保持与默认一致，不加深色 */
+            background-color: transparent !important;
+            color: var(--bs-primary) !important;
+            border-color: var(--bs-primary) !important;
+            box-shadow: none !important;
+        }
+        /* 选中态需立即高亮，且在 hover/active 状态下也保持高亮（避免需要移开鼠标才变色） */
+        .btn-check:checked + .transfer-mode-btn,
+        .btn-check:checked + .transfer-mode-btn:hover,
+        .btn-check:checked + .transfer-mode-btn:active {
+            background: var(--gradient-primary) !important;
+            color: #fff !important;
+            border-color: transparent !important;
+            box-shadow: none !important;
+        }
+
+
     </style>
 </head>
 <body>
@@ -992,14 +1022,30 @@
             <div class="col-12">
                 <div class="card">
                     <div class="card-body" style="padding: 8px 12px;">
-                        <div class="text-center">
-                            <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()">
+                        <div class="text-center" style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
+                            <!-- 传输模式选择器（分离样式） -->
+                            <input type="radio" class="btn-check" name="transferMode" id="modeCopy" value="copy" checked>
+                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeCopy">
+                                <i class="bi bi-files"></i> 复制
+                            </label>
+
+                            <input type="radio" class="btn-check" name="transferMode" id="modeMove" value="move">
+                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeMove">
+                                <i class="bi bi-scissors"></i> 剪切
+                            </label>
+
+                            <!-- 开始传输按钮 -->
+                            <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()" style="padding: 6px 16px;">
                                 <i class="bi bi-lightning-charge-fill"></i> 开始传输
                             </button>
-                            <button id="cancelTransferBtn" class="btn btn-danger me-2" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none;" title="单击取消传输，双击强制终止">
+
+                            <!-- 取消传输按钮 -->
+                            <button id="cancelTransferBtn" class="btn btn-danger me-2" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none; padding: 6px 16px;" title="单击取消传输，双击强制终止">
                                 <i class="bi bi-stop-circle-fill"></i> 取消传输
                             </button>
-                            <button class="btn btn-outline-secondary" onclick="showLogModal()" title="查看传输日志">
+
+                            <!-- 查看日志按钮 -->
+                            <button class="btn btn-primary" onclick="showLogModal()" style="padding: 6px 12px;" title="查看传输日志">
                                 <i class="bi bi-journal-text"></i> 查看日志
                             </button>
                         </div>
@@ -1108,6 +1154,9 @@
         const socket = io();
         let currentTransferId = null;
         let selectedSourceFiles = [];
+        let selectedTargetFiles = [];
+        let currentTransferDirection = 'ltr';
+        let currentTransferMode = 'copy'; // 'copy' 或 'move'
         let currentSourcePath = '/home/th';
         let currentTargetPath = '/home/thgd';
 
@@ -1669,12 +1718,12 @@
                         </div>
                     </div>`;
                 } else {
-                    // 目标目录只支持导航 - 优化事件处理
-                    html += `<div class="file-item"
+                    // 目标目录支持选择与导航
+                    html += `<div class="file-item selectable" id="${fileId}"
                              data-path="${file.path}"
                              data-name="${file.name}"
                              data-is-directory="${file.is_directory}"
-                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, null, ${isSource})"
+                             onmousedown="handleFileMouseDown(event, '${file.path}', '${file.name}', ${file.is_directory}, '${fileId}', ${isSource})"
                              ondblclick="handleFileItemDblClick(this, ${isSource})">
                         <i class="bi ${icon}"></i>
                         <div class="file-info">
@@ -1746,9 +1795,9 @@
             event.preventDefault();
 
             // 立即处理视觉反馈 - 与双击检测分离
-            if (isSource && fileId) {
+            if (fileId) {
                 // 立即显示选中状态，无延迟
-                selectFileImmediate(event, path, name, isDirectory, fileId);
+                selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
             }
 
             clickCount++;
@@ -1973,26 +2022,31 @@
         }
 
         // 立即选择文件（无延迟视觉反馈）
-        function selectFileImmediate(event, path, name, isDirectory, fileId) {
+        function selectFileImmediate(event, path, name, isDirectory, fileId, isSource) {
             event.stopPropagation();
 
             const fileElement = document.getElementById(fileId);
             if (!fileElement) return;
 
             if (event.ctrlKey || event.metaKey) {
-                // Ctrl+点击多选 - 立即切换选中状态
+                const arr = isSource ? selectedSourceFiles : selectedTargetFiles;
                 if (fileElement.classList.contains('selected')) {
-                    selectedSourceFiles = selectedSourceFiles.filter(f => f.path !== path);
+                    const newArr = arr.filter(f => f.path !== path);
+                    if (isSource) selectedSourceFiles = newArr; else selectedTargetFiles = newArr;
                     fileElement.classList.remove('selected');
                 } else {
-                    selectedSourceFiles.push({path, name, is_directory: isDirectory});
+                    arr.push({path, name, is_directory: isDirectory});
                     fileElement.classList.add('selected');
                 }
             } else {
-                // 单选 - 立即显示选中状态
+                // 单选 - 立即显示选中状态（并清空另一侧选择）
                 clearAllSelections();
                 fileElement.classList.add('selected');
-                selectedSourceFiles = [{path, name, is_directory: isDirectory}];
+                if (isSource) {
+                    selectedSourceFiles = [{path, name, is_directory: isDirectory}];
+                } else {
+                    selectedTargetFiles = [{path, name, is_directory: isDirectory}];
+                }
             }
 
             updateSelectionInfo();
@@ -2000,13 +2054,15 @@
 
         // 选择文件（支持多选）- 保留原函数以兼容其他调用
         function selectFile(event, path, name, isDirectory, fileId) {
-            // 直接调用立即选择函数
-            selectFileImmediate(event, path, name, isDirectory, fileId);
+            // 兼容旧调用：根据 fileId 推断左右面板
+            const isSource = fileId && fileId.indexOf('sourceFileBrowser') !== -1;
+            selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
         }
 
         // 清除所有选择
         function clearAllSelections() {
             selectedSourceFiles = [];
+            selectedTargetFiles = [];
             document.querySelectorAll('.file-item.selected').forEach(item => {
                 item.classList.remove('selected');
             });
@@ -2014,39 +2070,76 @@
 
         // 更新选择信息
         function updateSelectionInfo() {
+            if (selectedSourceFiles.length > 0 && selectedTargetFiles.length > 0) {
+                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
+                return;
+            }
             if (selectedSourceFiles.length > 0) {
                 const names = selectedSourceFiles.map(f => f.name).join(', ');
-                addLog(`已选择 ${selectedSourceFiles.length} 项: ${names}`);
+                addLog(`左侧已选择 ${selectedSourceFiles.length} 项: ${names}`);
+            } else if (selectedTargetFiles.length > 0) {
+                const names = selectedTargetFiles.map(f => f.name).join(', ');
+                addLog(`右侧已选择 ${selectedTargetFiles.length} 项: ${names}`);
             }
         }
 
         // 拖拽功能已移除以提升性能
 
-        // 开始传输
+        // 开始传输（单按钮：自动判断方向）
         function startTransfer() {
-            const sourceServer = document.getElementById('sourceServer').value;
-            const targetServer = document.getElementById('targetServer').value;
-            const targetPath = currentTargetPath;
-            // 使用默认设置：复制模式、SSH加速、并行传输
-            const mode = 'copy';
+            const sourceServerLeft = document.getElementById('sourceServer').value;
+            const targetServerRight = document.getElementById('targetServer').value;
+            const leftSelected = selectedSourceFiles.length > 0;
+            const rightSelected = selectedTargetFiles.length > 0;
+
+            // 获取用户选择的传输模式
+            const modeRadio = document.querySelector('input[name="transferMode"]:checked');
+            const mode = modeRadio ? modeRadio.value : 'copy';
+            currentTransferMode = mode;
+
             const fastSSH = true;
             const parallelTransfer = true;
 
+            // 选择校验
+            if (leftSelected && rightSelected) {
+                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
+                alert('左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
+                return;
+            }
+            if (!leftSelected && !rightSelected) {
+                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
+                alert('请选择要传输的文件或文件夹');
+                return;
+            }
+
+            // 按选择自动确定方向
+            let sourceServer, targetServer, targetPath, sourceFiles;
+            if (leftSelected) {
+                // 左 -> 右
+                sourceServer = sourceServerLeft;
+                targetServer = targetServerRight;
+                targetPath = currentTargetPath;
+                sourceFiles = selectedSourceFiles;
+                currentTransferDirection = 'ltr';
+            } else {
+                // 右 -> 左
+                sourceServer = targetServerRight;
+                targetServer = sourceServerLeft;
+                targetPath = currentSourcePath;
+                sourceFiles = selectedTargetFiles;
+                currentTransferDirection = 'rtl';
+            }
+
+            // 服务器与路径校验
             if (!sourceServer || !targetServer || !targetPath) {
                 addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
                 alert('请选择源服务器、目标服务器和目标路径');
                 return;
             }
 
-            if (selectedSourceFiles.length === 0) {
-                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
-                alert('请选择要传输的文件或文件夹');
-                return;
-            }
-
+            // 同服务器路径冲突校验
             if (sourceServer === targetServer) {
-                // 检查是否有路径冲突
-                const hasConflict = selectedSourceFiles.some(file =>
+                const hasConflict = sourceFiles.some(file =>
                     file.path === targetPath || targetPath.startsWith(file.path + '/')
                 );
                 if (hasConflict) {
@@ -2061,23 +2154,27 @@
 
             // 显示进度面板
             document.getElementById('progressContainer').style.display = 'block';
-            document.getElementById('startTransferBtn').style.display = 'none';
+            const startBtn = document.getElementById('startTransferBtn');
+            if (startBtn) startBtn.style.display = 'none';
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
-            const fileNames = selectedSourceFiles.map(f => f.name).join(', ');
+            const fileNames = sourceFiles.map(f => f.name).join(', ');
             const modeText = mode === 'copy' ? '复制' : '移动';
             const sshText = fastSSH ? '(SSH加速)' : '';
             const parallelText = parallelTransfer ? '(立即并行传输)' : '';
 
             addLogInfo(`🚀 开始${modeText}传输 ${sshText}${parallelText}`);
-            addLogInfo(`📤 源: ${sourceServer} (${selectedSourceFiles.length}项)`);
+            if (mode === 'move') {
+                addLogWarning(`⚠️ 剪切模式：传输完成后将删除源文件`);
+            }
+            addLogInfo(`📤 源: ${sourceServer} (${sourceFiles.length}项)`);
             addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
             addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
 
             // 发送传输请求
             socket.emit('start_transfer', {
                 source_server: sourceServer,
-                source_files: selectedSourceFiles,
+                source_files: sourceFiles,
                 target_server: targetServer,
                 target_path: targetPath,
                 mode: mode,
@@ -2085,6 +2182,8 @@
                 parallel_transfer: parallelTransfer
             });
         }
+
+
 
         // 取消传输
         function cancelTransfer() {
@@ -2242,15 +2341,22 @@
                         addLogInfo(`⏱️ 传输耗时: ${data.stats.duration || '未知'}`);
                     }
 
-                    // 自动刷新目标目录，显示最新传输的文件
+                    // 根据方向自动刷新对应目录，显示最新传输的文件
                     setTimeout(() => {
-                        const targetServer = document.getElementById('targetServer').value;
-
-                        if (targetServer && currentTargetPath) {
-                            addLogInfo('🔄 自动刷新目标目录以显示最新文件...');
-                            refreshTargetAsync();
+                        if (currentTransferDirection === 'ltr') {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                addLogInfo('🔄 自动刷新目标目录以显示最新文件...');
+                                refreshTargetAsync();
+                            }
+                        } else {
+                            const sourceServer = document.getElementById('sourceServer').value;
+                            if (sourceServer && currentSourcePath) {
+                                addLogInfo('🔄 自动刷新源目录以显示最新文件...');
+                                refreshSourceAsync();
+                            }
                         }
-                    }, 100); // 将刷新延迟从1秒缩短为200ms，提升结束流畅度
+                    }, 100);
                 } else if (data.status === 'partial_success') {
                     // 🔧 BUG修复：处理部分成功状态
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输部分完成'; }
@@ -2265,13 +2371,20 @@
 
                     addLogWarning(`⚠️ ${data.message}`);
 
-                    // 部分成功也刷新目标目录
+                    // 部分成功也刷新对应目录
                     setTimeout(() => {
-                        const targetServer = document.getElementById('targetServer').value;
-
-                        if (targetServer && currentTargetPath) {
-                            addLogInfo('🔄 自动刷新目标目录以显示已传输的文件...');
-                            refreshTargetAsync();
+                        if (currentTransferDirection === 'ltr') {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                addLogInfo('🔄 自动刷新目标目录以显示已传输的文件...');
+                                refreshTargetAsync();
+                            }
+                        } else {
+                            const sourceServer = document.getElementById('sourceServer').value;
+                            if (sourceServer && currentSourcePath) {
+                                addLogInfo('🔄 自动刷新源目录以显示已传输的文件...');
+                                refreshSourceAsync();
+                            }
                         }
                     }, 1000);
                 } else {
