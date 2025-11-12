@@ -61,10 +61,76 @@ start_service() {
     fi
 }
 
+check_active_transfers() {
+    # 检查是否有活跃的传输任务
+    # 返回0表示没有活跃传输，返回1表示有活跃传输
+
+    if ! curl -s -f $SERVICE_URL > /dev/null 2>&1; then
+        # 服务未运行，无需检查
+        return 0
+    fi
+
+    # 调用API获取活跃传输
+    response=$(curl -s -f "${SERVICE_URL}/api/active_transfers" 2>/dev/null)
+
+    if [ $? -ne 0 ]; then
+        # API调用失败，假设没有活跃传输
+        return 0
+    fi
+
+    # 解析JSON响应，提取active_count
+    active_count=$(echo "$response" | grep -o '"active_count":[0-9]*' | grep -o '[0-9]*')
+
+    if [ -z "$active_count" ] || [ "$active_count" -eq 0 ]; then
+        return 0
+    fi
+
+    # 有活跃传输，显示详细信息
+    echo -e "${YELLOW}⚠️  检测到 ${active_count} 个正在进行的传输任务！${NC}"
+    echo ""
+    echo -e "${BLUE}活跃传输列表：${NC}"
+    echo "----------------------------------------"
+
+    # 提取并显示每个传输的详细信息
+    echo "$response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if data.get('success') and data.get('transfers'):
+        for i, t in enumerate(data['transfers'], 1):
+            print(f\"{i}. 客户端IP: {t.get('client_ip', '未知')}\")
+            print(f\"   源服务器: {t.get('source_server', '未知')}\")
+            print(f\"   目标服务器: {t.get('target_server', '未知')}\")
+            print(f\"   文件数量: {t.get('file_count', 0)}\")
+            print(f\"   开始时间: {t.get('start_time', '未知')}\")
+            print(f\"   已用时间: {t.get('elapsed_time', '未知')}\")
+            print(f\"   传输模式: {t.get('mode', 'copy')}\")
+            print()
+except:
+    pass
+" 2>/dev/null
+
+    echo "----------------------------------------"
+    return 1
+}
+
 stop_service() {
     echo -e "${YELLOW}🛑 停止TurboFile服务...${NC}"
+
+    # 检查活跃传输
+    check_active_transfers
+    if [ $? -eq 1 ]; then
+        echo ""
+        echo -e "${RED}❌ 检测到活跃传输任务，停止服务可能会中断这些传输！${NC}"
+        read -p "是否确认停止服务？(yes/no): " confirm
+        if [ "$confirm" != "yes" ]; then
+            echo -e "${YELLOW}⏸️  已取消停止操作${NC}"
+            return 1
+        fi
+    fi
+
     sudo systemctl stop $SERVICE_NAME
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ 服务停止成功${NC}"
     else
@@ -74,8 +140,21 @@ stop_service() {
 
 restart_service() {
     echo -e "${YELLOW}🔄 重启TurboFile服务...${NC}"
+
+    # 检查活跃传输
+    check_active_transfers
+    if [ $? -eq 1 ]; then
+        echo ""
+        echo -e "${RED}❌ 检测到活跃传输任务，重启服务会中断这些传输！${NC}"
+        read -p "是否确认重启服务？(yes/no): " confirm
+        if [ "$confirm" != "yes" ]; then
+            echo -e "${YELLOW}⏸️  已取消重启操作${NC}"
+            return 1
+        fi
+    fi
+
     sudo systemctl restart $SERVICE_NAME
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ 服务重启成功${NC}"
         sleep 2
@@ -132,6 +211,16 @@ open_web() {
     fi
 }
 
+show_active_transfers() {
+    echo -e "${BLUE}📊 检查活跃传输任务${NC}"
+    echo "=" * 40
+
+    check_active_transfers
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ 当前没有活跃的传输任务${NC}"
+    fi
+}
+
 show_help() {
     echo -e "${BLUE}🔧 TurboFile服务管理脚本${NC}"
     echo "=" * 40
@@ -146,13 +235,15 @@ show_help() {
     echo "  disable     禁用开机自启动"
     echo "  logs        查看服务日志"
     echo "  follow      实时查看日志"
+    echo "  transfers   查看活跃传输任务"
     echo "  web         打开Web界面"
     echo "  help        显示此帮助信息"
     echo ""
     echo "示例:"
-    echo "  $0 status   # 查看服务状态"
-    echo "  $0 restart # 重启服务"
-    echo "  $0 logs    # 查看日志"
+    echo "  $0 status    # 查看服务状态"
+    echo "  $0 restart   # 重启服务"
+    echo "  $0 transfers # 查看活跃传输"
+    echo "  $0 logs      # 查看日志"
 }
 
 # 主逻辑
@@ -180,6 +271,9 @@ case "$1" in
         ;;
     follow)
         follow_logs
+        ;;
+    transfers)
+        show_active_transfers
         ;;
     web)
         open_web

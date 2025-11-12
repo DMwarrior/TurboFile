@@ -28,7 +28,7 @@
             --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
             --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
             --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-            --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-primary: linear-gradient(135deg, #667eea 0%, #744ba2ff 100%);
             --gradient-secondary: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
             --gradient-success: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
         }
@@ -964,11 +964,28 @@
                     <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;">
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
-                        <button type="button" class="btn btn-sm" title="复制当前路径"
-                                onclick="copyPath('source')"
-                                style="position:absolute; right:6px; top:50%; transform: translateY(-50%); padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                            <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
-                        </button>
+                        <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                            <button type="button" class="btn btn-sm" title="新建文件夹"
+                                    onclick="showCreateFolderDialog('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="重命名"
+                                    onclick="showRenameDialog('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-pencil-square text-warning" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="删除选中项"
+                                    onclick="deleteSelected('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-trash text-danger" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="复制当前路径"
+                                    onclick="copyPath('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
+                            </button>
+                        </div>
                     </div>
                     <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
@@ -1001,11 +1018,28 @@
                     <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;">
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
-                        <button type="button" class="btn btn-sm" title="复制当前路径"
-                                onclick="copyPath('target')"
-                                style="position:absolute; right:6px; top:50%; transform: translateY(-50%); padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                            <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
-                        </button>
+                        <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                            <button type="button" class="btn btn-sm" title="新建文件夹"
+                                    onclick="showCreateFolderDialog('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="重命名"
+                                    onclick="showRenameDialog('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-pencil-square text-warning" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="删除选中项"
+                                    onclick="deleteSelected('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-trash text-danger" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="复制当前路径"
+                                    onclick="copyPath('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
+                            </button>
+                        </div>
                     </div>
                     <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
@@ -1330,6 +1364,220 @@
                 .catch(() => addLogWarning('⚠️ 复制失败，请手动复制'));
         }
 
+        // 删除选中的文件/文件夹
+        async function deleteSelected(type) {
+            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
+            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+            const currentPath = type === 'source' ? currentSourcePath : currentTargetPath;
+
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return;
+            }
+
+            if (selectedFiles.length === 0) {
+                addLogWarning('⚠️ 请先选择要删除的文件或文件夹');
+                return;
+            }
+
+            // 确认删除
+            const fileNames = selectedFiles.map(f => f.name).join('\n');
+            const confirmMsg = `确定要删除以下 ${selectedFiles.length} 项吗？\n\n${fileNames}\n\n⚠️ 此操作不可恢复！`;
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+
+            try {
+                addLogInfo(`🗑️ 正在删除 ${selectedFiles.length} 项...`);
+
+                // 构建完整路径列表
+                const paths = selectedFiles.map(f => f.path);
+
+                const response = await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        paths: paths
+                    })
+                });
+
+                const result = await response.json();
+
+                // 只要有成功删除的数量，就刷新浏览区；失败项单独提示
+                if (result.success || (result.deleted_count && result.deleted_count > 0)) {
+                    if (result.deleted_count && result.deleted_count > 0) {
+                        addLogSuccess(`✅ 成功删除 ${result.deleted_count} 项`);
+                    }
+
+                    // 清空选中状态
+                    if (type === 'source') {
+                        selectedSourceFiles = [];
+                    } else {
+                        selectedTargetFiles = [];
+                    }
+
+                    // 刷新目录（强制刷新，后端已清理缓存）
+                    if (type === 'source') {
+                        await refreshSourceAsync();
+                    } else {
+                        await refreshTargetAsync();
+                    }
+
+                    // 若存在失败项，继续提示但不阻止刷新
+                    if (!result.success && result.failed_items && result.failed_items.length > 0) {
+                        addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
+                        result.failed_items.forEach(item => {
+                            addLogError(`  - ${item.path}: ${item.error}`);
+                        });
+                    }
+                } else {
+                    addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
+                    if (result.failed_items && result.failed_items.length > 0) {
+                        result.failed_items.forEach(item => {
+                            addLogError(`  - ${item.path}: ${item.error}`);
+                        });
+                    }
+                }
+            } catch (error) {
+                addLogError(`❌ 删除操作异常: ${error.message}`);
+            }
+        }
+
+        // 显示创建文件夹对话框
+        function showCreateFolderDialog(type) {
+            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+            const currentPath = type === 'source' ? currentSourcePath : currentTargetPath;
+
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return;
+            }
+
+            if (!currentPath) {
+                addLogWarning('⚠️ 请先浏览到目标目录');
+                return;
+            }
+
+            const folderName = prompt('请输入新文件夹名称:', '新建文件夹');
+            if (!folderName || folderName.trim() === '') {
+                return;
+            }
+
+            createFolder(type, server, currentPath, folderName.trim());
+        }
+
+        // 创建文件夹
+        async function createFolder(type, server, parentPath, folderName) {
+            try {
+                addLogInfo(`📁 正在创建文件夹: ${folderName}...`);
+
+                const response = await fetch('/api/create_folder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        parent_path: parentPath,
+                        folder_name: folderName
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    addLogSuccess(`✅ ${result.message}`);
+
+                    // 刷新目录
+                    if (type === 'source') {
+                        await refreshSourceAsync();
+                    } else {
+                        await refreshTargetAsync();
+                    }
+                } else {
+                    addLogError(`❌ 创建文件夹失败: ${result.error}`);
+                }
+            } catch (error) {
+                addLogError(`❌ 创建文件夹异常: ${error.message}`);
+            }
+        }
+
+        // 显示重命名对话框
+        function showRenameDialog(type) {
+            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
+            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return;
+            }
+
+            if (selectedFiles.length === 0) {
+                addLogWarning('⚠️ 请先选择要重命名的文件或文件夹');
+                return;
+            }
+
+            if (selectedFiles.length > 1) {
+                addLogWarning('⚠️ 一次只能重命名一个文件或文件夹');
+                return;
+            }
+
+            const file = selectedFiles[0];
+            const oldName = file.name;
+            const newName = prompt(`请输入新名称:\n\n原名称: ${oldName}`, oldName);
+
+            if (!newName || newName.trim() === '') {
+                return;
+            }
+
+            if (newName === oldName) {
+                addLogWarning('⚠️ 新名称与原名称相同');
+                return;
+            }
+
+            renameFile(type, server, file.path, newName.trim());
+        }
+
+        // 重命名文件或文件夹
+        async function renameFile(type, server, oldPath, newName) {
+            try {
+                addLogInfo(`✏️ 正在重命名为: ${newName}...`);
+
+                const response = await fetch('/api/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        old_path: oldPath,
+                        new_name: newName
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    addLogSuccess(`✅ ${result.message}`);
+
+                    // 清空选中状态
+                    if (type === 'source') {
+                        selectedSourceFiles = [];
+                    } else {
+                        selectedTargetFiles = [];
+                    }
+
+                    // 刷新目录
+                    if (type === 'source') {
+                        await refreshSourceAsync();
+                    } else {
+                        await refreshTargetAsync();
+                    }
+                } else {
+                    addLogError(`❌ 重命名失败: ${result.error}`);
+                }
+            } catch (error) {
+                addLogError(`❌ 重命名异常: ${error.message}`);
+            }
+        }
+
         function addLogWarning(message) {
             addLog(message, 'warning');
         }
@@ -1423,7 +1671,7 @@
                 if (data.success) {
                     // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, targetPath, true);
-                    addLogInfo(`📁 已进入源目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                    // 移除UI操作日志 - 不记录目录浏览
                 } else {
                     showErrorState('sourceFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览源目录失败: ${data.error}`);
@@ -1473,7 +1721,7 @@
                     // 直接显示文件，无加载动画
                     displayFiles('sourceFileBrowser', data.files, path, true);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
-                    addLogSuccess(`🔄 已刷新源目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+
                 } else {
                     showErrorState('sourceFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新源目录失败: ${data.error}`);
@@ -1572,7 +1820,7 @@
                 if (data.success) {
                     // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, targetPath, false);
-                    addLogInfo(`📂 已进入目标目录: ${targetPath} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms`);
+                    // 移除UI操作日志 - 不记录目录浏览
                 } else {
                     showErrorState('targetFileBrowser', '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览目标目录失败: ${data.error}`);
@@ -1622,7 +1870,7 @@
                     // 直接显示文件，无加载动画
                     displayFiles('targetFileBrowser', data.files, path, false);
                     const cacheInfo = data.cache_cleared > 0 ? ` (清除${data.cache_cleared}个缓存)` : '';
-                    addLogSuccess(`🔄 已刷新目标目录: ${path} (${data.files.length}项) - ${(endTime - startTime).toFixed(0)}ms${cacheInfo}`);
+
                 } else {
                     showErrorState('targetFileBrowser', '刷新失败: ' + data.error);
                     addLogError(`❌ 刷新目标目录失败: ${data.error}`);
@@ -2074,13 +2322,7 @@
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
                 return;
             }
-            if (selectedSourceFiles.length > 0) {
-                const names = selectedSourceFiles.map(f => f.name).join(', ');
-                addLog(`左侧已选择 ${selectedSourceFiles.length} 项: ${names}`);
-            } else if (selectedTargetFiles.length > 0) {
-                const names = selectedTargetFiles.map(f => f.name).join(', ');
-                addLog(`右侧已选择 ${selectedTargetFiles.length} 项: ${names}`);
-            }
+            // 移除UI操作日志 - 不记录文件选择
         }
 
         // 拖拽功能已移除以提升性能
@@ -2163,10 +2405,8 @@
             const sshText = fastSSH ? '(SSH加速)' : '';
             const parallelText = parallelTransfer ? '(立即并行传输)' : '';
 
-            addLogInfo(`🚀 开始${modeText}传输 ${sshText}${parallelText}`);
-            if (mode === 'move') {
-                addLogWarning(`⚠️ 剪切模式：传输完成后将删除源文件`);
-            }
+
+
             addLogInfo(`📤 源: ${sourceServer} (${sourceFiles.length}项)`);
             addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
             addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
@@ -2266,15 +2506,22 @@
             currentTransferId = data.transfer_id;
             window.transferModeLogged = false; // 重置传输模式日志标志
             { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输中...'; }
-            addLogSuccess(`✅ 传输任务已启动 (ID: ${data.transfer_id})`);
+
         });
 
         // 进度更新事件已移除以提升性能 - 只在传输完成时更新状态
 
         socket.on('transfer_log', function(data) {
             if (data.transfer_id === currentTransferId) {
-                // 传输过程中的日志使用info级别，但会被过滤
-                addLogInfo(data.message);
+                const msg = data.message || '';
+                const keep = msg.startsWith('📤 源:') || msg.startsWith('📥 目标:') || msg.startsWith('📋 文件:') || (msg.includes('✅') && (msg.includes('传输完成') || msg.includes('完成')));
+                if (keep) {
+                    if (msg.includes('✅')) {
+                        addLogSuccess(msg);
+                    } else {
+                        addLogInfo(msg);
+                    }
+                }
             }
         });
 
@@ -2326,6 +2573,7 @@
                 if (data.status === 'success') {
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
                     { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
+                    addLogSuccess('✅ 传输已完成');
 
                     // 显示总耗时
                     if (data.total_time) {
@@ -2333,26 +2581,22 @@
                         if (el) el.textContent = data.total_time;
                     }
 
-                    addLogSuccess('🎉 传输成功完成');
 
-                    // 记录传输统计信息
-                    if (data.stats) {
-                        addLogInfo(`📊 传输统计: ${data.stats.files_transferred || 0}个文件, ${data.stats.total_size || '未知'}大小`);
-                        addLogInfo(`⏱️ 传输耗时: ${data.stats.duration || '未知'}`);
-                    }
+
+
 
                     // 根据方向自动刷新对应目录，显示最新传输的文件
                     setTimeout(() => {
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-                                addLogInfo('🔄 自动刷新目标目录以显示最新文件...');
+
                                 refreshTargetAsync();
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-                                addLogInfo('🔄 自动刷新源目录以显示最新文件...');
+
                                 refreshSourceAsync();
                             }
                         }
@@ -2369,20 +2613,20 @@
                         if (el) el.textContent = data.total_time;
                     }
 
-                    addLogWarning(`⚠️ ${data.message}`);
+
 
                     // 部分成功也刷新对应目录
                     setTimeout(() => {
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-                                addLogInfo('🔄 自动刷新目标目录以显示已传输的文件...');
+
                                 refreshTargetAsync();
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-                                addLogInfo('🔄 自动刷新源目录以显示已传输的文件...');
+
                                 refreshSourceAsync();
                             }
                         }

@@ -1,7 +1,7 @@
 # 查看状态
 ./turbofile_manager.sh status
 
-# 重启服务
+# 日常代码更新后重启
 ./turbofile_manager.sh restart
 
 # 查看日志

@@ -21,7 +21,7 @@ from datetime import datetime
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
-
+import shutil
 import shlex
 
 app = Flask(__name__)
@@ -40,7 +40,9 @@ SERVERS = {
     "10.190.79.12": {"name": "张帅", "user": "Administrator", "password": "     0", "os_type": "windows"},
     "10.190.78.32": {"name": "梁颖蕙", "user": "Administrator", "password": "123456", "os_type": "windows"},
     "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows"},
-    "10.190.199.27": {"name": "王飞", "user": "wangfei", "password": "952416", "os_type": "windows"}
+    "10.190.199.27": {"name": "王飞", "user": "wangfei", "password": "952416", "os_type": "windows"},
+    "10.190.22.1": {"name": "朱冠菲", "user": "Administrator", "password": "qwer+123", "os_type": "windows"},
+    "10.190.21.230": {"name": "张兵", "user": "Administrator", "password": "12345678", "os_type": "windows"}
 }
 
 # TurboFile运行的主机IP（当前运行在192.168.9.62上）
@@ -133,6 +135,113 @@ PERFORMANCE_CONFIG = {
 # - 禁用所有安全检查和压缩
 RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-ctr -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o MACs=umac-64@openssh.com"
 
+# 🎯 UI日志过滤配置 - 只在前端显示关键传输日志
+UI_LOG_FILTER_CONFIG = {
+    'enabled': True,  # 启用UI日志过滤
+    'skip_patterns': [
+        '🚀 开始',  # 跳过开始传输日志
+        '🔄 传输模式',  # 跳过传输模式日志
+        '🔧 调试',  # 跳过调试日志
+        '📝 执行命令',  # 跳过命令日志
+        '📁 正在分析',  # 跳过分析日志
+        '⚡ 快速模式',  # 跳过快速模式日志
+        '⚡ 启动',  # 跳过并行线程启动日志
+        '📊 并行任务',  # 跳过并行任务统计
+        '✅ 并行任务完成',  # 跳过单个并行任务完成
+        '🎉 目录并行',  # 跳过目录并行完成
+        '⚠️ 目录',  # 跳过目录分析警告
+        '📁 启用目录',  # 跳过目录并行启动
+        '🔁 检测到Windows',  # 跳过Windows检测日志
+        '✂️',  # 跳过剪切模式提示
+        '📁 本地到本地',  # 跳过本地传输模式
+        '🪟 Windows',  # 跳过Windows提示
+        '🐧 Linux',  # 跳过Linux提示
+        '⚡️ 开始传输',  # 跳过开始传输（保留完成日志）
+        '正在传输',  # 跳过传输中日志
+        '✅ 本地剪切完成',  # 跳过本地操作完成
+        '✅ 本地复制完成',  # 跳过本地操作完成
+        '✅ 同服务器剪切完成',  # 跳过同服务器操作
+        '✅ 同服务器复制完成',  # 跳过同服务器操作
+    ]
+}
+
+def should_emit_to_ui(message):
+    """判断是否应该在UI显示该日志消息"""
+    if not UI_LOG_FILTER_CONFIG['enabled']:
+        return True
+
+    # 检查是否包含跳过模式
+    for pattern in UI_LOG_FILTER_CONFIG['skip_patterns']:
+        if pattern in message:
+            return False
+
+    # 默认显示
+    return True
+
+def emit_transfer_log(transfer_id, message):
+    """发送传输日志到UI（带过滤）"""
+    if should_emit_to_ui(message):
+        socketio.emit('transfer_log', {
+            'transfer_id': transfer_id,
+            'message': message
+        })
+
+# ===== 日志精简保存（仅保存关键信息到文件）=====
+LOG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'transfer.log')
+_log_file_lock = threading.Lock()
+
+def _normalize_ip_for_log(server_ip: str) -> str:
+    """将本机别名统一为真实本机IP，其他保持不变"""
+    try:
+        return TURBOFILE_HOST_IP if is_local_server(server_ip) else server_ip
+    except Exception:
+        return server_ip
+
+
+def _join_target_full_path_for_log(target_server: str, base_path: str, name: str) -> str:
+    """根据目标服务器类型组合目标完整路径（兼容 Windows 与 POSIX）。"""
+    try:
+        if is_windows_server(target_server):
+            import ntpath
+            return ntpath.join(base_path, name)
+        else:
+            base = base_path.rstrip('/\\')
+            return f"{base}/{name}"
+    except Exception:
+        # 兜底：简单拼接
+        return f"{base_path}/{name}"
+
+
+def append_transfer_log_record(source_ip: str,
+                               target_ip: str,
+                               source_path: str,
+                               target_full_path: str,
+                               duration_sec: float,
+                               status: str,
+                               error: str = "") -> None:
+    """将一次传输记录按行写入日志文件，字段精简且可解析。
+    字段：timestamp, source_ip, target_ip, source_path, target_path, duration_sec, status, error
+    """
+    record = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'source_ip': _normalize_ip_for_log(source_ip),
+        'target_ip': _normalize_ip_for_log(target_ip),
+        'source_path': source_path,
+        'target_path': target_full_path,
+        'duration_sec': round(float(duration_sec), 3),
+        'status': 'success' if status.lower() == 'success' else 'failure'
+    }
+    if error:
+        record['error'] = str(error)
+
+    line = json.dumps(record, ensure_ascii=False)
+    try:
+        with _log_file_lock:
+            with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+                f.write(line + "\n")
+    except Exception as _:
+        # 写日志失败不影响传输流程
+        pass
 
 # 模拟速度生成器
 class SpeedSimulator:
@@ -419,10 +528,10 @@ class SSHManager:
             return None
 
     def execute_command(self, server_ip, command):
-        """在远程服务器执行命令"""
+        """在远程服务器执行命令，返回 (stdout, stderr, exit_code)"""
         ssh = self.get_connection(server_ip)
         if not ssh:
-            return None, f"无法连接到服务器 {server_ip}"
+            return None, f"无法连接到服务器 {server_ip}", -1
 
         # 检查是否为Windows服务器，使用不同的编码
         is_win = is_windows_server(server_ip)
@@ -430,9 +539,14 @@ class SSHManager:
 
         try:
             stdin, stdout, stderr = ssh.exec_command(command)
+            # 读取输出并等待命令结束
             output = stdout.read().decode(encoding, errors='ignore')
             error = stderr.read().decode(encoding, errors='ignore')
-            return output, error
+            try:
+                exit_code = stdout.channel.recv_exit_status()
+            except Exception:
+                exit_code = 0 if not error else 1
+            return output, error, exit_code
         except Exception as e:
             # 连接可能已断开，尝试重新连接
             print(f"⚠️  SSH连接异常，尝试重新连接到 {server_ip}: {e}")
@@ -450,11 +564,15 @@ class SSHManager:
                     stdin, stdout, stderr = ssh.exec_command(command)
                     output = stdout.read().decode(encoding, errors='ignore')
                     error = stderr.read().decode(encoding, errors='ignore')
-                    return output, error
+                    try:
+                        exit_code = stdout.channel.recv_exit_status()
+                    except Exception:
+                        exit_code = 0 if not error else 1
+                    return output, error, exit_code
                 except Exception as retry_e:
-                    return None, f"重连后仍然失败: {str(retry_e)}"
+                    return None, f"重连后仍然失败: {str(retry_e)}", -1
 
-            return None, str(e)
+            return None, str(e), -1
 
 ssh_manager = SSHManager()
 
@@ -547,10 +665,7 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
     """使用tar+ssh传输文件到NAS服务器（rsync替代方案）"""
     try:
         # 发送开始传输日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🚀 开始tar+ssh传输 {file_name} 到NAS...'
-        })
+        emit_transfer_log(transfer_id, f'🚀 开始tar+ssh传输 {file_name} 到NAS...')
 
         target_config = SERVERS[target_server]
         target_user = target_config['user']
@@ -559,10 +674,11 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
 
         # 创建远程目录
         ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+        target_path_escaped = target_path.replace('"', '\\"')
         if target_password:
-            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p \"{target_path_escaped}\"'"
         else:
-            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p \"{target_path_escaped}\"'"
 
         print(f"🔧 创建目录命令: {mkdir_cmd}")
         mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
@@ -576,18 +692,15 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
         # 🚀 极限速度优化：使用最快的 SSH 加密和 tar 参数
         fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
 
-        if is_directory:
-            # 目录传输：使用 --format=posix 避免扩展属性开销
-            if target_password:
-                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
-            else:
-                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+        # 目录或文件统一构建本地tar与远端解包命令，确保路径安全
+        src_dir = os.path.dirname(source_path)
+        src_name = os.path.basename(source_path)
+        local_tar = f"tar --format=posix -cf - -C {shlex.quote(src_dir)} {shlex.quote(src_name)} 2>/dev/null"
+        remote_extract = f'cd "{target_path_escaped}" && tar -xf -'
+        if target_password:
+            tar_cmd = f"{local_tar} | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{remote_extract}'"
         else:
-            # 文件传输：使用 --format=posix 避免扩展属性开销
-            if target_password:
-                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
-            else:
-                tar_cmd = f"tar --format=posix -cf - -C {os.path.dirname(source_path)} {os.path.basename(source_path)} 2>/dev/null | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} 'cd {target_path} && tar -xf -'"
+            tar_cmd = f"{local_tar} | ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{remote_extract}'"
 
         print(f"🚀 执行tar+ssh传输: {file_name}")
         print(f"🔧 源路径: {source_path}")
@@ -629,19 +742,13 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
             else:
                 print(f"🔧 父目录也不存在: {parent_dir}")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ 源文件不存在: {source_path}'
-            })
+            emit_transfer_log(transfer_id, f'❌ 源文件不存在: {source_path}')
             return False
 
         print(f"🔧 执行命令: {tar_cmd}")
 
         # 发送详细调试日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🔧 调试: 执行命令 {tar_cmd}'
-        })
+        emit_transfer_log(transfer_id, f'🔧 调试: 执行命令 {tar_cmd}')
 
         # 进度更新已移除以提升性能
 
@@ -678,20 +785,14 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
             print(f"✅ tar+ssh传输成功: {file_name}")
 
             # 发送成功日志（包含耗时）
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ {file_name} tar+ssh传输完成，耗时: {time_str}'
-            })
+            emit_transfer_log(transfer_id, f'✅ {file_name} tar+ssh传输完成，耗时: {time_str}')
 
             return True
         else:
             print(f"❌ tar+ssh传输失败: {result.stderr}")
 
             # 发送错误日志
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ {file_name} tar+ssh传输失败: {result.stderr}'
-            })
+            emit_transfer_log(transfer_id, f'❌ {file_name} tar+ssh传输失败: {result.stderr}')
 
             return False
 
@@ -699,10 +800,7 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
         print(f"❌ tar+ssh传输异常: {e}")
 
         # 发送异常日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'❌ {file_name} tar+ssh传输异常: {str(e)}'
-        })
+        emit_transfer_log(transfer_id, f'❌ {file_name} tar+ssh传输异常: {str(e)}')
 
         return False
 
@@ -726,26 +824,21 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         print(f"🔧 目标路径: {target_path}")
 
         # 发送开始传输日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🚀 开始tar+ssh传输 {file_name} 到NAS...'
-        })
+        emit_transfer_log(transfer_id, f'🚀 开始tar+ssh传输 {file_name} 到NAS...')
 
         # 创建NAS目标目录
         ssh_cmd = f"ssh -p {target_port} -o StrictHostKeyChecking=no"
+        target_path_escaped = target_path.replace('"', '\\"')
         if target_password:
-            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+            mkdir_cmd = f"sshpass -p '{target_password}' {ssh_cmd} {target_user}@{target_server} 'mkdir -p \"{target_path_escaped}\"'"
         else:
-            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p {target_path}'"
+            mkdir_cmd = f"{ssh_cmd} {target_user}@{target_server} 'mkdir -p \"{target_path_escaped}\"'"
 
         print(f"🔧 创建NAS目录命令: {mkdir_cmd}")
         mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True, timeout=30)
         if mkdir_result.returncode != 0:
             print(f"❌ 创建NAS目录失败: {mkdir_result.stderr}")
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ 创建NAS目录失败: {mkdir_result.stderr}'
-            })
+            emit_transfer_log(transfer_id, f'❌ 创建NAS目录失败: {mkdir_result.stderr}')
             return False
         else:
             print(f"✅ NAS目录创建成功: {target_path}")
@@ -764,10 +857,12 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
             source_tar_cmd = f'cmd /C "cd /d \"{win_dir}\" && tar --format=posix -cf - \"{win_name}\" 2>nul"'
         else:
             source_path_cmd = source_path
-            # Linux: 使用 --format=posix 避免扩展属性开销
-            source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar --format=posix -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+            # Linux: 使用 --format=posix，路径加双引号避免空格/中文问题
+            _src_dir = os.path.dirname(source_path_cmd).replace('"', '\\"')
+            _src_name = os.path.basename(source_path_cmd).replace('"', '\\"')
+            source_tar_cmd = f'cd "{_src_dir}" && tar --format=posix -cf - "{_src_name}" 2>/dev/null'
         # 目标侧在 NAS 解包
-        target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
+        target_extract_cmd = f'cd "{target_path_escaped}" && tar -xf -'
 
         # 🚀 极限速度优化：使用最快的 SSH 加密算法
         fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
@@ -785,10 +880,7 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         print(f"🔧 执行命令: {tar_cmd}")
 
         # 发送详细调试日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🔧 调试: 执行命令 {tar_cmd}'
-        })
+        emit_transfer_log(transfer_id, f'🔧 调试: 执行命令 {tar_cmd}')
 
         # 进度更新已移除以提升性能
 
@@ -834,29 +926,20 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
             print(f"✅ 远程到NAS tar+ssh传输成功: {file_name}")
 
             # 发送成功日志（包含耗时）
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ {file_name} 远程到NAS tar+ssh传输完成，耗时: {time_str}'
-            })
+            emit_transfer_log(transfer_id, f'✅ {file_name} 远程到NAS tar+ssh传输完成，耗时: {time_str}')
 
             return True
         else:
             print(f"❌ 远程到NAS tar+ssh传输失败: {stderr}")
 
             # 发送错误日志
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ {file_name} 远程到NAS tar+ssh传输失败: {stderr}'
-            })
+            emit_transfer_log(transfer_id, f'❌ {file_name} 远程到NAS tar+ssh传输失败: {stderr}')
 
             return False
 
     except Exception as e:
         print(f"❌ 远程到NAS tar+ssh传输异常: {str(e)}")
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'❌ {file_name} 远程到NAS传输异常: {str(e)}'
-        })
+        emit_transfer_log(transfer_id, f'❌ {file_name} 远程到NAS传输异常: {str(e)}')
         return False
 
 def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id):
@@ -900,18 +983,21 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 # Linux/Unix 目标
                 target_path_cmd = target_path
                 remote_target = f"{target_path_cmd}/{file_name}" if is_directory else target_path_cmd
+                remote_target_escaped = remote_target.replace('"', '\\"')
                 if target_password:
-                    mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+                    mkdir_cmd = f"sshpass -p '{target_password}' {target_ssh} {target_user}@{target_server} 'mkdir -p \"{remote_target_escaped}\"'"
                 else:
-                    mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p {remote_target}'"
+                    mkdir_cmd = f"{target_ssh} {target_user}@{target_server} 'mkdir -p \"{remote_target_escaped}\"'"
                 subprocess.run(mkdir_cmd, shell=True, check=True)
 
         # 🚀 极限速度优化：构建传输命令，添加静默选项避免输出干扰
         # 源为NAS（Linux），无需转换
         source_path_cmd = source_path
 
-        # 使用 --format=posix 避免扩展属性开销
-        source_tar_cmd = f"cd {os.path.dirname(source_path_cmd)} && tar --format=posix -cf - {os.path.basename(source_path_cmd)} 2>/dev/null"
+        # 使用 --format=posix 避免扩展属性开销（路径加双引号避免空格/中文问题）
+        _src_dir = os.path.dirname(source_path_cmd).replace('"', '\\"')
+        _src_name = os.path.basename(source_path_cmd).replace('"', '\\"')
+        source_tar_cmd = f'cd "{_src_dir}" && tar --format=posix -cf - "{_src_name}" 2>/dev/null'
 
         # 🚀 极限速度优化：使用最快的 SSH 加密算法
         fast_ssh_opts = "-o Compression=no -o Ciphers=aes128-ctr -o MACs=umac-64@openssh.com -o StrictHostKeyChecking=no"
@@ -919,7 +1005,8 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
         if is_local_server(target_server):
             # NAS到本地
             target_path_cmd_local = target_path
-            target_extract_cmd = f"cd {target_path_cmd_local} && tar -xf -"
+            _tpl = target_path_cmd_local.replace('"', '\\"')
+            target_extract_cmd = f'cd "{_tpl}" && tar -xf -'
 
             if source_password:
                 full_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | ({target_extract_cmd})"
@@ -931,7 +1018,8 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
                 # Windows 提取：在目标基础目录解包
                 target_extract_cmd = f'cmd /C "cd /d \"{target_path_cmd}\" && tar -xf -"'
             else:
-                target_extract_cmd = f"cd {target_path_cmd} && tar -xf -"
+                _tpe = target_path_cmd.replace('"', '\\"')
+                target_extract_cmd = f'cd "{_tpe}" && tar -xf -'
 
             if source_password and target_password:
                 full_cmd = f"sshpass -p '{source_password}' ssh {fast_ssh_opts} -p {source_port} {source_user}@{source_server} '{source_tar_cmd}' | sshpass -p '{target_password}' ssh {fast_ssh_opts} -p {target_port} {target_user}@{target_server} '{target_extract_cmd}'"
@@ -946,10 +1034,7 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
         print(f"🔧 执行命令: {full_cmd}")
 
         # 发送开始传输日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🚀 开始从NAS tar+ssh传输 {file_name}...'
-        })
+        emit_transfer_log(transfer_id, f'🚀 开始从NAS tar+ssh传输 {file_name}...')
 
         # 记录开始时间
         import time
@@ -993,20 +1078,14 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
             print(f"✅ NAS tar+ssh传输成功: {file_name}")
 
             # 发送成功日志（包含耗时）
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ {file_name} 从NAS tar+ssh传输完成，耗时: {time_str}'
-            })
+            emit_transfer_log(transfer_id, f'✅ {file_name} 从NAS tar+ssh传输完成，耗时: {time_str}')
 
             return True
         else:
             print(f"❌ NAS tar+ssh传输失败: {stderr}")
 
             # 发送错误日志
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ {file_name} 从NAS tar+ssh传输失败: {stderr}'
-            })
+            emit_transfer_log(transfer_id, f'❌ {file_name} 从NAS tar+ssh传输失败: {stderr}')
 
             return False
 
@@ -1014,10 +1093,7 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
         print(f"❌ NAS tar+ssh传输异常: {e}")
 
         # 发送异常日志
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'❌ {file_name} 从NAS传输异常: {str(e)}'
-        })
+        emit_transfer_log(transfer_id, f'❌ {file_name} 从NAS传输异常: {str(e)}')
 
         return False
 
@@ -1029,7 +1105,7 @@ def get_default_path(server_ip):
     if is_windows_server(server_ip):
         try:
             # 通过SSH执行命令获取Windows用户主目录
-            output, error = ssh_manager.execute_command(server_ip, 'echo %USERPROFILE%')
+            output, error, _ = ssh_manager.execute_command(server_ip, 'echo %USERPROFILE%')
             if output and not error:
                 # 转换为正斜杠格式
                 user_profile = output.strip().replace('\\', '/')
@@ -1065,7 +1141,7 @@ class ParallelTransferManager:
             except:
                 return 0
         else:
-            output, error = ssh_manager.execute_command(server_ip, f"stat -c%s '{file_path}' 2>/dev/null || echo 0")
+            output, error, _ = ssh_manager.execute_command(server_ip, f"stat -c%s '{file_path}' 2>/dev/null || echo 0")
             try:
                 return int(output.strip())
             except:
@@ -1108,7 +1184,7 @@ class ParallelTransferManager:
             try:
                 cmd = f"find '{dir_path}' -type f -exec stat -c '%n %s' {{}} \\;"
                 print(f"🔧 执行命令: {cmd}")
-                output, error = ssh_manager.execute_command(source_server, cmd)
+                output, error, _ = ssh_manager.execute_command(source_server, cmd)
 
                 if error:
                     print(f"⚠️ 命令执行警告: {error}")
@@ -1163,20 +1239,14 @@ class ParallelTransferManager:
 
                     # 发送分析进度通知
                     if transfer_id:
-                        socketio.emit('transfer_log', {
-                            'transfer_id': transfer_id,
-                            'message': f'📁 正在分析目录 {file_info["name"]} 的结构...'
-                        })
+                        emit_transfer_log(transfer_id, f'📁 正在分析目录 {file_info["name"]} 的结构...')
 
                     try:
                         # 检查是否启用快速模式
                         if PARALLEL_TRANSFER_CONFIG['fast_mode']:
                             # 快速模式：不进行详细分析，直接估算
                             if transfer_id:
-                                socketio.emit('transfer_log', {
-                                    'transfer_id': transfer_id,
-                                    'message': f'⚡ 快速模式：跳过目录 {file_info["name"]} 的详细分析'
-                                })
+                                emit_transfer_log(transfer_id, f'⚡ 快速模式：跳过目录 {file_info["name"]} 的详细分析')
 
                             # 目录本身作为一个传输单元，不分析子文件
                             large_files.append({
@@ -1194,17 +1264,11 @@ class ParallelTransferManager:
                             # 检查是否文件数量过多，建议启用快速模式
                             if len(dir_files) > PARALLEL_TRANSFER_CONFIG['max_analysis_files']:
                                 if transfer_id:
-                                    socketio.emit('transfer_log', {
-                                        'transfer_id': transfer_id,
-                                        'message': f'⚠️ 目录 {file_info["name"]} 包含 {len(dir_files)} 个文件，建议启用快速模式以提高性能'
-                                    })
+                                    emit_transfer_log(transfer_id, f'⚠️ 目录 {file_info["name"]} 包含 {len(dir_files)} 个文件，建议启用快速模式以提高性能')
 
                             # 发送分析完成通知
                             if transfer_id:
-                                socketio.emit('transfer_log', {
-                                    'transfer_id': transfer_id,
-                                    'message': f'✅ 目录 {file_info["name"]} 分析完成，包含 {len(dir_files)} 个文件'
-                                })
+                                emit_transfer_log(transfer_id, f'✅ 目录 {file_info["name"]} 分析完成，包含 {len(dir_files)} 个文件')
 
                             # 目录本身作为一个传输单元
                             large_files.append({
@@ -1217,10 +1281,7 @@ class ParallelTransferManager:
 
                         # 发送分析失败通知
                         if transfer_id:
-                            socketio.emit('transfer_log', {
-                                'transfer_id': transfer_id,
-                                'message': f'⚠️ 目录 {file_info["name"]} 分析失败: {str(e)}'
-                            })
+                            emit_transfer_log(transfer_id, f'⚠️ 目录 {file_info["name"]} 分析失败: {str(e)}')
 
                         # 即使分析失败，也要添加目录到传输列表
                         large_files.append({
@@ -1468,7 +1529,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
             # 使用/a显示所有文件，/-c去除千位分隔符，统一解析
             command = f'dir "{win_path}" /a /-c'
 
-            output, error = ssh_manager.execute_command(server_ip, command)
+            output, error, _ = ssh_manager.execute_command(server_ip, command)
 
             if error and "找不到文件" not in error and "File Not Found" not in error:
                 print(f"Windows dir命令错误: {error}")
@@ -1547,13 +1608,42 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
             # 使用ls -la命令以便正确识别符号链接和隐藏文件
             command = f"ls -la '{path}' | tail -n +2"  # 总是使用-a选项以获取完整信息
 
-            output, error = ssh_manager.execute_command(server_ip, command)
+            output, error, _ = ssh_manager.execute_command(server_ip, command)
 
             if error:
                 return []
 
             items = []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             for line in output.strip().split('\n'):
+
+
+
                 if not line:
                     continue
 
@@ -1717,9 +1807,11 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             # 启动传输计时器
             time_tracker.start_transfer(transfer_id)
 
-            # 初始化速度模拟器（NAS传输使用38~40MB/s波动）
+            # 初始化速度模拟器（NAS/Windows特殊波动区间）
             if is_nas_server(source_server) or is_nas_server(target_server):
                 speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
+            elif is_windows_server(source_server) or is_windows_server(target_server):
+                speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
             else:
                 speed_simulator.init_transfer_speed(transfer_id)
 
@@ -1731,10 +1823,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
             # 🚀 性能优化：减少WebSocket通信，只发送关键信息
             if not PERFORMANCE_CONFIG.get('reduce_websocket_traffic', True):
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'� 立即开始传输 {total_files} 个项目...'
-                })
+                emit_transfer_log(transfer_id, f'� 立即开始传输 {total_files} 个项目...')
 
             # 检查是否启用并行传输
             if not PARALLEL_TRANSFER_CONFIG['enable_parallel'] or total_files == 1:
@@ -1744,10 +1833,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             # 创建线程池
             max_workers = min(PARALLEL_TRANSFER_CONFIG['max_workers'], total_files)
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'⚡ 启动 {max_workers} 个并行传输线程...'
-            })
+            emit_transfer_log(transfer_id, f'⚡ 启动 {max_workers} 个并行传输线程...')
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
@@ -1808,10 +1894,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                         print(f"[ERROR] 传输任务异常: {str(e)}, 类型: {type(e).__name__}")
                         import traceback
                         print(f"[ERROR] 异常堆栈: {traceback.format_exc()}")
-                        socketio.emit('transfer_log', {
-                            'transfer_id': transfer_id,
-                            'message': f'❌ 传输任务失败: {str(e)}'
-                        })
+                        emit_transfer_log(transfer_id, f'❌ 传输任务失败: {str(e)}')
 
             # 发送传输完成通知
             # 🔧 BUG修复：添加详细日志以诊断完成状态
@@ -1889,11 +1972,14 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         source_path = file_info['path']
         file_name = file_info['name']
         is_directory = file_info['is_directory']
+        # —— 精简文件日志：记录单文件级别的关键信息 ——
+        _file_transfer_start_ts = time.time()
+        _log_target_full_path = _join_target_full_path_for_log(target_server, target_path, file_name)
+        _log_source_ip = _normalize_ip_for_log(source_server)
+        _log_target_ip = _normalize_ip_for_log(target_server)
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🚀 开始传输 {file_name}...'
-        })
+
+        emit_transfer_log(transfer_id, f'🚀 开始传输 {file_name}...')
 
         # 检查是否被取消
         if transfer_id not in active_transfers:
@@ -1905,10 +1991,7 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         print(f"🔄 传输模式: {transfer_mode} ({source_server} → {target_server})")
 
         # 发送传输模式信息到前端
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🔄 传输模式: {transfer_mode} ({source_server} → {target_server})'
-        })
+        emit_transfer_log(transfer_id, f'🔄 传输模式: {transfer_mode} ({source_server} → {target_server})')
 
         if transfer_mode == 'local_to_remote':
             # 从TurboFile主机传输到远程服务器
@@ -1935,10 +2018,7 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
 
             operation = "剪切" if mode == "move" else "复制"
             cmd_name = "mv" if mode == "move" else "cp"
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'🔄 传输模式: local_to_local (本地到本地{operation}，使用{cmd_name}命令)'
-            })
+            emit_transfer_log(transfer_id, f'🔄 传输模式: local_to_local (本地到本地{operation}，使用{cmd_name}命令)')
 
             success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode)
             print(f"[DEBUG] transfer_file_via_local_to_local_instant返回值: {success}, 类型: {type(success)}")
@@ -1959,10 +2039,7 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                         shutil.rmtree(source_path)
                     else:
                         os.remove(source_path)
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'🗑️ 已删除源文件: {file_name}'
-                    })
+                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
                 else:
                     # 远程删除
                     is_windows = is_windows_server(source_server)
@@ -1977,28 +2054,44 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                         delete_cmd = f"rm -rf '{source_path}'"
 
                     ssh_manager.execute_command(source_server, delete_cmd)
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'🗑️ 已删除源文件: {file_name}'
-                    })
+                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
             except Exception as e:
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'⚠️ 删除源文件失败: {str(e)}'
-                })
+                emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'✅ {file_name} 传输完成'
-        })
+        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
+
+        # 写入精简日志（成功）
+        try:
+            append_transfer_log_record(
+                source_ip=_log_source_ip,
+                target_ip=_log_target_ip,
+                source_path=source_path,
+                target_full_path=_log_target_full_path,
+                duration_sec=(time.time() - _file_transfer_start_ts),
+                status='success',
+                error=""
+            )
+        except Exception:
+            pass
 
         return {'success': True, 'message': f'{file_name} 传输完成'}
 
     except Exception as e:
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'❌ {file_info["name"]} 传输失败: {str(e)}'
-        })
+        # 写入精简日志（失败）
+        try:
+            append_transfer_log_record(
+                source_ip=_log_source_ip if '_log_source_ip' in locals() else source_server,
+                target_ip=_log_target_ip if '_log_target_ip' in locals() else target_server,
+                source_path=source_path if 'source_path' in locals() else file_info.get('path', ''),
+                target_full_path=_log_target_full_path if '_log_target_full_path' in locals() else _join_target_full_path_for_log(target_server, target_path, file_info.get('name', '')),
+                duration_sec=(time.time() - _file_transfer_start_ts) if '_file_transfer_start_ts' in locals() else 0.0,
+                status='failure',
+                error=str(e)
+            )
+        except Exception:
+            pass
+
+        emit_transfer_log(transfer_id, f'❌ {file_info["name"]} 传输失败: {str(e)}')
         return {'success': False, 'message': str(e)}
 
 def transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
@@ -2051,6 +2144,9 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         '--no-group',            # 不保留组，减少开销
         '--omit-dir-times',      # 不同步目录时间戳，减少开销
     ]
+    # Windows参与时，强制UTF-8编解码，避免中文路径被转义为\#ooo
+    if target_is_windows:
+        rsync_opts.append('--iconv=UTF-8,UTF-8')
 
     # 🚀 性能优化：移除可能影响速度的选项
     # 移除 --partial（断点续传）- 可能影响性能
@@ -2123,11 +2219,14 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
     """目录内部并行传输实现"""
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
+    # 目标为Windows时，转换为Cygwin路径
+    target_is_windows = is_windows_server(target_server)
+    remote_target_root = target_path
+    if target_is_windows:
+        normalized = normalize_windows_path_for_transfer(target_path)
+        remote_target_root = convert_windows_path_to_cygwin(normalized)
 
-    socketio.emit('transfer_log', {
-        'transfer_id': transfer_id,
-        'message': f'📁 启用目录内部并行传输: {file_name}'
-    })
+    emit_transfer_log(transfer_id, f'📁 启用目录内部并行传输: {file_name}')
 
     # 分析目录结构，制定并行策略
     parallel_tasks = []
@@ -2170,10 +2269,7 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
                     'name': f'文件组{i//group_size + 1}'
                 })
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'📊 并行任务: {len(subdirs)}个子目录 + {len(files)}个文件 → {len(parallel_tasks)}个并行任务'
-        })
+        emit_transfer_log(transfer_id, f'📊 并行任务: {len(subdirs)}个子目录 + {len(files)}个文件 → {len(parallel_tasks)}个并行任务')
 
         # 执行并行传输
         max_workers = min(4, len(parallel_tasks))
@@ -2182,27 +2278,29 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
             """执行单个并行任务"""
             # 🚀 极限速度优化：统一使用最优rsync参数
             rsync_opts = ['-a', '--inplace', '--whole-file', '--no-compress', '--numeric-ids', '--timeout=600', '--no-perms', '--no-owner', '--no-group', '--omit-dir-times']
+            if target_is_windows:
+                rsync_opts.append('--iconv=UTF-8,UTF-8')
 
             if task['type'] == 'subdir':
                 # 传输子目录
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
+                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
+                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
                     ]
             else:
                 # 传输文件组
                 file_paths = [os.path.join(task['source_dir'], f) for f in task['files']]
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
+                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{target_path}/{task['target_subpath']}/"
+                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
                     ]
 
             try:
@@ -2233,30 +2331,18 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
                 result = future.result()
                 if result['success']:
                     completed_tasks += 1
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'✅ 并行任务完成: {result["task_name"]}'
-                    })
+                    emit_transfer_log(transfer_id, f'✅ 并行任务完成: {result["task_name"]}')
                 else:
                     failed_tasks += 1
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'❌ 并行任务失败: {result["task_name"]} - {result.get("error", "未知错误")}'
-                    })
+                    emit_transfer_log(transfer_id, f'❌ 并行任务失败: {result["task_name"]} - {result.get("error", "未知错误")}')
 
         if failed_tasks > 0:
             raise Exception(f"目录并行传输部分失败: {failed_tasks}/{len(parallel_tasks)} 任务失败")
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'🎉 目录并行传输完成: {completed_tasks}/{len(parallel_tasks)} 任务成功'
-        })
+        emit_transfer_log(transfer_id, f'🎉 目录并行传输完成: {completed_tasks}/{len(parallel_tasks)} 任务成功')
 
     except Exception as e:
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'⚠️ 目录并行传输失败，回退到单rsync: {str(e)}'
-        })
+        emit_transfer_log(transfer_id, f'⚠️ 目录并行传输失败，回退到单rsync: {str(e)}')
         # 回退到单rsync传输
         return transfer_single_rsync(source_path, target_server, target_path, file_name, True, transfer_id, fast_ssh)
 
@@ -2286,6 +2372,8 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         '--no-group',            # 不保留组，减少开销
         '--omit-dir-times',      # 不同步目录时间戳，减少开销
     ]
+    if source_is_windows:
+        rsync_opts.append('--iconv=UTF-8,UTF-8')
 
     # 处理源路径（如果是Windows，转换为Cygwin格式）
     rsync_source_path = source_path
@@ -2366,10 +2454,7 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
             # 剪切模式：使用 mv 命令
             print(f"[DEBUG] 本地剪切: {source_path} -> {dest_path}")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✂️ 本地到本地剪切，使用 mv 命令'
-            })
+            emit_transfer_log(transfer_id, f'✂️ 本地到本地剪切，使用 mv 命令')
 
             # 使用 mv 命令移动文件/目录
             mv_cmd = ['mv', '-f', source_path, target_path + '/']
@@ -2377,10 +2462,7 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
             cmd_str = ' '.join(mv_cmd)
             print(f"[DEBUG] 执行命令: {cmd_str}")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'📝 执行命令: {cmd_str}'
-            })
+            emit_transfer_log(transfer_id, f'📝 执行命令: {cmd_str}')
 
             result = subprocess.run(mv_cmd, capture_output=True, text=True, timeout=300)
 
@@ -2391,20 +2473,14 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
 
             print(f"[DEBUG] mv成功: {file_name}")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ 本地剪切完成: {file_name}'
-            })
+            emit_transfer_log(transfer_id, f'✅ 本地剪切完成: {file_name}')
         else:
             # 复制模式：使用 cp 命令
             if is_directory:
                 # 使用 cp -r 进行目录复制
                 print(f"[DEBUG] 本地目录复制: {source_path} -> {dest_path}")
 
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'📁 本地到本地复制，使用 cp -r 命令'
-                })
+                emit_transfer_log(transfer_id, f'📁 本地到本地复制，使用 cp -r 命令')
 
                 # 使用 cp -r 命令复制目录
                 cp_cmd = ['cp', '-r', source_path, target_path + '/']
@@ -2412,10 +2488,7 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
                 cmd_str = ' '.join(cp_cmd)
                 print(f"[DEBUG] 执行命令: {cmd_str}")
 
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'📝 执行命令: {cmd_str}'
-                })
+                emit_transfer_log(transfer_id, f'📝 执行命令: {cmd_str}')
 
                 result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=300)
 
@@ -2442,10 +2515,7 @@ def transfer_file_via_local_to_local_instant(source_path, target_path, file_name
 
                 print(f"[DEBUG] cp成功: {file_name}")
 
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'✅ 本地复制完成: {file_name}'
-            })
+            emit_transfer_log(transfer_id, f'✅ 本地复制完成: {file_name}')
 
         print(f"[DEBUG] transfer_file_via_local_to_local_instant返回True")
         return True  # 返回成功状态
@@ -2481,10 +2551,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             if is_windows:
                 # Windows使用move命令
                 print(f"🪟 Windows服务器使用move命令进行本地剪切")
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'✂️ 在Windows服务器上使用move剪切: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'✂️ 在Windows服务器上使用move剪切: {file_name}')
 
                 # Windows move命令语法: move /Y <源> <目标>
                 # /Y: 覆盖已存在的文件不提示
@@ -2492,10 +2559,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             else:
                 # Linux使用mv命令
                 print(f"🐧 Linux服务器使用mv命令进行本地剪切")
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'✂️ 在Linux服务器上使用mv剪切: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'✂️ 在Linux服务器上使用mv剪切: {file_name}')
 
                 # mv命令（文件和目录都适用）
                 remote_cmd = f"mv -f {shlex.quote(source_path)} {shlex.quote(target_path + '/')}"
@@ -2506,10 +2570,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             if is_windows:
                 # Windows服务器使用robocopy
                 print(f"🪟 Windows服务器使用robocopy进行本地复制")
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'📁 在Windows服务器上使用robocopy复制: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'📁 在Windows服务器上使用robocopy复制: {file_name}')
 
                 if is_directory:
                     # robocopy语法: robocopy <源目录> <目标目录> /E /MT:8
@@ -2525,10 +2586,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             else:
                 # Linux服务器使用cp -r
                 print(f"🐧 Linux服务器使用cp命令进行本地复制")
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'📁 在Linux服务器上使用cp复制: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'📁 在Linux服务器上使用cp复制: {file_name}')
 
                 if is_directory:
                     # cp -r 复制目录
@@ -2541,7 +2599,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
         # 通过SSH执行命令
         try:
-            output, error = ssh_manager.execute_command(source_server, remote_cmd)
+            output, error, _ = ssh_manager.execute_command(source_server, remote_cmd)
 
             # 检查命令执行结果
             if mode == 'move':
@@ -2561,10 +2619,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
                     else:
                         print(f"[DEBUG] mv成功")
 
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'✅ 同服务器剪切完成: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'✅ 同服务器剪切完成: {file_name}')
             else:
                 # 复制模式的成功判断
                 if is_windows:
@@ -2582,10 +2637,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
                     else:
                         print(f"[DEBUG] cp成功")
 
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'✅ 同服务器复制完成: {file_name}'
-                })
+                emit_transfer_log(transfer_id, f'✅ 同服务器复制完成: {file_name}')
 
             return True
 
@@ -2593,10 +2645,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             operation = "剪切" if mode == 'move' else "复制"
             error_msg = f"同服务器{operation}失败: {str(e)}"
             print(f"[ERROR] {error_msg}")
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ {error_msg}'
-            })
+            emit_transfer_log(transfer_id, f'❌ {error_msg}')
             raise Exception(error_msg)
 
     # 如果涉及NAS服务器，使用tar+ssh方案
@@ -2642,13 +2691,13 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         "--no-group",            # 不保留组，减少开销
         "--omit-dir-times",      # 不同步目录时间戳，减少开销
     ]
+    # Windows参与时强制UTF-8，避免中文被\#ooo转义
+    if source_is_windows or target_is_windows:
+        rsync_base_opts.append("--iconv=UTF-8,UTF-8")
 
     # 如果是“Windows作为源、Linux作为目标”，改为在目标Linux上发起拉取
     if source_is_windows and not target_is_windows:
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': '🔁 检测到Windows作为源，切换为在目标Linux上运行rsync从Windows拉取'
-        })
+        emit_transfer_log(transfer_id, '🔁 检测到Windows作为源，切换为在目标Linux上运行rsync从Windows拉取')
 
         rsync_source_path = convert_windows_path_to_cygwin(source_path)
         print(f"🔄 Windows源路径转换: {source_path} -> {rsync_source_path}")
@@ -2686,10 +2735,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             print(f"📊 输出: {output}")
         if error:
             print(f"⚠️ 错误信息: {error}")
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒'
-        })
+        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒')
         if exit_status != 0:
             raise Exception(f"rsync拉取失败，退出码: {exit_status}, 错误: {error}")
         return True
@@ -2738,7 +2784,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         print(f"📊 输出: {output}")
     if error:
         print(f"⚠️ 错误信息: {error}")
-    socketio.emit('transfer_log', {'transfer_id': transfer_id,'message': f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒'})
+    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒')
     if exit_status != 0:
         raise Exception(f"rsync传输失败，退出码: {exit_status}, 错误: {error}")
     return True
@@ -2760,10 +2806,7 @@ def transfer_file_batch(transfer_id, source_server, file_batch, target_server, t
 
         except Exception as e:
             failed += 1
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'❌ 批量传输失败: {str(e)}'
-            })
+            emit_transfer_log(transfer_id, f'❌ 批量传输失败: {str(e)}')
 
     return {'completed_files': completed, 'failed_files': failed}
 
@@ -2779,6 +2822,10 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
 
+    # Windows参与检测
+    source_is_windows = is_windows_server(source_server)
+    target_is_windows = is_windows_server(target_server)
+
     # 使用统一的SSH命令构建函数（支持自定义端口）
     ssh_cmd = RSYNC_SSH_CMD
 
@@ -2790,11 +2837,14 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
         "--no-compress",         # 禁用压缩（局域网环境）
         "--numeric-ids",         # 数字ID，避免用户名解析
         "--timeout=600",         # 增加超时时间
+        "-s",                    # 保护参数，避免空格/中文在远端shell被拆分
         "--no-perms",            # 不保留权限，减少开销
         "--no-owner",            # 不保留所有者，减少开销
         "--no-group",            # 不保留组，减少开销
         "--omit-dir-times",      # 不同步目录时间戳，减少开销
     ]
+    if source_is_windows or target_is_windows:
+        rsync_base_opts.append("--iconv=UTF-8,UTF-8")
 
     # 构建rsync命令
     if is_directory:
@@ -2842,9 +2892,11 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
     # 启动传输计时器
     time_tracker.start_transfer(transfer_id)
 
-    # 初始化速度模拟器（NAS传输使用38~40MB/s波动）
+    # 初始化速度模拟器（NAS/Windows特殊波动区间）
     if is_nas_server(source_server) or is_nas_server(target_server):
         speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
+    elif is_windows_server(source_server) or is_windows_server(target_server):
+        speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
     else:
         speed_simulator.init_transfer_speed(transfer_id)
 
@@ -2886,10 +2938,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
             operation = "剪切" if mode == "move" else "复制"
             cmd_name = "mv" if mode == "move" else "cp"
             print(f"📍 顺序传输-本地到本地{operation}: {source_path} -> {target_path}")
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'🔄 本地到本地传输，使用{cmd_name}命令'
-            })
+            emit_transfer_log(transfer_id, f'🔄 本地到本地传输，使用{cmd_name}命令')
             success = transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode)
             if not success:
                 raise Exception(f"本地到本地{operation}失败")
@@ -2948,6 +2997,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         "--no-compress",
                         "--numeric-ids",
                         "--timeout=600",
+                        "-s",
                         "--no-perms",
                         "--no-owner",
                         "--no-group",
@@ -2956,6 +3006,8 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                     source_is_windows = is_windows_server(source_server)
                     target_is_windows = is_windows_server(target_server)
+                    if source_is_windows or target_is_windows:
+                        rsync_base_opts.append("--iconv=UTF-8,UTF-8")
 
                     # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
                     if source_is_windows and not target_is_windows:
@@ -3001,10 +3053,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     import time
                     start_time = time.time()
 
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'⚡️ 开始传输 {file_name}...'
-                    })
+                    emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
 
                     # 执行rsync
                     _, stdout, stderr = ssh.exec_command(remote_cmd)
@@ -3042,10 +3091,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         seconds = duration % 60
                         time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
 
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'✅ {file_name} 传输完成，耗时: {time_str}'
-                    })
+                    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成，耗时: {time_str}')
 
         completed_files += 1
 
@@ -3062,10 +3108,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         shutil.rmtree(source_path)
                     else:
                         os.remove(source_path)
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'🗑️ 已删除源文件: {file_name}'
-                    })
+                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
                 else:
                     # 远程删除
                     is_windows = is_windows_server(source_server)
@@ -3080,15 +3123,9 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         delete_cmd = f"rm -rf '{source_path}'"
 
                     ssh_manager.execute_command(source_server, delete_cmd)
-                    socketio.emit('transfer_log', {
-                        'transfer_id': transfer_id,
-                        'message': f'🗑️ 已删除源文件: {file_name}'
-                    })
+                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
             except Exception as e:
-                socketio.emit('transfer_log', {
-                    'transfer_id': transfer_id,
-                    'message': f'⚠️ 删除源文件失败: {str(e)}'
-                })
+                emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
 
     # 结束传输计时
     total_time = time_tracker.end_transfer(transfer_id)
@@ -3332,7 +3369,7 @@ def get_windows_drives(server_ip):
     try:
         # 使用wmic命令获取逻辑磁盘列表
         command = 'wmic logicaldisk get caption,drivetype,volumename'
-        output, error = ssh_manager.execute_command(server_ip, command)
+        output, error, _ = ssh_manager.execute_command(server_ip, command)
 
         if error:
             print(f"获取磁盘列表失败: {error}")
@@ -3442,6 +3479,30 @@ def handle_start_transfer(data):
     # 更新并行传输配置
     PARALLEL_TRANSFER_CONFIG['enable_parallel'] = data.get('parallel_transfer', True)
 
+    # 获取客户端IP
+    import re
+    def _extract_ipv4(s: str):
+        if not s:
+            return None
+        first = s.split(',')[0].strip()
+        m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
+        return m.group(1) if m else None
+
+    candidates = [
+        request.headers.get('X-Forwarded-For', ''),
+        request.headers.get('X-Real-IP', ''),
+        request.remote_addr
+    ]
+    client_ip = None
+    for c in candidates:
+        ip = _extract_ipv4(c)
+        if ip:
+            client_ip = ip
+            break
+
+    if not client_ip:
+        client_ip = '未知'
+
     # 记录传输任务
     active_transfers[transfer_id] = {
         'source_server': data['source_server'],
@@ -3450,7 +3511,8 @@ def handle_start_transfer(data):
         'target_path': data['target_path'],
         'mode': data.get('mode', 'copy'),
         'parallel_enabled': data.get('parallel_transfer', True),
-        'start_time': datetime.now()
+        'start_time': datetime.now(),
+        'client_ip': client_ip
     }
 
     # 启动即时并行传输
@@ -3564,6 +3626,275 @@ def handle_cancel_transfer(data):
 
     print(f"传输 {transfer_id} 已成功取消")
 
+@app.route('/api/delete', methods=['POST'])
+def delete_files():
+    """删除文件或文件夹"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        paths = data.get('paths', [])  # 支持批量删除
+
+        if not server_ip or not paths:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        deleted_count = 0
+        failed_items = []
+        parent_dirs = set()
+
+
+        for path in paths:
+            # 记录父目录用于后续清理缓存
+            try:
+                if is_windows:
+                    import ntpath
+                    parent_dir = ntpath.dirname(path)
+                else:
+                    parent_dir = os.path.dirname(path)
+                if parent_dir:
+                    parent_dirs.add(parent_dir.replace('\\', '/'))
+            except Exception:
+                pass
+
+            try:
+                if is_local:
+                    # 本地删除
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                    deleted_count += 1
+                else:
+                    # 远程删除
+                    if is_windows:
+                        # Windows: 先检查是文件还是目录，然后使用对应命令
+                        # 使用 dir 命令检查路径属性
+                        check_cmd = f'dir /a /b "{path}" 2>nul && echo EXISTS || echo NOTEXISTS'
+                        check_stdout, check_stderr, check_exit = ssh_manager.execute_command(server_ip, check_cmd)
+
+                        # 使用 PowerShell 检查是否为目录（更可靠）
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(server_ip, ps_check_cmd)
+
+                        is_dir = False
+                        if ps_exit == 0 and ps_stdout:
+                            result = ps_stdout.strip().upper()
+                            if result == 'DIR':
+                                is_dir = True
+                            elif result == 'NOTFOUND':
+                                failed_items.append({'path': path, 'error': '路径不存在'})
+                                continue
+
+                        # 根据类型选择删除命令
+                        if is_dir:
+                            # 目录：使用 rd /s /q
+                            delete_cmd = f'rd /s /q "{path}"'
+                        else:
+                            # 文件：使用 del /f /q
+                            delete_cmd = f'del /f /q "{path}"'
+
+                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
+
+                        if exit_code == 0:
+                            deleted_count += 1
+                        else:
+                            failed_items.append({'path': path, 'error': stderr or '删除失败'})
+                    else:
+                        # Linux/NAS: 使用 rm -rf
+                        rm_cmd = f'rm -rf "{path.replace(chr(34), chr(92)+chr(34))}"'
+                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
+
+                        if exit_code == 0:
+                            deleted_count += 1
+                        else:
+                            failed_items.append({'path': path, 'error': stderr or '删除失败'})
+            except Exception as e:
+                failed_items.append({'path': path, 'error': str(e)})
+
+        # 对受影响的父目录清理缓存，确保浏览区及时刷新
+        cache_cleared = 0
+        try:
+            for d in parent_dirs:
+                cache_cleared += clear_cached_listing(server_ip, d)
+        except Exception:
+            pass
+
+        if failed_items:
+            return jsonify({
+                'success': False,
+                'deleted_count': deleted_count,
+                'failed_items': failed_items,
+                'cache_cleared': cache_cleared,
+                'error': f'部分删除失败: {deleted_count}/{len(paths)} 成功'
+            })
+
+        return jsonify({
+            'success': True,
+            'deleted_count': deleted_count,
+            'cache_cleared': cache_cleared,
+            'message': f'成功删除 {deleted_count} 项'
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/create_folder', methods=['POST'])
+def create_folder():
+    """创建文件夹"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        parent_path = data.get('parent_path')
+        folder_name = data.get('folder_name')
+
+        if not server_ip or not parent_path or not folder_name:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        # 构建完整路径
+        if is_windows:
+            import ntpath
+            full_path = ntpath.join(parent_path, folder_name)
+        else:
+            full_path = os.path.join(parent_path, folder_name)
+
+        if is_local:
+            # 本地创建
+            os.makedirs(full_path, exist_ok=True)
+        else:
+            # 远程创建
+            if is_windows:
+                # Windows: 使用 mkdir
+                mkdir_cmd = f'mkdir "{full_path}"'
+            else:
+                # Linux/NAS: 使用 mkdir -p
+                mkdir_cmd = f'mkdir -p "{full_path.replace(chr(34), chr(92)+chr(34))}"'
+
+            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, mkdir_cmd)
+
+            if exit_code != 0:
+                return jsonify({'success': False, 'error': stderr or '创建文件夹失败'})
+
+        return jsonify({
+            'success': True,
+            'message': f'成功创建文件夹: {folder_name}',
+            'full_path': full_path
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/rename', methods=['POST'])
+def rename_file():
+    """重命名文件或文件夹"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        old_path = data.get('old_path')
+        new_name = data.get('new_name')
+
+        if not server_ip or not old_path or not new_name:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        # 构建新路径（保持在同一目录下）
+        if is_windows:
+            import ntpath
+            parent_dir = ntpath.dirname(old_path)
+            new_path = ntpath.join(parent_dir, new_name)
+        else:
+            parent_dir = os.path.dirname(old_path)
+            new_path = os.path.join(parent_dir, new_name)
+
+        # 检查新路径是否已存在
+        if is_local:
+            if os.path.exists(new_path):
+                return jsonify({'success': False, 'error': f'目标名称已存在: {new_name}'})
+        else:
+            # 远程检查
+            if is_windows:
+                check_cmd = f'if exist "{new_path}" (echo EXISTS) else (echo NOTEXISTS)'
+            else:
+                check_cmd = f'test -e "{new_path.replace(chr(34), chr(92)+chr(34))}" && echo EXISTS || echo NOTEXISTS'
+
+            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, check_cmd)
+            if stdout and 'EXISTS' in stdout:
+                return jsonify({'success': False, 'error': f'目标名称已存在: {new_name}'})
+
+        # 执行重命名
+        if is_local:
+            # 本地重命名
+            os.rename(old_path, new_path)
+        else:
+            # 远程重命名
+            if is_windows:
+                # Windows: 使用 ren 或 move 命令
+                # ren 只能在同一目录下重命名，且只需要新名称
+                # 为了支持路径中的空格和特殊字符，使用 move 命令
+                rename_cmd = f'move /Y "{old_path}" "{new_path}"'
+            else:
+                # Linux/NAS: 使用 mv 命令
+                old_escaped = old_path.replace('"', '\\"')
+                new_escaped = new_path.replace('"', '\\"')
+                rename_cmd = f'mv "{old_escaped}" "{new_escaped}"'
+
+            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rename_cmd)
+
+            if exit_code != 0:
+                return jsonify({'success': False, 'error': stderr or '重命名失败'})
+
+        return jsonify({
+            'success': True,
+            'message': f'成功重命名为: {new_name}',
+            'new_path': new_path
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/active_transfers', methods=['GET'])
+def get_active_transfers():
+    """获取当前活跃的传输任务"""
+    try:
+        transfers = []
+        for transfer_id, transfer_info in active_transfers.items():
+            # 获取客户端IP（从传输信息中提取，如果有的话）
+            client_ip = transfer_info.get('client_ip', '未知')
+
+            # 计算传输持续时间
+            start_time = transfer_info.get('start_time')
+            if start_time:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                elapsed_str = f"{int(elapsed // 3600):02d}:{int((elapsed % 3600) // 60):02d}:{int(elapsed % 60):02d}"
+            else:
+                elapsed_str = "未知"
+
+            transfers.append({
+                'transfer_id': transfer_id,
+                'client_ip': client_ip,
+                'source_server': transfer_info.get('source_server', '未知'),
+                'target_server': transfer_info.get('target_server', '未知'),
+                'file_count': len(transfer_info.get('source_files', [])),
+                'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S') if start_time else '未知',
+                'elapsed_time': elapsed_str,
+                'mode': transfer_info.get('mode', 'copy')
+            })
+
+        return jsonify({
+            'success': True,
+            'active_count': len(transfers),
+            'transfers': transfers
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 @socketio.on('connect')
 def handle_connect():
     print('客户端已连接')
@@ -3659,10 +3990,7 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
         import time
         start_time = time.time()
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'⚡️ 开始传输 {file_name}...'
-        })
+        emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
 
         # 实时显示传输进度
         # 等待传输完成（无进度读取，提升性能）
@@ -3700,10 +4028,7 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             seconds = duration % 60
             time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
 
-        socketio.emit('transfer_log', {
-            'transfer_id': transfer_id,
-            'message': f'✅ {file_name} 传输完成，耗时: {time_str}'
-        })
+        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成，耗时: {time_str}')
 
         return True  # 返回成功状态
 
@@ -3722,18 +4047,12 @@ def transfer_file_via_paramiko(source_path, target_server, target_path, file_nam
         if is_directory:
             # 传输目录
             remote_dir_path = f"{target_path}/{file_name}"
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'正在传输目录: {file_name}'
-            })
+            emit_transfer_log(transfer_id, f'正在传输目录: {file_name}')
             transfer_directory_to_remote(sftp, source_path, remote_dir_path, transfer_id)
         else:
             # 传输文件
             remote_file_path = f"{target_path}/{file_name}"
-            socketio.emit('transfer_log', {
-                'transfer_id': transfer_id,
-                'message': f'正在传输文件: {file_name}'
-            })
+            emit_transfer_log(transfer_id, f'正在传输文件: {file_name}')
             sftp.put(source_path, remote_file_path)
     finally:
         sftp.close()
