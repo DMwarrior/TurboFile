@@ -661,7 +661,7 @@ def normalize_windows_path_for_transfer(p: str) -> str:
         return p
 
 
-def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id):
+def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id, mode='copy'):
     """使用tar+ssh传输文件到NAS服务器（rsync替代方案）"""
     try:
         # 发送开始传输日志
@@ -787,6 +787,21 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
             # 发送成功日志（包含耗时）
             emit_transfer_log(transfer_id, f'✅ {file_name} tar+ssh传输完成，耗时: {time_str}')
 
+            # 如果是剪切模式，删除源文件
+            if mode == 'move':
+                try:
+                    # 本地删除源文件
+                    import shutil
+                    if is_directory:
+                        shutil.rmtree(source_path)
+                    else:
+                        os.remove(source_path)
+                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                    print(f"✅ 已删除本地源文件: {source_path}")
+                except Exception as e:
+                    emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
+                    print(f"⚠️ 删除本地源文件失败: {e}")
+
             return True
         else:
             print(f"❌ tar+ssh传输失败: {result.stderr}")
@@ -804,7 +819,7 @@ def transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name
 
         return False
 
-def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id):
+def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode='copy'):
     """从远程服务器使用tar+ssh传输文件到NAS服务器"""
     try:
         source_config = SERVERS[source_server]
@@ -928,6 +943,31 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
             # 发送成功日志（包含耗时）
             emit_transfer_log(transfer_id, f'✅ {file_name} 远程到NAS tar+ssh传输完成，耗时: {time_str}')
 
+            # 如果是剪切模式，删除源文件
+            if mode == 'move':
+                try:
+                    is_windows = is_windows_server(source_server)
+                    if is_windows:
+                        # Windows 删除命令
+                        if is_directory:
+                            delete_cmd = f'rmdir /s /q "{source_path}"'
+                        else:
+                            delete_cmd = f'del /f /q "{source_path}"'
+                    else:
+                        # Linux 删除命令
+                        delete_cmd = f"rm -rf '{source_path}'"
+
+                    stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                    if exit_code == 0:
+                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                        print(f"✅ 已删除源文件: {source_path}")
+                    else:
+                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
+                        print(f"⚠️ 删除源文件失败: {stderr}")
+                except Exception as e:
+                    emit_transfer_log(transfer_id, f'⚠️ 删除源文件异常: {str(e)}')
+                    print(f"⚠️ 删除源文件异常: {e}")
+
             return True
         else:
             print(f"❌ 远程到NAS tar+ssh传输失败: {stderr}")
@@ -942,7 +982,7 @@ def transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server
         emit_transfer_log(transfer_id, f'❌ {file_name} 远程到NAS传输异常: {str(e)}')
         return False
 
-def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id):
+def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode='copy'):
     """从NAS服务器使用tar+ssh传输文件"""
     try:
         source_config = SERVERS[source_server]
@@ -1079,6 +1119,22 @@ def transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server
 
             # 发送成功日志（包含耗时）
             emit_transfer_log(transfer_id, f'✅ {file_name} 从NAS tar+ssh传输完成，耗时: {time_str}')
+
+            # 如果是剪切模式，删除源文件
+            if mode == 'move':
+                try:
+                    # NAS服务器使用SSH删除
+                    delete_cmd = f"rm -rf '{source_path}'"
+                    stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                    if exit_code == 0:
+                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                        print(f"✅ 已删除NAS源文件: {source_path}")
+                    else:
+                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
+                        print(f"⚠️ 删除NAS源文件失败: {stderr}")
+                except Exception as e:
+                    emit_transfer_log(transfer_id, f'⚠️ 删除源文件异常: {str(e)}')
+                    print(f"⚠️ 删除NAS源文件异常: {e}")
 
             return True
         else:
@@ -1996,13 +2052,13 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         if transfer_mode == 'local_to_remote':
             # 从TurboFile主机传输到远程服务器
             print(f"📍 调用函数: transfer_file_via_local_rsync_instant")
-            success = transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode)
             if not success:
                 raise Exception("本地到远程传输失败")
         elif transfer_mode == 'remote_to_local':
             # 从远程服务器传输到TurboFile主机
             print(f"📍 调用函数: transfer_file_via_remote_to_local_rsync_instant")
-            success = transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+            success = transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode)
             if not success:
                 raise Exception("远程到本地传输失败")
         elif transfer_mode == 'remote_to_remote':
@@ -2044,17 +2100,33 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                     # 远程删除
                     is_windows = is_windows_server(source_server)
                     if is_windows:
-                        # Windows 删除命令
-                        if is_directory:
-                            delete_cmd = f'rmdir /s /q "{source_path}"'
+                        # Windows: 先检查是文件还是目录，然后使用对应命令
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{source_path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{source_path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(source_server, ps_check_cmd)
+
+                        is_dir = False
+                        if ps_exit == 0 and ps_stdout:
+                            result = ps_stdout.strip().upper()
+                            if result == 'DIR':
+                                is_dir = True
+                            elif result == 'NOTFOUND':
+                                emit_transfer_log(transfer_id, f'⚠️ 源文件不存在: {file_name}')
+                                return
+
+                        # 根据类型选择删除命令
+                        if is_dir:
+                            delete_cmd = f'rd /s /q "{source_path}"'
                         else:
                             delete_cmd = f'del /f /q "{source_path}"'
                     else:
                         # Linux 删除命令
                         delete_cmd = f"rm -rf '{source_path}'"
 
-                    ssh_manager.execute_command(source_server, delete_cmd)
-                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                    stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                    if exit_code == 0:
+                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                    else:
+                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
             except Exception as e:
                 emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
 
@@ -2094,12 +2166,12 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         emit_transfer_log(transfer_id, f'❌ {file_info["name"]} 传输失败: {str(e)}')
         return {'success': False, 'message': str(e)}
 
-def transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
+def transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
     """即时本地rsync传输 - 支持目录内部并行和NAS服务器"""
 
     # 如果目标是NAS服务器，使用tar+ssh方案
     if is_nas_server(target_server):
-        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
     # 检查是否启用目录内部并行
     enable_folder_parallel = PARALLEL_TRANSFER_CONFIG.get('enable_folder_parallel', False)
@@ -2111,18 +2183,18 @@ def transfer_file_via_local_rsync_instant(source_path, target_server, target_pat
             file_count = sum(len(files) for _, _, files in os.walk(source_path))
             if file_count > folder_parallel_threshold:
                 # 使用目录内部并行传输
-                return transfer_directory_parallel(source_path, target_server, target_path, file_name, transfer_id, fast_ssh)
+                return transfer_directory_parallel(source_path, target_server, target_path, file_name, transfer_id, fast_ssh, mode)
         except:
             pass  # 如果检查失败，回退到单rsync
 
     # 使用单rsync传输（原始实现）
-    return transfer_single_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh)
+    return transfer_single_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode)
 
-def transfer_single_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
+def transfer_single_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
     """单rsync传输实现"""
     # 如果目标是NAS服务器，使用tar+ssh方案
     if is_nas_server(target_server):
-        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+        return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
@@ -2215,7 +2287,7 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     # 传输成功
     return True
 
-def transfer_directory_parallel(source_path, target_server, target_path, file_name, transfer_id, fast_ssh):
+def transfer_directory_parallel(source_path, target_server, target_path, file_name, transfer_id, fast_ssh, mode='copy'):
     """目录内部并行传输实现"""
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
@@ -2344,13 +2416,13 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
     except Exception as e:
         emit_transfer_log(transfer_id, f'⚠️ 目录并行传输失败，回退到单rsync: {str(e)}')
         # 回退到单rsync传输
-        return transfer_single_rsync(source_path, target_server, target_path, file_name, True, transfer_id, fast_ssh)
+        return transfer_single_rsync(source_path, target_server, target_path, file_name, True, transfer_id, fast_ssh, mode='copy')
 
-def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
+def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
     """从远程服务器传输到TurboFile主机 - 使用rsync拉取模式"""
     # 如果源是NAS服务器，使用tar+ssh方案
     if is_nas_server(source_server):
-        return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+        return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
     source_user = SERVERS[source_server]['user']
     source_password = SERVERS[source_server].get('password')
@@ -2658,11 +2730,11 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         print(f"🚀 使用tar+ssh传输方案")
         if source_is_nas:
             print(f"📤 从NAS传输: {source_server} -> {target_server}")
-            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
         else:
             print(f"📥 传输到NAS: {source_server} -> {target_server}")
             # 源为远程服务器（可能是Windows/Linux），目标为NAS：在源侧打包，通过管道传到NAS解包
-            return transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            return transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
     print(f"🔄 使用rsync传输方案")
 
@@ -2810,14 +2882,14 @@ def transfer_file_batch(transfer_id, source_server, file_batch, target_server, t
 
     return {'completed_files': completed, 'failed_files': failed}
 
-def transfer_file_via_remote_rsync(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh):
+def transfer_file_via_remote_rsync(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
     """通过远程rsync传输文件"""
     # 如果涉及NAS服务器，使用tar+ssh方案
     if is_nas_server(source_server) or is_nas_server(target_server):
         if is_nas_server(source_server):
-            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            return transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
         else:
-            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
     target_user = SERVERS[target_server]['user']
     target_password = SERVERS[target_server].get('password')
@@ -2944,7 +3016,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                 raise Exception(f"本地到本地{operation}失败")
         elif is_local_source:
             # 🚀 本地传输模式：完全使用rsync，移除Paramiko SFTP开销
-            success = transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files)
+            success = transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files, total_files, mode)
             if not success:
                 raise Exception("本地传输失败")
         else:
@@ -2961,11 +3033,11 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         print(f"🚀 并行传输使用tar+ssh方案")
                         if source_is_nas:
                             print(f"📤 并行传输从NAS: {source_server} -> {target_server}")
-                            success = transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+                            success = transfer_file_from_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
                         else:
                             print(f"📥 并行传输到NAS: {source_server} -> {target_server}")
                             # 对于远程到NAS的传输，使用专门的远程tar+ssh方法
-                            success = transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id)
+                            success = transfer_remote_to_nas_via_tar_ssh(source_server, source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
                         if not success:
                             raise Exception("NAS tar+ssh传输失败")
@@ -3113,17 +3185,33 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     # 远程删除
                     is_windows = is_windows_server(source_server)
                     if is_windows:
-                        # Windows 删除命令
-                        if is_directory:
-                            delete_cmd = f'rmdir /s /q "{source_path}"'
+                        # Windows: 先检查是文件还是目录，然后使用对应命令
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{source_path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{source_path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(source_server, ps_check_cmd)
+
+                        is_dir = False
+                        if ps_exit == 0 and ps_stdout:
+                            result = ps_stdout.strip().upper()
+                            if result == 'DIR':
+                                is_dir = True
+                            elif result == 'NOTFOUND':
+                                emit_transfer_log(transfer_id, f'⚠️ 源文件不存在: {file_name}')
+                                return
+
+                        # 根据类型选择删除命令
+                        if is_dir:
+                            delete_cmd = f'rd /s /q "{source_path}"'
                         else:
                             delete_cmd = f'del /f /q "{source_path}"'
                     else:
                         # Linux 删除命令
                         delete_cmd = f"rm -rf '{source_path}'"
 
-                    ssh_manager.execute_command(source_server, delete_cmd)
-                    emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                    stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                    if exit_code == 0:
+                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                    else:
+                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
             except Exception as e:
                 emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
 
@@ -3903,12 +3991,12 @@ def handle_connect():
 def handle_disconnect():
     print('客户端已断开连接')
 
-def transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files=0, total_files=1):
+def transfer_file_via_local_rsync(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, completed_files=0, total_files=1, mode='copy'):
     """使用本地rsync高速传输（与原始脚本相同的方式）"""
     try:
         # 如果目标是NAS服务器，使用tar+ssh方案
         if is_nas_server(target_server):
-            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id)
+            return transfer_file_via_tar_ssh(source_path, target_server, target_path, file_name, is_directory, transfer_id, mode)
 
         target_config = SERVERS[target_server]
         target_user = target_config['user']
