@@ -279,7 +279,7 @@ class SpeedSimulator:
             edge = max(0.2, 0.25 * width)  # 边缘阈值
 
             # 🚀 性能优化：降低更新频率从10ms到100ms，减少CPU占用
-            if current_time - speed_data['last_update'] >= 0.1:  # 100ms间隔
+            if current_time - speed_data['last_update'] >= 0.5:  # 500ms间隔
                 speed_data['last_update'] = current_time
                 speed_data['trend_duration'] += 1
 
