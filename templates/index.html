@@ -2581,23 +2581,32 @@
                         if (el) el.textContent = data.total_time;
                     }
 
-
-
-
-
                     // 根据方向自动刷新对应目录，显示最新传输的文件
                     setTimeout(() => {
+                        const isMoveMode = (currentTransferMode === 'move');
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-
                                 refreshTargetAsync();
+                            }
+                            // 剪切模式下，源侧文件被删除，也需要立刻刷新源目录
+                            if (isMoveMode) {
+                                const sourceServer = document.getElementById('sourceServer').value;
+                                if (sourceServer && currentSourcePath) {
+                                    refreshSourceAsync();
+                                }
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-
                                 refreshSourceAsync();
+                            }
+                            // 剪切模式下，目标侧新增文件，也需要刷新目标目录
+                            if (isMoveMode) {
+                                const targetServer = document.getElementById('targetServer').value;
+                                if (targetServer && currentTargetPath) {
+                                    refreshTargetAsync();
+                                }
                             }
                         }
                     }, 100);
@@ -2613,21 +2622,30 @@
                         if (el) el.textContent = data.total_time;
                     }
 
-
-
-                    // 部分成功也刷新对应目录
+                    // 部分成功也刷新对应目录（剪切模式下同样需要刷新两侧，保证删除/新增都可见）
                     setTimeout(() => {
+                        const isMoveMode = (currentTransferMode === 'move');
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-
                                 refreshTargetAsync();
+                            }
+                            if (isMoveMode) {
+                                const sourceServer = document.getElementById('sourceServer').value;
+                                if (sourceServer && currentSourcePath) {
+                                    refreshSourceAsync();
+                                }
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-
                                 refreshSourceAsync();
+                            }
+                            if (isMoveMode) {
+                                const targetServer = document.getElementById('targetServer').value;
+                                if (targetServer && currentTargetPath) {
+                                    refreshTargetAsync();
+                                }
                             }
                         }
                     }, 1000);
@@ -2706,6 +2724,7 @@
                 '192.168.9.61': '/home/th',
                 '192.168.9.60': '/home/th',
                 '192.168.9.57': '/home/thgd',
+                '192.168.9.64': '/home/ubuntu',
                 '10.190.21.253': '/var/services/homes/Algorithm',  // NAS存储服务器
                 '10.190.129.29': 'C:/'  // Windows服务器默认路径（将通过API动态获取）
             };
