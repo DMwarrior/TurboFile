@@ -2344,7 +2344,8 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             print(f"📊 输出: {output}")
         if error:
             print(f"⚠️ 错误信息: {error}")
-        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒')
+        # 前端日志不再显示单个文件耗时，只提示传输完成
+        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
         if exit_status != 0:
             raise Exception(f"rsync拉取失败，退出码: {exit_status}, 错误: {error}")
         return True
@@ -3672,7 +3673,8 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             seconds = duration % 60
             time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
 
-        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成，耗时: {time_str}')
+        # 前端日志不再显示单个文件耗时，只提示传输完成
+        emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
 
         return True  # 返回成功状态
 

@@ -2568,11 +2568,17 @@
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
                     { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
 
-                    // 显示总耗时
+                    // 显示总耗时（单位：时:分:秒），将 HH:MM:SS 转成 00时:00分:00秒 格式
                     if (data.total_time) {
-                        addLogSuccess(`✅ 传输已完成 - 总耗时: ${data.total_time}`);
+                        let formattedTime = data.total_time;
+                        const parts = String(data.total_time).split(':');
+                        if (parts.length === 3) {
+                            const [h, m, s] = parts;
+                            formattedTime = `${h}时:${m}分:${s}秒`;
+                        }
+                        addLogSuccess(`✅ 传输已完成 - 总耗时: ${formattedTime}`);
                         const el = document.getElementById('elapsedTime');
-                        if (el) el.textContent = data.total_time;
+                        if (el) el.textContent = formattedTime;
                     } else {
                         addLogSuccess('✅ 传输已完成');
                     }
