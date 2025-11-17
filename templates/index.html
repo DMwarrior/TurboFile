@@ -1388,8 +1388,6 @@
             }
 
             try {
-                addLogInfo(`🗑️ 正在删除 ${selectedFiles.length} 项...`);
-
                 // 构建完整路径列表
                 const paths = selectedFiles.map(f => f.path);
 
@@ -1406,10 +1404,6 @@
 
                 // 只要有成功删除的数量，就刷新浏览区；失败项单独提示
                 if (result.success || (result.deleted_count && result.deleted_count > 0)) {
-                    if (result.deleted_count && result.deleted_count > 0) {
-                        addLogSuccess(`✅ 成功删除 ${result.deleted_count} 项`);
-                    }
-
                     // 清空选中状态
                     if (type === 'source') {
                         selectedSourceFiles = [];
@@ -2573,12 +2567,14 @@
                 if (data.status === 'success') {
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
                     { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
-                    addLogSuccess('✅ 传输已完成');
 
                     // 显示总耗时
                     if (data.total_time) {
+                        addLogSuccess(`✅ 传输已完成 - 总耗时: ${data.total_time}`);
                         const el = document.getElementById('elapsedTime');
                         if (el) el.textContent = data.total_time;
+                    } else {
+                        addLogSuccess('✅ 传输已完成');
                     }
 
                     // 根据方向自动刷新对应目录，显示最新传输的文件

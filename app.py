@@ -34,6 +34,7 @@ SERVERS = {
     "192.168.9.61": {"name": "61服务器", "user": "th", "password": "th123456"},
     "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0"},
     "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456"},
+    "192.168.9.64": {"name": "64服务器", "user": "ubuntu", "password": "asdf1234"},
     "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000},
     "10.190.129.29": {"name": "樊坤", "user": "warrior", "password": "Fkcay929", "os_type": "windows"},
     "10.190.78.30": {"name": "李园", "user": "LY981", "password": "taihe", "os_type": "windows"},
@@ -660,6 +661,20 @@ def normalize_windows_path_for_transfer(p: str) -> str:
     except Exception:
         return p
 
+# 规范化 Windows 路径用于 CMD 命令（使用反斜杠）
+def normalize_windows_path_for_cmd(p: str) -> str:
+    """将路径转换为 Windows CMD 命令可用的格式（反斜杠）"""
+    try:
+        if not p:
+            return p
+        # 先规范化为正斜杠格式
+        s = normalize_windows_path_for_transfer(p)
+        # 转换为反斜杠
+        s = s.replace('/', '\\')
+        return s
+    except Exception:
+        return p
+
 
 
 
@@ -690,10 +705,7 @@ def get_default_path(server_ip):
 
     # 其他服务器根据用户名确定默认路径
     user = server_config.get("user", "th")
-    if user == "thgd":
-        return "/home/thgd"
-    else:
-        return "/home/th"
+    return f"/home/{user}"
 
 class ParallelTransferManager:
     def __init__(self):
@@ -1613,8 +1625,12 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                     # 远程删除
                     is_windows = is_windows_server(source_server)
                     if is_windows:
-                        # Windows: 先检查是文件还是目录，然后使用对应命令
-                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{source_path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{source_path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        # Windows: 规范化路径为反斜杠格式
+                        win_path = normalize_windows_path_for_cmd(source_path)
+
+                        # 使用 PowerShell 检查是否为目录
+                        ps_path = win_path.replace('\\', '\\\\')
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \'{ps_path}\' -PathType Container) {{ Write-Output \'DIR\' }} elseif (Test-Path -Path \'{ps_path}\' -PathType Leaf) {{ Write-Output \'FILE\' }} else {{ Write-Output \'NOTFOUND\' }}"'
                         ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(source_server, ps_check_cmd)
 
                         is_dir = False
@@ -1626,22 +1642,25 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                                 emit_transfer_log(transfer_id, f'⚠️ 源文件不存在: {file_name}')
                                 return
 
-                        # 根据类型选择删除命令
+                        # 根据类型选择删除命令（使用 CMD 命令）
                         if is_dir:
-                            delete_cmd = f'rd /s /q "{source_path}"'
+                            delete_cmd = f'rd /s /q "{win_path}"'
                         else:
-                            delete_cmd = f'del /f /q "{source_path}"'
+                            delete_cmd = f'del /f /q "{win_path}"'
+
+                        emit_transfer_log(transfer_id, f'🗑️ 执行Windows删除命令: {delete_cmd}')
                     else:
                         # Linux 删除命令
                         delete_cmd = f"rm -rf '{source_path}'"
+                        emit_transfer_log(transfer_id, f'🗑️ 执行Linux删除命令: {delete_cmd}')
 
                     stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
                     if exit_code == 0:
-                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                        emit_transfer_log(transfer_id, f'✅ 已删除源文件: {file_name}')
                     else:
-                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
+                        emit_transfer_log(transfer_id, f'❌ 删除源文件失败: {stderr}')
             except Exception as e:
-                emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
+                emit_transfer_log(transfer_id, f'❌ 删除源文件异常: {str(e)}')
 
         emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
 
@@ -2386,7 +2405,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         print(f"📊 输出: {output}")
     if error:
         print(f"⚠️ 错误信息: {error}")
-    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成 - 耗时: {transfer_duration:.2f}秒')
+    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
     if exit_status != 0:
         raise Exception(f"rsync传输失败，退出码: {exit_status}, 错误: {error}")
     return True
@@ -2680,24 +2699,11 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     if exit_status != 0:
                         raise Exception(f"传输 {file_name} 失败: {error}")
 
-                    # 计算传输耗时
+                    # 计算传输耗时（仅用于日志记录，不显示在UI）
                     end_time = time.time()
                     duration = end_time - start_time
 
-                    # 格式化耗时显示
-                    if duration < 60:
-                        time_str = f"{duration:.1f}秒"
-                    elif duration < 3600:
-                        minutes = int(duration // 60)
-                        seconds = duration % 60
-                        time_str = f"{minutes}分{seconds:.1f}秒"
-                    else:
-                        hours = int(duration // 3600)
-                        minutes = int((duration % 3600) // 60)
-                        seconds = duration % 60
-                        time_str = f"{hours}小时{minutes}分{seconds:.1f}秒"
-
-                    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成，耗时: {time_str}')
+                    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
 
         completed_files += 1
 
@@ -2719,8 +2725,12 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                     # 远程删除
                     is_windows = is_windows_server(source_server)
                     if is_windows:
-                        # Windows: 先检查是文件还是目录，然后使用对应命令
-                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{source_path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{source_path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        # Windows: 规范化路径为反斜杠格式
+                        win_path = normalize_windows_path_for_cmd(source_path)
+
+                        # 使用 PowerShell 检查是否为目录
+                        ps_path = win_path.replace('\\', '\\\\')
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \'{ps_path}\' -PathType Container) {{ Write-Output \'DIR\' }} elseif (Test-Path -Path \'{ps_path}\' -PathType Leaf) {{ Write-Output \'FILE\' }} else {{ Write-Output \'NOTFOUND\' }}"'
                         ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(source_server, ps_check_cmd)
 
                         is_dir = False
@@ -2732,22 +2742,25 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                                 emit_transfer_log(transfer_id, f'⚠️ 源文件不存在: {file_name}')
                                 return
 
-                        # 根据类型选择删除命令
+                        # 根据类型选择删除命令（使用 CMD 命令）
                         if is_dir:
-                            delete_cmd = f'rd /s /q "{source_path}"'
+                            delete_cmd = f'rd /s /q "{win_path}"'
                         else:
-                            delete_cmd = f'del /f /q "{source_path}"'
+                            delete_cmd = f'del /f /q "{win_path}"'
+
+                        emit_transfer_log(transfer_id, f'🗑️ 执行Windows删除命令: {delete_cmd}')
                     else:
                         # Linux 删除命令
                         delete_cmd = f"rm -rf '{source_path}'"
+                        emit_transfer_log(transfer_id, f'🗑️ 执行Linux删除命令: {delete_cmd}')
 
                     stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
                     if exit_code == 0:
-                        emit_transfer_log(transfer_id, f'🗑️ 已删除源文件: {file_name}')
+                        emit_transfer_log(transfer_id, f'✅ 已删除源文件: {file_name}')
                     else:
-                        emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {stderr}')
+                        emit_transfer_log(transfer_id, f'❌ 删除源文件失败: {stderr}')
             except Exception as e:
-                emit_transfer_log(transfer_id, f'⚠️ 删除源文件失败: {str(e)}')
+                emit_transfer_log(transfer_id, f'❌ 删除源文件异常: {str(e)}')
 
     # 结束传输计时
     total_time = time_tracker.end_transfer(transfer_id)
@@ -3291,13 +3304,13 @@ def delete_files():
                 else:
                     # 远程删除
                     if is_windows:
-                        # Windows: 先检查是文件还是目录，然后使用对应命令
-                        # 使用 dir 命令检查路径属性
-                        check_cmd = f'dir /a /b "{path}" 2>nul && echo EXISTS || echo NOTEXISTS'
-                        check_stdout, check_stderr, check_exit = ssh_manager.execute_command(server_ip, check_cmd)
+                        # Windows: 规范化路径为反斜杠格式
+                        win_path = normalize_windows_path_for_cmd(path)
 
                         # 使用 PowerShell 检查是否为目录（更可靠）
-                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \\"{path}\\" -PathType Container) {{ Write-Output \\"DIR\\" }} elseif (Test-Path -Path \\"{path}\\" -PathType Leaf) {{ Write-Output \\"FILE\\" }} else {{ Write-Output \\"NOTFOUND\\" }}"'
+                        # PowerShell 中路径需要转义反斜杠
+                        ps_path = win_path.replace('\\', '\\\\')
+                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \'{ps_path}\' -PathType Container) {{ Write-Output \'DIR\' }} elseif (Test-Path -Path \'{ps_path}\' -PathType Leaf) {{ Write-Output \'FILE\' }} else {{ Write-Output \'NOTFOUND\' }}"'
                         ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(server_ip, ps_check_cmd)
 
                         is_dir = False
@@ -3309,20 +3322,24 @@ def delete_files():
                                 failed_items.append({'path': path, 'error': '路径不存在'})
                                 continue
 
-                        # 根据类型选择删除命令
+                        # 根据类型选择删除命令（使用 CMD 命令，路径用反斜杠）
                         if is_dir:
                             # 目录：使用 rd /s /q
-                            delete_cmd = f'rd /s /q "{path}"'
+                            delete_cmd = f'rd /s /q "{win_path}"'
                         else:
                             # 文件：使用 del /f /q
-                            delete_cmd = f'del /f /q "{path}"'
+                            delete_cmd = f'del /f /q "{win_path}"'
 
+                        print(f"🗑️ Windows删除命令: {delete_cmd}")
                         stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
 
                         if exit_code == 0:
                             deleted_count += 1
+                            print(f"✅ 成功删除: {win_path}")
                         else:
-                            failed_items.append({'path': path, 'error': stderr or '删除失败'})
+                            error_msg = stderr or '删除失败'
+                            print(f"❌ 删除失败: {win_path}, 错误: {error_msg}")
+                            failed_items.append({'path': path, 'error': error_msg})
                     else:
                         # Linux/NAS: 使用 rm -rf
                         rm_cmd = f'rm -rf "{path.replace(chr(34), chr(92)+chr(34))}"'
