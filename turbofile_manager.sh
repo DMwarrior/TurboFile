@@ -50,11 +50,24 @@ show_status() {
 start_service() {
     echo -e "${YELLOW}🚀 启动TurboFile服务...${NC}"
     sudo systemctl start $SERVICE_NAME
-    
+
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ 服务启动成功${NC}"
-        sleep 2
-        show_status
+        echo -e "${GREEN}✅ 服务启动命令已执行${NC}"
+        echo -e "${YELLOW}⏳ 等待服务完全启动...${NC}"
+
+        # 等待最多10秒，检查服务是否真正启动
+        for i in {1..10}; do
+            sleep 1
+            if systemctl is-active --quiet $SERVICE_NAME; then
+                echo -e "${GREEN}✅ 服务已成功启动 (耗时 ${i}秒)${NC}"
+                sleep 1  # 再等1秒确保端口监听
+                show_status
+                return 0
+            fi
+        done
+
+        echo -e "${RED}❌ 服务启动超时${NC}"
+        sudo systemctl status $SERVICE_NAME
     else
         echo -e "${RED}❌ 服务启动失败${NC}"
         sudo systemctl status $SERVICE_NAME
@@ -132,7 +145,19 @@ stop_service() {
     sudo systemctl stop $SERVICE_NAME
 
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ 服务停止成功${NC}"
+        echo -e "${GREEN}✅ systemd服务已停止${NC}"
+
+        # 清理可能残留的进程
+        echo -e "${YELLOW}🧹 清理残留进程...${NC}"
+        pids=$(ps aux | grep "python.*app.py" | grep -v grep | awk '{print $2}')
+        if [ -n "$pids" ]; then
+            echo -e "${YELLOW}发现残留进程: $pids${NC}"
+            echo "$pids" | xargs -r kill -9 2>/dev/null
+            sleep 1
+            echo -e "${GREEN}✅ 残留进程已清理${NC}"
+        else
+            echo -e "${GREEN}✅ 无残留进程${NC}"
+        fi
     else
         echo -e "${RED}❌ 服务停止失败${NC}"
     fi
@@ -153,14 +178,54 @@ restart_service() {
         fi
     fi
 
-    sudo systemctl restart $SERVICE_NAME
+    # 先停止systemd服务
+    echo -e "${YELLOW}🛑 停止systemd服务...${NC}"
+    sudo systemctl stop $SERVICE_NAME
+    sleep 1
+
+    # 清理所有可能残留的Python进程（占用5000端口）
+    echo -e "${YELLOW}🧹 清理残留进程...${NC}"
+    pids=$(ps aux | grep "python.*app.py" | grep -v grep | awk '{print $2}')
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}发现残留进程: $pids${NC}"
+        echo "$pids" | xargs -r kill -9 2>/dev/null
+        sleep 1
+    fi
+
+    # 确认端口已释放
+    if ss -tlnp | grep -q ":5000"; then
+        echo -e "${RED}⚠️  端口5000仍被占用，尝试强制释放...${NC}"
+        port_pid=$(ss -tlnp | grep ":5000" | grep -oP 'pid=\K[0-9]+' | head -1)
+        if [ -n "$port_pid" ]; then
+            kill -9 $port_pid 2>/dev/null
+            sleep 1
+        fi
+    fi
+
+    # 启动服务
+    echo -e "${YELLOW}🚀 启动服务...${NC}"
+    sudo systemctl start $SERVICE_NAME
 
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ 服务重启成功${NC}"
-        sleep 2
-        show_status
+        echo -e "${GREEN}✅ 服务启动命令已执行${NC}"
+        echo -e "${YELLOW}⏳ 等待服务完全启动...${NC}"
+
+        # 等待最多10秒，检查服务是否真正启动
+        for i in {1..10}; do
+            sleep 1
+            if systemctl is-active --quiet $SERVICE_NAME; then
+                echo -e "${GREEN}✅ 服务已成功重启 (耗时 ${i}秒)${NC}"
+                sleep 1  # 再等1秒确保端口监听
+                show_status
+                return 0
+            fi
+        done
+
+        echo -e "${RED}❌ 服务重启超时${NC}"
+        echo -e "${YELLOW}📋 查看最近日志：${NC}"
+        sudo journalctl -u $SERVICE_NAME -n 20 --no-pager
     else
-        echo -e "${RED}❌ 服务重启失败${NC}"
+        echo -e "${RED}❌ 服务启动失败${NC}"
         sudo systemctl status $SERVICE_NAME
     fi
 }
