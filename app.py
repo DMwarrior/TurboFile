@@ -720,7 +720,8 @@ class ParallelTransferManager:
             except:
                 return 0
         else:
-            output, error, _ = ssh_manager.execute_command(server_ip, f"stat -c%s '{file_path}' 2>/dev/null || echo 0")
+            # 使用 shlex.quote() 安全转义路径
+            output, error, _ = ssh_manager.execute_command(server_ip, f"stat -c%s {shlex.quote(file_path)} 2>/dev/null || echo 0")
             try:
                 return int(output.strip())
             except:
@@ -761,7 +762,8 @@ class ParallelTransferManager:
             # 远程目录分析
             print(f"🌐 远程目录分析: {source_server}:{dir_path}")
             try:
-                cmd = f"find '{dir_path}' -type f -exec stat -c '%n %s' {{}} \\;"
+                # 使用 shlex.quote() 安全转义路径
+                cmd = f"find {shlex.quote(dir_path)} -type f -exec stat -c '%n %s' {{}} \\;"
                 print(f"🔧 执行命令: {cmd}")
                 output, error, _ = ssh_manager.execute_command(source_server, cmd)
 
@@ -1185,7 +1187,8 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
         else:
             # Linux服务器使用ls命令
             # 使用ls -la命令以便正确识别符号链接和隐藏文件
-            command = f"ls -la '{path}' | tail -n +2"  # 总是使用-a选项以获取完整信息
+            # 使用 shlex.quote() 安全转义路径
+            command = f"ls -la {shlex.quote(path)} | tail -n +2"  # 总是使用-a选项以获取完整信息
 
             output, error, _ = ssh_manager.execute_command(server_ip, command)
 
@@ -1650,8 +1653,8 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
 
                         emit_transfer_log(transfer_id, f'🗑️ 执行Windows删除命令: {delete_cmd}')
                     else:
-                        # Linux 删除命令
-                        delete_cmd = f"rm -rf '{source_path}'"
+                        # Linux 删除命令 - 使用 shlex.quote() 安全转义路径
+                        delete_cmd = f"rm -rf {shlex.quote(source_path)}"
                         emit_transfer_log(transfer_id, f'🗑️ 执行Linux删除命令: {delete_cmd}')
 
                     stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
@@ -2751,8 +2754,8 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                         emit_transfer_log(transfer_id, f'🗑️ 执行Windows删除命令: {delete_cmd}')
                     else:
-                        # Linux 删除命令
-                        delete_cmd = f"rm -rf '{source_path}'"
+                        # Linux 删除命令 - 使用 shlex.quote() 安全转义路径
+                        delete_cmd = f"rm -rf {shlex.quote(source_path)}"
                         emit_transfer_log(transfer_id, f'🗑️ 执行Linux删除命令: {delete_cmd}')
 
                     stdout, stderr, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
@@ -3342,8 +3345,8 @@ def delete_files():
                             print(f"❌ 删除失败: {win_path}, 错误: {error_msg}")
                             failed_items.append({'path': path, 'error': error_msg})
                     else:
-                        # Linux/NAS: 使用 rm -rf
-                        rm_cmd = f'rm -rf "{path.replace(chr(34), chr(92)+chr(34))}"'
+                        # Linux/NAS: 使用 rm -rf - 使用 shlex.quote() 安全转义路径
+                        rm_cmd = f'rm -rf {shlex.quote(path)}'
                         stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
 
                         if exit_code == 0:
@@ -3411,8 +3414,8 @@ def create_folder():
                 # Windows: 使用 mkdir
                 mkdir_cmd = f'mkdir "{full_path}"'
             else:
-                # Linux/NAS: 使用 mkdir -p
-                mkdir_cmd = f'mkdir -p "{full_path.replace(chr(34), chr(92)+chr(34))}"'
+                # Linux/NAS: 使用 mkdir -p - 使用 shlex.quote() 安全转义路径
+                mkdir_cmd = f'mkdir -p {shlex.quote(full_path)}'
 
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, mkdir_cmd)
 
@@ -3461,7 +3464,8 @@ def rename_file():
             if is_windows:
                 check_cmd = f'if exist "{new_path}" (echo EXISTS) else (echo NOTEXISTS)'
             else:
-                check_cmd = f'test -e "{new_path.replace(chr(34), chr(92)+chr(34))}" && echo EXISTS || echo NOTEXISTS'
+                # Linux/NAS: 使用 shlex.quote() 安全转义路径
+                check_cmd = f'test -e {shlex.quote(new_path)} && echo EXISTS || echo NOTEXISTS'
 
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, check_cmd)
             if stdout and 'EXISTS' in stdout:
@@ -3479,10 +3483,8 @@ def rename_file():
                 # 为了支持路径中的空格和特殊字符，使用 move 命令
                 rename_cmd = f'move /Y "{old_path}" "{new_path}"'
             else:
-                # Linux/NAS: 使用 mv 命令
-                old_escaped = old_path.replace('"', '\\"')
-                new_escaped = new_path.replace('"', '\\"')
-                rename_cmd = f'mv "{old_escaped}" "{new_escaped}"'
+                # Linux/NAS: 使用 mv 命令 - 使用 shlex.quote() 安全转义路径
+                rename_cmd = f'mv {shlex.quote(old_path)} {shlex.quote(new_path)}'
 
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rename_cmd)
 
