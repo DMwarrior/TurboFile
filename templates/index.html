@@ -2508,10 +2508,12 @@
         socket.on('transfer_log', function(data) {
             if (data.transfer_id === currentTransferId) {
                 const msg = data.message || '';
-                const keep = msg.startsWith('📤 源:') || msg.startsWith('📥 目标:') || msg.startsWith('📋 文件:') || (msg.includes('✅') && (msg.includes('传输完成') || msg.includes('完成')));
+                const keep = msg.startsWith('📤 源:') || msg.startsWith('📥 目标:') || msg.startsWith('📋 文件:') || msg.startsWith('❌') || (msg.includes('✅') && (msg.includes('传输完成') || msg.includes('完成')));
                 if (keep) {
                     if (msg.includes('✅')) {
                         addLogSuccess(msg);
+                    } else if (msg.startsWith('❌')) {
+                        addLogError(msg);
                     } else {
                         addLogInfo(msg);
                     }
@@ -2623,6 +2625,16 @@
                         const el = document.getElementById('elapsedTime');
                         if (el) el.textContent = data.total_time;
                     }
+
+                        if (data.total_time) {
+                            addLogWarning(`🔶 传输部分完成 - 总耗时: ${data.total_time}`);
+                        } else {
+                            addLogWarning('🔶 传输部分完成（存在失败项目）');
+                        }
+                        if (data.message) {
+                            addLogWarning(`详情: ${data.message}`);
+                        }
+
 
                     // 部分成功也刷新对应目录（剪切模式下同样需要刷新两侧，保证删除/新增都可见）
                     setTimeout(() => {

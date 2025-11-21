@@ -1698,7 +1698,26 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
         except Exception:
             pass
 
-        emit_transfer_log(transfer_id, f'❌ {file_info["name"]} 传输失败: {str(e)}')
+        # 向前端明确输出失败的源/目标完整路径，便于快速定位问题文件
+        try:
+            failed_source_path = source_path if 'source_path' in locals() else file_info.get('path', '')
+        except Exception:
+            failed_source_path = ''
+        try:
+            failed_target_full = _log_target_full_path if '_log_target_full_path' in locals() else _join_target_full_path_for_log(target_server, target_path, file_info.get('name', ''))
+        except Exception:
+            failed_target_full = ''
+        failed_name = ''
+        try:
+            if isinstance(file_info, dict):
+                failed_name = file_info.get('name', '')
+        except Exception:
+            failed_name = ''
+
+        emit_transfer_log(
+            transfer_id,
+            f'❌ 传输失败: {failed_name or "[未知名称]"} | 源: {source_server}:{failed_source_path} -> 目标: {target_server}:{failed_target_full} | 错误: {str(e)}'
+        )
         return {'success': False, 'message': str(e)}
 
 def transfer_file_via_local_rsync_instant(source_path, target_server, target_path, file_name, is_directory, transfer_id, fast_ssh, mode='copy'):
