@@ -112,6 +112,10 @@ ssh_connections = {}
 active_transfers = {}
 transfer_processes = {}  # 存储传输进程，用于取消操作
 
+# 僵尸传输清理配置
+TRANSFER_WATCHDOG_INTERVAL = 60  # 秒，后台巡检间隔
+STALE_TRANSFER_TIMEOUT = 12 * 3600  # 秒，超过该时长且无活跃进程则视为僵尸任务
+
 # 并行传输配置
 PARALLEL_TRANSFER_CONFIG = {
     'max_workers': 8,  # 最大并行传输数
@@ -439,6 +443,69 @@ class ProgressManager:
                 del self.transfer_progress[transfer_id]
 
 progress_manager = ProgressManager()
+
+def _is_transfer_process_active(proc_info):
+    """判断记录的传输进程是否仍在运行。"""
+    try:
+        ptype = proc_info.get('type')
+        if ptype == 'subprocess':
+            proc = proc_info.get('process')
+            return proc is not None and proc.poll() is None
+        if ptype == 'ssh':
+            ch = proc_info.get('channel')
+            return ch is not None and not ch.exit_status_ready()
+    except Exception:
+        return False
+    return False
+
+
+def _cleanup_transfer_state(transfer_id):
+    """统一清理传输相关状态，避免残留僵尸任务。"""
+    if transfer_id in active_transfers:
+        del active_transfers[transfer_id]
+    if transfer_id in transfer_processes:
+        del transfer_processes[transfer_id]
+    progress_manager.cleanup_transfer(transfer_id)
+    speed_simulator.cleanup_transfer(transfer_id)
+
+
+def start_transfer_watchdog():
+    """后台清理器：定期剔除超时且无活跃进程的任务。"""
+    def watchdog():
+        while True:
+            try:
+                time.sleep(TRANSFER_WATCHDOG_INTERVAL)
+                now = datetime.now()
+                stale_ids = []
+                for tid, meta in list(active_transfers.items()):
+                    start_ts = meta.get('start_time')
+                    try:
+                        age = (now - start_ts).total_seconds() if isinstance(start_ts, datetime) else max(0, time.time() - float(start_ts))
+                    except Exception:
+                        age = 0
+
+                    if age < STALE_TRANSFER_TIMEOUT:
+                        continue
+
+                    proc_info = transfer_processes.get(tid)
+                    if proc_info and _is_transfer_process_active(proc_info):
+                        # 进程仍在跑，跳过
+                        continue
+
+                    # 超时且无活跃进程，判定为僵尸任务
+                    stale_ids.append(tid)
+
+                for tid in stale_ids:
+                    print(f"[WATCHDOG] 清理疑似僵尸传输任务: {tid}")
+                    _cleanup_transfer_state(tid)
+            except Exception as e:
+                print(f"[WATCHDOG] 传输清理器异常: {e}")
+                continue
+
+    t = threading.Thread(target=watchdog, daemon=True)
+    t.start()
+
+start_transfer_watchdog()
 
 class SSHManager:
     def __init__(self):
@@ -2234,23 +2301,25 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
         # 通过SSH执行命令
         try:
-            output, error, _ = ssh_manager.execute_command(source_server, remote_cmd)
+            output, error, exit_code = ssh_manager.execute_command(source_server, remote_cmd)
 
             # 检查命令执行结果
             if mode == 'move':
                 # 剪切模式的成功判断
                 if is_windows:
                     # Windows move命令成功时通常没有输出
-                    if error and 'cannot find' in error.lower():
-                        print(f"[ERROR] move失败: {error}")
-                        raise Exception(f"move剪切失败: {error}")
+                    if exit_code != 0 or (error and 'cannot find' in error.lower()):
+                        err_msg = error or f"exit_code={exit_code}"
+                        print(f"[ERROR] move失败: {err_msg}")
+                        raise Exception(f"move剪切失败: {err_msg}")
                     else:
                         print(f"[DEBUG] move成功")
                 else:
                     # Linux mv命令成功时没有输出
-                    if error:
-                        print(f"[ERROR] mv失败: {error}")
-                        raise Exception(f"mv剪切失败: {error}")
+                    if exit_code != 0:
+                        err_msg = error or f"exit_code={exit_code}"
+                        print(f"[ERROR] mv失败: {err_msg}")
+                        raise Exception(f"mv剪切失败: {err_msg}")
                     else:
                         print(f"[DEBUG] mv成功")
 
@@ -2259,16 +2328,21 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
                 # 复制模式的成功判断
                 if is_windows:
                     # robocopy的输出包含统计信息，检查是否有错误
-                    if error and 'error' in error.lower():
-                        print(f"[ERROR] robocopy失败: {error}")
-                        raise Exception(f"robocopy复制失败: {error}")
+                    # robocopy 0-7 视为成功，8及以上为失败
+                    if exit_code is None:
+                        exit_code = -1
+                    if exit_code >= 8 or (error and 'error' in error.lower()):
+                        err_msg = error or f"exit_code={exit_code}"
+                        print(f"[ERROR] robocopy失败: {err_msg}")
+                        raise Exception(f"robocopy复制失败: {err_msg}")
                     else:
                         print(f"[DEBUG] robocopy成功")
                 else:
                     # Linux cp命令成功时没有输出
-                    if error:
-                        print(f"[ERROR] cp失败: {error}")
-                        raise Exception(f"cp复制失败: {error}")
+                    if exit_code != 0:
+                        err_msg = error or f"exit_code={exit_code}"
+                        print(f"[ERROR] cp失败: {err_msg}")
+                        raise Exception(f"cp复制失败: {err_msg}")
                     else:
                         print(f"[DEBUG] cp成功")
 
