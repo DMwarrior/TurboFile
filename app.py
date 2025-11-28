@@ -977,6 +977,30 @@ parallel_manager = ParallelTransferManager()
 file_cache = {}
 cache_timeout = 120  # 缓存120秒，大幅提升重复访问速度
 instant_cache_timeout = 300  # 立即访问缓存5分钟，优化双击体验
+BROWSE_PAGE_SIZE_DEFAULT = 400  # 默认分页大小，避免一次性返回过多数据导致前端卡顿
+BROWSE_PAGE_SIZE_MAX = 2000    # 单次最大返回数量硬上限
+BROWSE_PAGE_SIZE_MIN = 100     # 单次最小返回数量，保证滚动流畅度
+
+def _natural_sort_key(name: str):
+    """生成自然排序key，数字按数值排序，其他按不区分大小写排序"""
+    try:
+        parts = re.split(r'(\d+)', name)
+        return [int(p) if p.isdigit() else p.lower() for p in parts]
+    except Exception:
+        return [name.lower()]
+
+def sort_file_items(items):
+    """按照WinSCP风格排序：目录优先，其次名称自然排序"""
+    try:
+        return sorted(
+            items,
+            key=lambda x: (
+                0 if x.get('is_directory') else 1,
+                _natural_sort_key(x.get('name', ''))
+            )
+        )
+    except Exception:
+        return items
 
 def get_cache_key(server_ip, path, show_hidden):
     """生成缓存键"""
@@ -1153,7 +1177,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "size": size,
                     "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
                 })
-            # 缓存结果
+            items = sort_file_items(items)
             set_cached_listing(server_ip, path, show_hidden, items)
             return items
         except Exception:
@@ -1248,7 +1272,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                         "modified": f"{date_str} {full_time}"
                     })
 
-            # 缓存结果
+            items = sort_file_items(items)
             set_cached_listing(server_ip, path, show_hidden, items)
             return items
         else:
@@ -1324,7 +1348,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "modified": ' '.join(date_parts)
                 })
 
-            # 缓存结果
+            items = sort_file_items(items)
             set_cached_listing(server_ip, path, show_hidden, items)
             return items
 
@@ -1372,7 +1396,7 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
                         # 跳过无法访问的文件
                         continue
 
-            # 缓存结果
+            items = sort_file_items(items)
             set_cached_listing(server_ip, path, show_hidden, items)
             return items
         except Exception:
@@ -3167,6 +3191,18 @@ def browse_directory(server_ip):
     path = request.args.get('path', default_path)
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
     force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+    try:
+        offset = int(request.args.get('offset', 0))
+    except ValueError:
+        offset = 0
+    try:
+        limit = int(request.args.get('limit', BROWSE_PAGE_SIZE_DEFAULT))
+    except ValueError:
+        limit = BROWSE_PAGE_SIZE_DEFAULT
+
+    # 规范化分页参数
+    offset = max(offset, 0)
+    limit = max(BROWSE_PAGE_SIZE_MIN, min(limit, BROWSE_PAGE_SIZE_MAX))
 
     # 性能监控
     start_time = time.time()
@@ -3180,6 +3216,13 @@ def browse_directory(server_ip):
 
         # 获取目录列表（如果清除了缓存，将重新获取）
         files = get_directory_listing_optimized(server_ip, path, show_hidden)
+        total_count = len(files)
+
+        # 分页切片
+        start_index = min(offset, total_count)
+        end_index = min(start_index + limit, total_count)
+        paged_files = files[start_index:end_index]
+        has_more = end_index < total_count
 
         end_time = time.time()
         response_time = (end_time - start_time) * 1000  # 转换为毫秒
@@ -3187,12 +3230,18 @@ def browse_directory(server_ip):
         return jsonify({
             'success': True,
             'path': path,
-            'files': files,
+            'files': paged_files,
             'show_hidden': show_hidden,
             'force_refresh': force_refresh,
             'cache_cleared': cleared_count if force_refresh else 0,
             'response_time': round(response_time, 2),  # 添加响应时间信息
-            'file_count': len(files)
+            'file_count': total_count,
+            'total_count': total_count,
+            'offset': start_index,
+            'limit': limit,
+            'has_more': has_more,
+            'next_offset': end_index if has_more else None,
+            'loaded_count': end_index
         })
     except Exception as e:
         end_time = time.time()
