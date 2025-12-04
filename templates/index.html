@@ -1713,9 +1713,7 @@
                     });
                     updateFileCountDisplay(isSource, state.loadedCount, total);
 
-                    if (isReset) {
-                        addLogInfo(`📁 已加载${isSource ? '源' : '目标'}目录: ${targetPath}（分页展示，首批 ${pageFiles.length} 项）`);
-                    }
+                    // 加载目录的提示不再写入日志，保持日志干净
                     if (state.hasMore) {
                         setTimeout(() => handleScrollLoadMore(isSource), 0);
                     }

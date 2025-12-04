@@ -216,6 +216,40 @@ def _join_target_full_path_for_log(target_server: str, base_path: str, name: str
         # 兜底：简单拼接
         return f"{base_path}/{name}"
 
+def _get_client_ip() -> str:
+    """提取客户端IP（兼容反向代理）。"""
+    try:
+        import re as _re
+        def _extract_ipv4(s: str):
+            if not s:
+                return None
+            first = s.split(',')[0].strip()
+            m = _re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
+            return m.group(1) if m else None
+
+        candidates = [
+            request.headers.get('X-Forwarded-For', ''),
+            request.headers.get('X-Real-IP', ''),
+            request.remote_addr
+        ]
+        for c in candidates:
+            ip = _extract_ipv4(c)
+            if ip:
+                return ip
+    except Exception:
+        pass
+    return '未知'
+
+def _hhmmss_to_seconds(time_str: str) -> float:
+    try:
+        parts = str(time_str).split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+    except Exception:
+        pass
+    return 0.0
+
 
 def append_transfer_log_record(source_ip: str,
                                target_ip: str,
@@ -223,16 +257,24 @@ def append_transfer_log_record(source_ip: str,
                                target_full_path: str,
                                duration_sec: float,
                                status: str,
-                               error: str = "") -> None:
-    """将一次传输记录按行写入日志文件，字段精简且可解析。
-    字段：timestamp, source_ip, target_ip, source_path, target_path, duration_sec, status, error
+                               error: str = "",
+                               client_ip: str = "",
+                               mode: str = "",
+                               file_name: str = "",
+                               action: str = "transfer") -> None:
+    """将一次传输记录按行写入日志文件。
+    字段：timestamp, action, client_ip, source_ip, target_ip, source_path, target_path, file, mode, duration_sec, status, error
     """
     record = {
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'action': action or 'transfer',
+        'client_ip': client_ip or '未知',
         'source_ip': _normalize_ip_for_log(source_ip),
         'target_ip': _normalize_ip_for_log(target_ip),
         'source_path': source_path,
         'target_path': target_full_path,
+        'file': file_name or '',
+        'mode': mode or '',
         'duration_sec': round(float(duration_sec), 3),
         'status': 'success' if status.lower() == 'success' else 'failure'
     }
@@ -1461,6 +1503,34 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
 
 def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True):
     """启动即时并行传输任务 - 无预分析，立即开始"""
+    def _log_transfer_summary(status: str, total_time: str = "", error: str = ""):
+        meta = active_transfers.get(transfer_id, {})
+        client_ip = meta.get('client_ip', '未知')
+        src_server = meta.get('source_server', source_server)
+        tgt_server = meta.get('target_server', target_server)
+        target_base = meta.get('target_path', target_path)
+        files = meta.get('source_files', source_files)
+        if isinstance(files, list):
+            file_names = ','.join([f.get('name', '') for f in files if isinstance(f, dict)])
+            source_paths = ';'.join([f.get('path', '') for f in files if isinstance(f, dict)])
+        else:
+            file_names = ''
+            source_paths = ''
+
+        append_transfer_log_record(
+            source_ip=src_server,
+            target_ip=tgt_server,
+            source_path=source_paths or target_base,
+            target_full_path=target_base,
+            duration_sec=_hhmmss_to_seconds(total_time),
+            status=status,
+            error=error,
+            client_ip=client_ip,
+            mode=meta.get('mode', mode),
+            file_name=file_names or (files[0].get('name', '') if isinstance(files, list) and files else ''),
+            action='transfer'
+        )
+
     def transfer_worker():
         try:
             total_files = len(source_files)
@@ -1600,6 +1670,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                     'message': f'成功传输 {completed_count} 个文件/文件夹',
                     'total_time': total_time
                 })
+                _log_transfer_summary('success', total_time)
 
         except Exception as e:
             # 即使传输失败，也要计算并显示总耗时
@@ -1615,6 +1686,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 'message': str(e),
                 'total_time': total_time
             })
+            try:
+                _log_transfer_summary('failure', total_time, str(e))
+            except Exception:
+                pass
         finally:
             # 清理传输记录
             if transfer_id in active_transfers:
@@ -1632,6 +1707,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 def transfer_single_file_instant(transfer_id, source_server, file_info, target_server, target_path, mode="copy", fast_ssh=True):
     """即时传输单个文件或目录 - 无预分析"""
     try:
+        transfer_meta = active_transfers.get(transfer_id, {})
+        _client_ip_for_log = transfer_meta.get('client_ip', '未知')
+        _mode_for_log = transfer_meta.get('mode', mode)
+
         source_path = file_info['path']
         file_name = file_info['name']
         is_directory = file_info['is_directory']
@@ -1755,7 +1834,10 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                 target_full_path=_log_target_full_path,
                 duration_sec=(time.time() - _file_transfer_start_ts),
                 status='success',
-                error=""
+                error="",
+                client_ip=_client_ip_for_log,
+                mode=_mode_for_log,
+                file_name=file_name
             )
         except Exception:
             pass
@@ -1772,7 +1854,10 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                 target_full_path=_log_target_full_path if '_log_target_full_path' in locals() else _join_target_full_path_for_log(target_server, target_path, file_info.get('name', '')),
                 duration_sec=(time.time() - _file_transfer_start_ts) if '_file_transfer_start_ts' in locals() else 0.0,
                 status='failure',
-                error=str(e)
+                error=str(e),
+                client_ip=_client_ip_for_log,
+                mode=_mode_for_log,
+                file_name=file_info.get('name', '')
             )
         except Exception:
             pass
@@ -2887,6 +2972,36 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
         'total_time': total_time
     })
 
+    # 写入汇总日志
+    try:
+        meta = active_transfers.get(transfer_id, {})
+        client_ip = meta.get('client_ip', '未知')
+        target_base = meta.get('target_path', target_path)
+        mode_meta = meta.get('mode', mode)
+        files_meta = meta.get('source_files', source_files)
+        if isinstance(files_meta, list):
+            file_names = ','.join([f.get('name', '') for f in files_meta if isinstance(f, dict)])
+            source_paths = ';'.join([f.get('path', '') for f in files_meta if isinstance(f, dict)])
+        else:
+            file_names = ''
+            source_paths = ''
+
+        append_transfer_log_record(
+            source_ip=source_server,
+            target_ip=target_server,
+            source_path=source_paths or target_base,
+            target_full_path=target_base,
+            duration_sec=_hhmmss_to_seconds(total_time),
+            status='success',
+            error="",
+            client_ip=client_ip,
+            mode=mode_meta,
+            file_name=file_names or (files_meta[0].get('name', '') if isinstance(files_meta, list) and files_meta else ''),
+            action='transfer'
+        )
+    except Exception:
+        pass
+
 def format_file_size(bytes_str):
     """将字节数转换为人性化的文件大小显示"""
     try:
@@ -3249,28 +3364,7 @@ def handle_start_transfer(data):
     PARALLEL_TRANSFER_CONFIG['enable_parallel'] = data.get('parallel_transfer', True)
 
     # 获取客户端IP
-    import re
-    def _extract_ipv4(s: str):
-        if not s:
-            return None
-        first = s.split(',')[0].strip()
-        m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
-        return m.group(1) if m else None
-
-    candidates = [
-        request.headers.get('X-Forwarded-For', ''),
-        request.headers.get('X-Real-IP', ''),
-        request.remote_addr
-    ]
-    client_ip = None
-    for c in candidates:
-        ip = _extract_ipv4(c)
-        if ip:
-            client_ip = ip
-            break
-
-    if not client_ip:
-        client_ip = '未知'
+    client_ip = _get_client_ip()
 
     # 记录传输任务
     active_transfers[transfer_id] = {
@@ -3398,6 +3492,8 @@ def handle_cancel_transfer(data):
 @app.route('/api/delete', methods=['POST'])
 def delete_files():
     """删除文件或文件夹"""
+    start_ts = time.time()
+    client_ip = _get_client_ip()
     try:
         data = request.get_json()
         server_ip = data.get('server')
@@ -3495,6 +3591,22 @@ def delete_files():
             pass
 
         if failed_items:
+            try:
+                append_transfer_log_record(
+                    source_ip=server_ip,
+                    target_ip=server_ip,
+                    source_path=paths[0] if paths else '',
+                    target_full_path=paths[-1] if paths else '',
+                    duration_sec=(time.time() - start_ts),
+                    status='failure',
+                    error=str(failed_items),
+                    client_ip=client_ip,
+                    mode='delete',
+                    file_name=f'批量删除({len(paths)})',
+                    action='delete'
+                )
+            except Exception:
+                pass
             return jsonify({
                 'success': False,
                 'deleted_count': deleted_count,
@@ -3502,6 +3614,23 @@ def delete_files():
                 'cache_cleared': cache_cleared,
                 'error': f'部分删除失败: {deleted_count}/{len(paths)} 成功'
             })
+
+        try:
+            append_transfer_log_record(
+                source_ip=server_ip,
+                target_ip=server_ip,
+                source_path=paths[0] if paths else '',
+                target_full_path=paths[-1] if paths else '',
+                duration_sec=(time.time() - start_ts),
+                status='success',
+                error="",
+                client_ip=client_ip,
+                mode='delete',
+                file_name=f'批量删除({len(paths)})',
+                action='delete'
+            )
+        except Exception:
+            pass
 
         return jsonify({
             'success': True,
@@ -3511,6 +3640,22 @@ def delete_files():
         })
 
     except Exception as e:
+        try:
+            append_transfer_log_record(
+                source_ip=server_ip if 'server_ip' in locals() else '',
+                target_ip=server_ip if 'server_ip' in locals() else '',
+                source_path=paths[0] if 'paths' in locals() and paths else '',
+                target_full_path=paths[-1] if 'paths' in locals() and paths else '',
+                duration_sec=(time.time() - start_ts) if 'start_ts' in locals() else 0.0,
+                status='failure',
+                error=str(e),
+                client_ip=client_ip,
+                mode='delete',
+                file_name=f'批量删除({len(paths)})' if 'paths' in locals() else '批量删除',
+                action='delete'
+            )
+        except Exception:
+            pass
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/create_folder', methods=['POST'])
