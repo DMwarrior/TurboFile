@@ -1931,7 +1931,7 @@
 
         // 双击配置 - 参考WinSCP等专业文件管理器的标准
         const DOUBLE_CLICK_CONFIG = {
-            timeWindow: 300,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
+            timeWindow: 250,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
             debounceDelay: 50 // 防抖延迟（毫秒）- 提高响应速度
         };
 
@@ -2725,6 +2725,12 @@
 
             // 轻量级图片预览与在线编辑（懒加载、异步、性能优先）
             const PreviewCache = new Map(); // 路径->BlobURL / 文本缓存
+            const ImageViewer = {
+                items: [],
+                index: -1,
+                server: '',
+                isSource: true
+            };
 
             function isImageFile(name) {
                 return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
@@ -2733,21 +2739,50 @@
                 return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh)$/i.test(name);
             }
 
-            async function previewImage(server, path, name) {
-                try {
-                    const key = server + '|' + path;
-
-                    // 立即显示模态框，避免等待感
-                    const modal = document.getElementById('imagePreviewModal');
-                    const img = modal.querySelector('img');
-                    if (modal && img) {
-                        modal.style.display = 'block';
-                        img.style.opacity = '0.3';
-                        img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+            function buildImageViewer(server, path, name, isSource) {
+                const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
+                const nodes = document.querySelectorAll(`#${containerId} .file-item.selectable`);
+                const imgs = [];
+                let currentIndex = -1;
+                nodes.forEach(el => {
+                    const fname = el.dataset.name || '';
+                    const isDir = String(el.dataset.isDirectory).toLowerCase() === 'true';
+                    if (isDir || !isImageFile(fname)) return;
+                    const p = el.dataset.path;
+                    if (fname === name && p === path) {
+                        currentIndex = imgs.length;
                     }
+                    imgs.push({ path: p, name: fname });
+                });
+                ImageViewer.items = imgs;
+                ImageViewer.index = currentIndex >= 0 ? currentIndex : 0;
+                ImageViewer.server = server;
+                ImageViewer.isSource = isSource;
+            }
 
+            async function showImageAt(index) {
+                if (!ImageViewer.items || ImageViewer.items.length === 0) return;
+                const len = ImageViewer.items.length;
+                if (len === 0) return;
+                if (index < 0) index = len - 1;
+                if (index >= len) index = 0;
+                ImageViewer.index = index;
+                const item = ImageViewer.items[index];
+                const server = ImageViewer.server;
+                const key = server + '|' + item.path;
+
+                // 立即显示模态框，避免等待感
+                const modal = document.getElementById('imagePreviewModal');
+                const img = modal.querySelector('img');
+                if (modal && img) {
+                    modal.style.display = 'block';
+                    img.style.opacity = '0.3';
+                    img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+                }
+
+                try {
                     if (!PreviewCache.has(key)) {
-                        const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+                        const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(item.path)}`;
                         const resp = await fetch(url, { cache: 'no-store' });
                         if (!resp.ok) {
                             let msg = '';
@@ -2765,6 +2800,21 @@
                         img.onload = () => { img.style.opacity = '1'; };
                         img.src = blobUrl;
                     }
+                    const caption = document.getElementById('imagePreviewCaption');
+                    if (caption) {
+                        caption.textContent = `${item.name} (${index + 1}/${len})`;
+                    }
+                } catch (e) {
+                    addLogError('图片预览失败: ' + (e.message || e));
+                    console.error('Image preview fetch error:', e);
+                    closeImageModal();
+                }
+            }
+
+            async function previewImage(server, path, name, isSource) {
+                try {
+                    buildImageViewer(server, path, name, isSource);
+                    await showImageAt(ImageViewer.index);
                 } catch (e) {
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
@@ -2821,7 +2871,7 @@
                     const server = (isSource ? document.getElementById('sourceServer') : document.getElementById('targetServer')).value;
                     if (!server) return;
                     if (isImageFile(name)) {
-                        previewImage(server, path, name);
+                        previewImage(server, path, name, isSource);
                     } else if (isTextEditable(name)) {
                         editTextFile(server, path, name);
                     }
@@ -2843,6 +2893,10 @@
                 modal.style.display = 'none';
                 const img = modal.querySelector('img');
                 if (img) img.removeAttribute('src');
+                const caption = document.getElementById('imagePreviewCaption');
+                if (caption) caption.textContent = '';
+                ImageViewer.items = [];
+                ImageViewer.index = -1;
             }
 
             function openEditorModal(server, path, title, content) {
@@ -2872,6 +2926,10 @@
             document.addEventListener('DOMContentLoaded', () => {
                 const btn = document.getElementById('imagePreviewCloseBtn');
                 if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
+                const prevBtn = document.getElementById('imagePrevBtn');
+                const nextBtn = document.getElementById('imageNextBtn');
+                if (prevBtn) prevBtn.addEventListener('click', () => showImageAt(ImageViewer.index - 1));
+                if (nextBtn) nextBtn.addEventListener('click', () => showImageAt(ImageViewer.index + 1));
             });
 
                 const data = await resp.json();
@@ -2890,6 +2948,17 @@
                 if (e.key === 'Escape') {
                     closeImageModal();
                     closeEditorModal();
+                }
+                const modal = document.getElementById('imagePreviewModal');
+                const visible = modal && modal.style.display !== 'none';
+                if (visible && ImageViewer.items.length > 0) {
+                    if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        showImageAt(ImageViewer.index - 1);
+                    } else if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        showImageAt(ImageViewer.index + 1);
+                    }
                 }
             });
 
@@ -2970,6 +3039,11 @@
         <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
             <img src="" alt="预览" style="max-width: 98vw; max-height: 95vh; object-fit: contain; display:block;" />
         </div>
+        <button id="imagePrevBtn" aria-label="上一张" title="上一张"
+                style="position:absolute; left:20px; top:50%; transform: translateY(-50%); width:48px; height:48px; border:none; border-radius:50%; background:rgba(255,255,255,0.2); color:#fff; font-size:24px; cursor:pointer;">‹</button>
+        <button id="imageNextBtn" aria-label="下一张" title="下一张"
+                style="position:absolute; right:20px; top:50%; transform: translateY(-50%); width:48px; height:48px; border:none; border-radius:50%; background:rgba(255,255,255,0.2); color:#fff; font-size:24px; cursor:pointer;">›</button>
+        <div id="imagePreviewCaption" style="position:absolute; bottom:18px; left:50%; transform: translateX(-50%); color:#fff; font-size:14px; background:rgba(0,0,0,0.35); padding:6px 10px; border-radius:10px;"></div>
     </div>
 
     <!-- 轻量级在线编辑器模态框 -->
