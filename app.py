@@ -1786,29 +1786,14 @@ def transfer_single_file_instant(transfer_id, source_server, file_info, target_s
                     # 远程删除
                     is_windows = is_windows_server(source_server)
                     if is_windows:
-                        # Windows: 规范化路径为反斜杠格式
+                        # Windows: 统一使用 PowerShell 强制删除，避免类型检测带来的延迟
                         win_path = normalize_windows_path_for_cmd(source_path)
-
-                        # 使用 PowerShell 检查是否为目录
-                        ps_path = win_path.replace('\\', '\\\\')
-                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \'{ps_path}\' -PathType Container) {{ Write-Output \'DIR\' }} elseif (Test-Path -Path \'{ps_path}\' -PathType Leaf) {{ Write-Output \'FILE\' }} else {{ Write-Output \'NOTFOUND\' }}"'
-                        ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(source_server, ps_check_cmd)
-
-                        is_dir = False
-                        if ps_exit == 0 and ps_stdout:
-                            result = ps_stdout.strip().upper()
-                            if result == 'DIR':
-                                is_dir = True
-                            elif result == 'NOTFOUND':
-                                emit_transfer_log(transfer_id, f'⚠️ 源文件不存在: {file_name}')
-                                return
-
-                        # 根据类型选择删除命令（使用 CMD 命令）
-                        if is_dir:
-                            delete_cmd = f'rd /s /q "{win_path}"'
-                        else:
-                            delete_cmd = f'del /f /q "{win_path}"'
-
+                        ps_path = win_path.replace("'", "''")
+                        delete_cmd = (
+                            "powershell -NoProfile -Command "
+                            f"\"Remove-Item -LiteralPath '{ps_path}' -Force -Recurse -ErrorAction SilentlyContinue; "
+                            f"if (Test-Path -LiteralPath '{ps_path}') {{ exit 1 }}\""
+                        )
                         emit_transfer_log(transfer_id, f'🗑️ 执行Windows删除命令: {delete_cmd}')
                     else:
                         # Linux 删除命令 - 使用 shlex.quote() 安全转义路径
@@ -3534,31 +3519,14 @@ def delete_files():
                 else:
                     # 远程删除
                     if is_windows:
-                        # Windows: 规范化路径为反斜杠格式
+                        # Windows: 统一使用 PowerShell 强制删除，避免类型检测的额外往返
                         win_path = normalize_windows_path_for_cmd(path)
-
-                        # 使用 PowerShell 检查是否为目录（更可靠）
-                        # PowerShell 中路径需要转义反斜杠
-                        ps_path = win_path.replace('\\', '\\\\')
-                        ps_check_cmd = f'powershell -Command "if (Test-Path -Path \'{ps_path}\' -PathType Container) {{ Write-Output \'DIR\' }} elseif (Test-Path -Path \'{ps_path}\' -PathType Leaf) {{ Write-Output \'FILE\' }} else {{ Write-Output \'NOTFOUND\' }}"'
-                        ps_stdout, ps_stderr, ps_exit = ssh_manager.execute_command(server_ip, ps_check_cmd)
-
-                        is_dir = False
-                        if ps_exit == 0 and ps_stdout:
-                            result = ps_stdout.strip().upper()
-                            if result == 'DIR':
-                                is_dir = True
-                            elif result == 'NOTFOUND':
-                                failed_items.append({'path': path, 'error': '路径不存在'})
-                                continue
-
-                        # 根据类型选择删除命令（使用 CMD 命令，路径用反斜杠）
-                        if is_dir:
-                            # 目录：使用 rd /s /q
-                            delete_cmd = f'rd /s /q "{win_path}"'
-                        else:
-                            # 文件：使用 del /f /q
-                            delete_cmd = f'del /f /q "{win_path}"'
+                        ps_path = win_path.replace("'", "''")
+                        delete_cmd = (
+                            "powershell -NoProfile -Command "
+                            f"\"Remove-Item -LiteralPath '{ps_path}' -Force -Recurse -ErrorAction SilentlyContinue; "
+                            f"if (Test-Path -LiteralPath '{ps_path}') {{ exit 1 }}\""
+                        )
 
                         print(f"🗑️ Windows删除命令: {delete_cmd}")
                         stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
