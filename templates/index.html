@@ -911,7 +911,7 @@
             <div class="col-md-6">
                 <div class="server-panel" style="padding: 4px 6px;">
                     <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
-                        <i class="bi bi-hdd-network-fill text-primary"></i> 源服务器
+                        <i class="bi bi-hdd-network-fill text-primary"></i> 左侧服务器
                     </h6>
                     <select id="sourceServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🔍 请选择源服务器</option>
@@ -926,10 +926,10 @@
             <div class="col-md-6">
                 <div class="server-panel" style="padding: 4px 6px;">
                     <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
-                        <i class="bi bi-cloud-upload-fill text-success"></i> 目标服务器
+                        <i class="bi bi-cloud-upload-fill text-success"></i> 右侧服务器
                     </h6>
                     <select id="targetServer" class="form-select" style="font-size: 0.85rem;">
-                        <option value="" disabled selected hidden>🎯 请选择目标服务器</option>
+                        <option value="" disabled selected hidden>🎯 请选择服务器</option>
                         {% for ip, info in servers.items() %}
                         {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
                         <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
@@ -946,7 +946,7 @@
                 <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
-                            <i class="bi bi-files text-info"></i> 源文件浏览
+                            <i class="bi bi-files text-info"></i> 左侧文件浏览
                         </h6>
                         <div class="d-flex align-items-center" style="gap: 10px;">
                             <small id="sourceFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
@@ -990,7 +990,7 @@
                     <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
                         <div class="text-center text-muted p-3">
                             <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
-                            <p class="mb-0" style="font-size: 0.85rem;">请先选择源服务器</p>
+                            <p class="mb-0" style="font-size: 0.85rem;">请先选择服务器</p>
                         </div>
                     </div>
                 </div>
@@ -1000,7 +1000,7 @@
                 <div class="resizable-panel" id="targetPanel" style="width: 50%; height: 100%;">
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
-                            <i class="bi bi-folder-check text-success"></i> 目标目录浏览
+                            <i class="bi bi-folder-check text-success"></i> 右侧文件浏览
                         </h6>
                         <div class="d-flex align-items-center" style="gap: 10px;">
                             <small id="targetFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>

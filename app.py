@@ -1153,17 +1153,8 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
         try:
             items = []
             for item in os.listdir(path):
-                # 应用WinSCP过滤规则
-                if not show_hidden:
-                    # 获取文件权限信息用于判断符号链接
-                    item_path = os.path.join(path, item)
-                    permissions = ""
-                    if os.path.islink(item_path):
-                        permissions = "l"  # 标记为符号链接
-
-                    # 使用WinSCP过滤规则
-                    if is_winscp_hidden_file(item, permissions, path):
-                        continue
+                if not show_hidden and item.startswith('.'):
+                    continue
 
                 item_path = os.path.join(path, item)
                 is_dir = os.path.isdir(item_path)
@@ -1198,8 +1189,11 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                 normalized_path = normalized_path + '/'
             # 构造用于CMD的反斜杠路径
             win_path = normalized_path.replace('/', '\\')
-            # 使用/a显示所有文件，/-c去除千位分隔符，统一解析
-            command = f'dir "{win_path}" /a /-c'
+            # Windows 默认不显示隐藏文件；show_hidden 时加 /a
+            dir_flags = "/-c"
+            if show_hidden:
+                dir_flags = "/a /-c"
+            command = f'dir "{win_path}" {dir_flags}'
 
             output, error, _ = ssh_manager.execute_command(server_ip, command)
 
@@ -1251,11 +1245,6 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                             size = int(size_or_dir.replace(',', ''))
                         except:
                             size = 0
-
-                    # 应用WinSCP过滤规则（Windows不需要permissions参数）
-                    if not show_hidden:
-                        if is_winscp_hidden_file(name, "", path):
-                            continue
 
                     # 构建完整路径（使用正斜杠以保持一致性）
                     base_path = normalized_path if 'normalized_path' in locals() and normalized_path else path
@@ -1329,6 +1318,9 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                 date_parts = parts[5:8]
                 name = ' '.join(parts[8:])
 
+                if not show_hidden and name.startswith('.'):
+                    continue
+
                 # 跳过当前目录和父目录
                 if name in ['.', '..']:
                     continue
@@ -1372,12 +1364,8 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
             # 使用os.scandir代替os.listdir，性能更好
             with os.scandir(path) as entries:
                 for entry in entries:
-                    # 应用WinSCP过滤规则
-                    if not show_hidden:
-                        # 快速权限检查
-                        permissions = "l" if entry.is_symlink() else ""
-                        if is_winscp_hidden_file(entry.name, permissions, path):
-                            continue
+                    if not show_hidden and entry.name.startswith('.'):
+                        continue
 
                     try:
                         stat_info = entry.stat()
