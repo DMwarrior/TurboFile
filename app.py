@@ -2337,9 +2337,21 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
                 print(f"🪟 Windows服务器使用move命令进行本地剪切")
                 emit_transfer_log(transfer_id, f'✂️ 在Windows服务器上使用move剪切: {file_name}')
 
-                # Windows move命令语法: move /Y <源> <目标>
-                # /Y: 覆盖已存在的文件不提示
-                remote_cmd = f'move /Y "{source_path}" "{dest_path}"'
+                src_cmd_path = normalize_windows_path_for_cmd(source_path)
+                dest_cmd_path = normalize_windows_path_for_cmd(dest_path)
+                # 使用PowerShell实现更健壮的剪切，支持覆盖目录
+                ps_src = src_cmd_path.replace("'", "''")
+                ps_dst = dest_cmd_path.replace("'", "''")
+                ps_script = (
+                    "$ErrorActionPreference='Stop';"
+                    f"$src='{ps_src}';$dst='{ps_dst}';"
+                    "$same=[string]::Equals($src.TrimEnd('\\','/'),$dst.TrimEnd('\\','/'),"
+                    "[System.StringComparison]::InvariantCultureIgnoreCase);"
+                    "if($same){exit 0};"
+                    "if(Test-Path -LiteralPath $dst){Remove-Item -LiteralPath $dst -Force -Recurse -ErrorAction SilentlyContinue};"
+                    "Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop"
+                )
+                remote_cmd = f'powershell -NoProfile -Command "{ps_script}"'
             else:
                 # Linux使用mv命令
                 print(f"🐧 Linux服务器使用mv命令进行本地剪切")
@@ -2350,23 +2362,18 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
             print(f"[DEBUG] 同服务器剪切命令: {remote_cmd}")
         else:
-            # 复制模式：使用 robocopy 或 cp 命令
+            # 复制模式：使用 copy/cp 命令
             if is_windows:
-                # Windows服务器使用robocopy
-                print(f"🪟 Windows服务器使用robocopy进行本地复制")
-                emit_transfer_log(transfer_id, f'📁 在Windows服务器上使用robocopy复制: {file_name}')
+                print(f"🪟 Windows服务器使用copy/xcopy进行本地复制")
+                emit_transfer_log(transfer_id, f'📁 在Windows服务器上使用copy/xcopy复制: {file_name}')
 
+                src_cmd_path = normalize_windows_path_for_cmd(source_path)
+                dest_cmd_path = normalize_windows_path_for_cmd(dest_path)
                 if is_directory:
-                    # robocopy语法: robocopy <源目录> <目标目录> /E /MT:8
-                    # /E: 复制所有子目录（包括空目录）
-                    # /MT:8: 使用8个线程
-                    remote_cmd = f'robocopy "{source_path}" "{dest_path}" /E /MT:8 /R:3 /W:5'
+                    # xcopy支持目录复制，/I避免询问目标类型
+                    remote_cmd = f'xcopy "{src_cmd_path}" "{dest_cmd_path}" /E /I /Y /Q'
                 else:
-                    # 复制单个文件
-                    source_dir = os.path.dirname(source_path)
-                    source_file = os.path.basename(source_path)
-                    target_dir = target_path
-                    remote_cmd = f'robocopy "{source_dir}" "{target_dir}" "{source_file}" /MT:8 /R:3 /W:5'
+                    remote_cmd = f'copy /Y "{src_cmd_path}" "{dest_cmd_path}"'
             else:
                 # Linux服务器使用cp -r
                 print(f"🐧 Linux服务器使用cp命令进行本地复制")
@@ -2409,16 +2416,12 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             else:
                 # 复制模式的成功判断
                 if is_windows:
-                    # robocopy的输出包含统计信息，检查是否有错误
-                    # robocopy 0-7 视为成功，8及以上为失败
-                    if exit_code is None:
-                        exit_code = -1
-                    if exit_code >= 8 or (error and 'error' in error.lower()):
-                        err_msg = error or f"exit_code={exit_code}"
-                        print(f"[ERROR] robocopy失败: {err_msg}")
-                        raise Exception(f"robocopy复制失败: {err_msg}")
+                    if exit_code != 0:
+                        err_msg = error or output or f"exit_code={exit_code}"
+                        print(f"[ERROR] copy/xcopy失败: {err_msg}")
+                        raise Exception(f"copy/xcopy复制失败: {err_msg}")
                     else:
-                        print(f"[DEBUG] robocopy成功")
+                        print(f"[DEBUG] copy/xcopy成功")
                 else:
                     # Linux cp命令成功时没有输出
                     if exit_code != 0:
@@ -2755,134 +2758,182 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
             if not success:
                 raise Exception("本地传输失败")
         else:
-                    # 远程到远程传输
-                    # 🚀 优化：NAS服务器也使用rsync（速度从44MB/s提升到85MB/s，提升93%）
-                    # 移除了之前的tar+ssh判断，NAS现在直接使用rsync传输
-                    print(f"🔄 并行传输使用rsync方案")
-                    # 远程到远程：根据Windows参与方选择推送或拉取策略
-                    target_user = SERVERS[target_server]['user']
-                    target_password = SERVERS[target_server].get('password')
-                    source_user = SERVERS[source_server]['user']
-                    source_password = SERVERS[source_server].get('password')
-
-                    # 使用统一的SSH命令构建函数（支持自定义端口）
-                    ssh_to_target = RSYNC_SSH_CMD
-
-                    # 🚀 优化：支持目标服务器的自定义端口（如NAS的8000端口）
-                    target_port = SERVERS[target_server].get('port', 22)
-                    if target_port != 22:
-                        ssh_to_target = f"{ssh_to_target} -p {target_port}"
-                        print(f"🔧 目标服务器使用自定义端口: {target_port}")
-
-                    # 🚀 极限速度优化：统一rsync参数
-                    rsync_base_opts = [
-                        "-a",
-                        "--inplace",
-                        "--whole-file",
-                        "--no-compress",
-                        "--numeric-ids",
-                        "--timeout=600",
-                        "-s",
-                        "--no-perms",
-                        "--no-owner",
-                        "--no-group",
-                        "--omit-dir-times",
-                    ]
-
-                    source_is_windows = is_windows_server(source_server)
-                    target_is_windows = is_windows_server(target_server)
-                    if source_is_windows or target_is_windows:
-                        rsync_base_opts.append("--iconv=UTF-8,UTF-8")
-
-                    # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
-                    if source_is_windows and not target_is_windows:
-                        # 🚀 优化：NAS服务器使用自定义sshpass路径（~/bin/sshpass）
-                        sshpass_cmd = "sshpass"
-                        if is_nas_server(target_server):
-                            sshpass_cmd = "~/bin/sshpass"
-                            print(f"🔧 NAS作为目标服务器，使用自定义sshpass路径: {sshpass_cmd}")
-
-                        ssh_to_source = RSYNC_SSH_CMD
-
-                        # 🚀 优化：支持源服务器的自定义端口（如NAS的8000端口）
-                        source_port = SERVERS[source_server].get('port', 22)
-                        if source_port != 22:
-                            ssh_to_source = f"{ssh_to_source} -p {source_port}"
-                            print(f"🔧 源服务器使用自定义端口: {source_port}")
-
-                        rsync_source_path = convert_windows_path_to_cygwin(source_path)
-                        if is_directory:
-                            if source_password:
-                                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
-                            else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
-                        else:
-                            if source_password:
-                                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
-                            else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
-
-                        # 在目标服务器上执行拉取命令
-                        ssh = ssh_manager.get_connection(target_server)
-                        if not ssh:
-                            raise Exception(f"无法连接到目标服务器 {target_server}")
+            # 远程到远程传输
+            if source_server == target_server:
+                # 同一服务器内移动/复制，避免走rsync导致剪切后未删除
+                is_windows = is_windows_server(source_server)
+                if is_windows:
+                    import ntpath
+                    dest_path = ntpath.join(target_path, file_name)
+                    src_cmd_path = normalize_windows_path_for_cmd(source_path)
+                    dest_cmd_path = normalize_windows_path_for_cmd(dest_path)
+                    if mode == "move":
+                        emit_transfer_log(transfer_id, f'✂️ 同服务器剪切（Windows），使用move: {file_name}')
+                        ps_src = src_cmd_path.replace("'", "''")
+                        ps_dst = dest_cmd_path.replace("'", "''")
+                        ps_script = (
+                            "$ErrorActionPreference='Stop';"
+                            f"$src='{ps_src}';$dst='{ps_dst}';"
+                            "$same=[string]::Equals($src.TrimEnd('\\','/'),$dst.TrimEnd('\\','/'),"
+                            "[System.StringComparison]::InvariantCultureIgnoreCase);"
+                            "if($same){exit 0};"
+                            "if(Test-Path -LiteralPath $dst){Remove-Item -LiteralPath $dst -Force -Recurse -ErrorAction SilentlyContinue};"
+                            "Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop"
+                        )
+                        remote_cmd = f'powershell -NoProfile -Command "{ps_script}"'
                     else:
-                        # 其他情况保持原逻辑：在源服务器上执行rsync推送到目标
-                        # 🚀 优化：NAS服务器使用自定义sshpass路径（~/bin/sshpass）
-                        sshpass_cmd = "sshpass"
-                        if is_nas_server(source_server):
-                            sshpass_cmd = "~/bin/sshpass"
-                            print(f"🔧 NAS作为源服务器，使用自定义sshpass路径: {sshpass_cmd}")
-
-                        # 路径适配：若目标为Windows则转换目标路径；若源为Windows则转换源路径
-                        rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
-                        rsync_source_path = convert_windows_path_to_cygwin(source_path) if source_is_windows else source_path
-
+                        emit_transfer_log(transfer_id, f'📁 同服务器复制（Windows），使用copy/xcopy: {file_name}')
                         if is_directory:
-                            if target_password:
-                                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
-                            else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                            # xcopy支持目录复制，/I避免提示目标类型
+                            remote_cmd = f'xcopy "{src_cmd_path}" "{dest_cmd_path}" /E /I /Y /Q'
                         else:
-                            if target_password:
-                                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
-                            else:
-                                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                            remote_cmd = f'copy /Y "{src_cmd_path}" "{dest_cmd_path}"'
+                else:
+                    dest_path = os.path.join(target_path, file_name)
+                    if mode == "move":
+                        emit_transfer_log(transfer_id, f'✂️ 同服务器剪切（Linux），使用mv: {file_name}')
+                        remote_cmd = f"mv -f {shlex.quote(source_path)} {shlex.quote(dest_path)}"
+                    else:
+                        emit_transfer_log(transfer_id, f'📁 同服务器复制（Linux），使用cp: {file_name}')
+                        if is_directory:
+                            remote_cmd = f"cp -r {shlex.quote(source_path)} {shlex.quote(dest_path)}"
+                        else:
+                            remote_cmd = f"cp -f {shlex.quote(source_path)} {shlex.quote(dest_path)}"
 
-                        # 在源服务器上执行推送命令
-                        ssh = ssh_manager.get_connection(source_server)
-                        if not ssh:
-                            raise Exception(f"无法连接到源服务器 {source_server}")
+                stdout, stderr, exit_code = ssh_manager.execute_command(source_server, remote_cmd)
+                if exit_code != 0:
+                    err_msg = stderr or stdout or f"exit_code={exit_code}"
+                    raise Exception(f"同服务器{'剪切' if mode == 'move' else '复制'}失败: {err_msg}")
 
-                    import time
-                    start_time = time.time()
+                emit_transfer_log(transfer_id, f'✅ 同服务器{"剪切" if mode == "move" else "复制"}完成: {file_name}')
+            else:
+                # 🚀 优化：NAS服务器也使用rsync（速度从44MB/s提升到85MB/s，提升93%）
+                # 移除了之前的tar+ssh判断，NAS现在直接使用rsync传输
+                print(f"🔄 并行传输使用rsync方案")
+                # 远程到远程：根据Windows参与方选择推送或拉取策略
+                target_user = SERVERS[target_server]['user']
+                target_password = SERVERS[target_server].get('password')
+                source_user = SERVERS[source_server]['user']
+                source_password = SERVERS[source_server].get('password')
 
-                    emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
+                # 使用统一的SSH命令构建函数（支持自定义端口）
+                ssh_to_target = RSYNC_SSH_CMD
 
-                    # 执行rsync
-                    _, stdout, stderr = ssh.exec_command(remote_cmd)
+                # 🚀 优化：支持目标服务器的自定义端口（如NAS的8000端口）
+                target_port = SERVERS[target_server].get('port', 22)
+                if target_port != 22:
+                    ssh_to_target = f"{ssh_to_target} -p {target_port}"
+                    print(f"🔧 目标服务器使用自定义端口: {target_port}")
 
-                    # 存储SSH通道用于取消操作
-                    transfer_processes[transfer_id] = {
-                        'type': 'ssh',
-                        'channel': stdout.channel
-                    }
+                # 🚀 极限速度优化：统一rsync参数
+                rsync_base_opts = [
+                    "-a",
+                    "--inplace",
+                    "--whole-file",
+                    "--no-compress",
+                    "--numeric-ids",
+                    "--timeout=600",
+                    "-s",
+                    "--no-perms",
+                    "--no-owner",
+                    "--no-group",
+                    "--omit-dir-times",
+                ]
 
-                    # 等待传输完成
-                    exit_status = stdout.channel.recv_exit_status()
+                source_is_windows = is_windows_server(source_server)
+                target_is_windows = is_windows_server(target_server)
+                if source_is_windows or target_is_windows:
+                    rsync_base_opts.append("--iconv=UTF-8,UTF-8")
 
-                    # 读取输出和错误信息
-                    output = stdout.read().decode('utf-8', errors='ignore')
-                    error = stderr.read().decode('utf-8', errors='ignore')
+                # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
+                if source_is_windows and not target_is_windows:
+                    # 🚀 优化：NAS服务器使用自定义sshpass路径（~/bin/sshpass）
+                    sshpass_cmd = "sshpass"
+                    if is_nas_server(target_server):
+                        sshpass_cmd = "~/bin/sshpass"
+                        print(f"🔧 NAS作为目标服务器，使用自定义sshpass路径: {sshpass_cmd}")
 
-                    if exit_status != 0:
-                        raise Exception(f"传输 {file_name} 失败: {error}")
+                    ssh_to_source = RSYNC_SSH_CMD
 
-                    # 计算传输耗时（仅用于日志记录，不显示在UI）
-                    end_time = time.time()
-                    duration = end_time - start_time
+                    # 🚀 优化：支持源服务器的自定义端口（如NAS的8000端口）
+                    source_port = SERVERS[source_server].get('port', 22)
+                    if source_port != 22:
+                        ssh_to_source = f"{ssh_to_source} -p {source_port}"
+                        print(f"🔧 源服务器使用自定义端口: {source_port}")
 
-                    emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
+                    rsync_source_path = convert_windows_path_to_cygwin(source_path)
+                    if is_directory:
+                        if source_password:
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                        else:
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                    else:
+                        if source_password:
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                        else:
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+
+                    # 在目标服务器上执行拉取命令
+                    ssh = ssh_manager.get_connection(target_server)
+                    if not ssh:
+                        raise Exception(f"无法连接到目标服务器 {target_server}")
+                else:
+                    # 其他情况保持原逻辑：在源服务器上执行rsync推送到目标
+                    # 🚀 优化：NAS服务器使用自定义sshpass路径（~/bin/sshpass）
+                    sshpass_cmd = "sshpass"
+                    if is_nas_server(source_server):
+                        sshpass_cmd = "~/bin/sshpass"
+                        print(f"🔧 NAS作为源服务器，使用自定义sshpass路径: {sshpass_cmd}")
+
+                    # 路径适配：若目标为Windows则转换目标路径；若源为Windows则转换源路径
+                    rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
+                    rsync_source_path = convert_windows_path_to_cygwin(source_path) if source_is_windows else source_path
+
+                    if is_directory:
+                        if target_password:
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                        else:
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                    else:
+                        if target_password:
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                        else:
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+
+                    # 在源服务器上执行推送命令
+                    ssh = ssh_manager.get_connection(source_server)
+                    if not ssh:
+                        raise Exception(f"无法连接到源服务器 {source_server}")
+
+                import time
+                start_time = time.time()
+
+                emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
+
+                # 执行rsync
+                _, stdout, stderr = ssh.exec_command(remote_cmd)
+
+                # 存储SSH通道用于取消操作
+                transfer_processes[transfer_id] = {
+                    'type': 'ssh',
+                    'channel': stdout.channel
+                }
+
+                # 等待传输完成
+                exit_status = stdout.channel.recv_exit_status()
+
+                # 读取输出和错误信息
+                output = stdout.read().decode('utf-8', errors='ignore')
+                error = stderr.read().decode('utf-8', errors='ignore')
+
+                if exit_status != 0:
+                    raise Exception(f"传输 {file_name} 失败: {error}")
+
+                # 计算传输耗时（仅用于日志记录，不显示在UI）
+                end_time = time.time()
+                duration = end_time - start_time
+
+                emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
 
         completed_files += 1
 
