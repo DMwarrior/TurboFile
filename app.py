@@ -3749,6 +3749,10 @@ def rename_file():
             parent_dir = os.path.dirname(old_path)
             new_path = os.path.join(parent_dir, new_name)
 
+        # 新旧路径相同直接返回成功
+        if new_path == old_path:
+            return jsonify({'success': True, 'message': '名称未变化', 'new_path': new_path})
+
         # 检查新路径是否已存在
         if is_local:
             if os.path.exists(new_path):
@@ -3762,7 +3766,9 @@ def rename_file():
                 check_cmd = f'test -e {shlex.quote(new_path)} && echo EXISTS || echo NOTEXISTS'
 
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, check_cmd)
-            if stdout and 'EXISTS' in stdout:
+            flag_line = (stdout or '').strip().splitlines()
+            flag = flag_line[0].strip().upper() if flag_line else ''
+            if flag == 'EXISTS':
                 return jsonify({'success': False, 'error': f'目标名称已存在: {new_name}'})
 
         # 执行重命名
