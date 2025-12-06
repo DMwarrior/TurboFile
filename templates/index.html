@@ -1263,6 +1263,7 @@
 
         // 目录浏览分页状态，避免一次性渲染过多文件导致卡顿
         const BROWSE_PAGE_SIZE = 400;
+        const BROWSE_PAGE_SIZE_MAX = 2000;
         const browseState = {
             source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false },
             target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false }
@@ -2385,38 +2386,66 @@
 
         async function ensureAllItemsLoaded(isSource) {
             const state = isSource ? browseState.source : browseState.target;
-            if (!state.fullHasMore || state.loadingAll) {
-                return state.fullItems || [];
+            if (state.loadingAllPromise) {
+                return state.loadingAllPromise;
             }
             const { serverSelect, showHiddenCheckbox } = getPanelConfig(isSource);
             const server = document.getElementById(serverSelect).value;
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
             if (!server || !state.path) return state.fullItems || [];
-            state.loadingAll = true;
-            try {
-                let localOffset = state.fullOffset || state.loadedCount || 0;
-                while (state.fullHasMore) {
+
+            // 已经全部加载的快速返回
+            const loadedCount = state.fullItems ? state.fullItems.length : 0;
+            if (!state.hasMore && loadedCount >= (state.total || loadedCount)) {
+                return state.fullItems || [];
+            }
+
+            state.loadingAllPromise = (async () => {
+                let localOffset = loadedCount;
+                while (true) {
                     const params = new URLSearchParams({
                         path: state.path,
                         show_hidden: showHidden,
                         offset: localOffset,
-                        limit: BROWSE_PAGE_SIZE
+                        limit: BROWSE_PAGE_SIZE_MAX
                     });
                     const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
                     const data = await resp.json();
                     if (!data.success) break;
                     const pageFiles = data.files || [];
                     state.fullItems = (state.fullItems || []).concat(pageFiles);
-                    localOffset = data.next_offset ?? (localOffset + pageFiles.length);
-                    state.fullOffset = localOffset;
+                    state.total = data.total_count || data.file_count || state.total || 0;
+                    state.fullOffset = data.next_offset ?? (localOffset + pageFiles.length);
                     state.fullHasMore = data.has_more;
+                    state.loadedCount = Math.max(state.loadedCount || 0, state.fullOffset || 0);
+                    localOffset = state.fullOffset || (localOffset + pageFiles.length);
+                    if (!data.has_more) break;
                 }
-            } catch (e) {
-                console.error('ensureAllItemsLoaded error', e);
+                return state.fullItems || [];
+            })();
+
+            try {
+                return await state.loadingAllPromise;
             } finally {
-                state.loadingAll = false;
+                state.loadingAllPromise = null;
             }
-            return state.fullItems || [];
+        }
+
+        function renderAllItems(isSource, items) {
+            const state = isSource ? browseState.source : browseState.target;
+            const { containerId } = getPanelConfig(isSource);
+            const path = getActivePath(isSource);
+            const total = state.total || items.length;
+            state.loadedCount = items.length;
+            state.offset = items.length;
+            state.hasMore = false;
+            displayFiles(containerId, items, path, isSource, {
+                append: false,
+                totalCount: total,
+                loadedCount: state.loadedCount,
+                startIndex: 0
+            });
+            updateFileCountDisplay(isSource, state.loadedCount, total);
         }
 
         // 清除所有选择
@@ -2432,10 +2461,10 @@
 
         function selectAll(isSource) {
             ensureAllItemsLoaded(isSource).then(allItems => {
-                // 标记当前可见节点
+                renderAllItems(isSource, allItems || []);
                 const nodes = getFileNodes(isSource);
                 nodes.forEach(node => node.classList.add('selected'));
-                const selected = (allItems || []).map((f, idx) => ({
+                const selected = (allItems || []).map((f) => ({
                     path: f.path,
                     name: f.name,
                     is_directory: f.is_directory
