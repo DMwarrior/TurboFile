@@ -129,15 +129,16 @@
         }
 
         .file-item.selected {
-            background: var(--gradient-primary);
-            color: white;
-            box-shadow: var(--shadow-md);
-            /* 移除transform动画，保持静态选中效果 */
+            background: #cce8ff; /* Windows 选中淡蓝 */
+            color: #111827;
+            box-shadow: none;
+            border: 1px solid #99caff;
         }
 
         .file-item.selected:hover {
-            background: var(--gradient-primary);
-            filter: brightness(1.1);
+            background: #cce8ff;
+            color: #111827;
+            box-shadow: none;
         }
 
         .file-item i {
@@ -2026,6 +2027,7 @@
         let clickCount = 0;
 
         function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
+            if (event.button !== 0) return; // 仅左键
             event.preventDefault();
 
             lastActivePanel = isSource ? 'source' : 'target';
@@ -3275,6 +3277,133 @@
                 }
             });
 
+        // 右键菜单：文件/目录重命名，空白处新建文件夹（内联编辑，无弹窗）
+        function bindContextMenus() {
+            const sourceContainer = document.getElementById('sourceFileBrowser');
+            const targetContainer = document.getElementById('targetFileBrowser');
+
+            function startInlineRename(row, isSource) {
+                if (!row || row.dataset.editing === 'true') return;
+                const nameSpan = row.querySelector('.file-name');
+                if (!nameSpan) return;
+                const original = nameSpan.textContent;
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.value = original;
+                input.className = 'form-control form-control-sm';
+                input.style.width = '100%';
+                input.style.padding = '1px 4px';
+                input.style.height = '22px';
+                input.style.fontSize = '0.9rem';
+                input.style.display = 'inline-block';
+                input.style.boxSizing = 'border-box';
+                row.dataset.editing = 'true';
+                nameSpan.replaceWith(input);
+                input.focus();
+                input.select();
+
+                const cleanup = () => {
+                    if (row.dataset.editing !== 'true') return;
+                    const span = document.createElement('span');
+                    span.className = 'file-name';
+                    span.textContent = original;
+                    input.replaceWith(span);
+                    row.dataset.editing = 'false';
+                };
+
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const newName = input.value.trim();
+                        if (!newName || newName === original) {
+                            cleanup();
+                            return;
+                        }
+                        const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                        const path = row.dataset.path;
+                        renameFile(isSource ? 'source' : 'target', server, path, newName);
+                        cleanup();
+                    } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cleanup();
+                    }
+                });
+
+                ['mousedown', 'click'].forEach(ev => input.addEventListener(ev, (e) => e.stopPropagation()));
+                input.addEventListener('blur', cleanup);
+            }
+
+            function startInlineCreate(isSource) {
+                const { containerId } = getPanelConfig(isSource);
+                const container = document.getElementById(containerId);
+                const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                const currentPath = getActivePath(isSource);
+                if (!container || !server || !currentPath) return;
+
+                // 若已存在临时行，先移除
+                const existing = container.querySelector('.file-item.temp-new');
+                if (existing) existing.remove();
+
+                const row = document.createElement('div');
+                row.className = 'file-item selectable temp-new';
+                row.innerHTML = `
+                    <i class="bi bi-folder-plus text-warning"></i>
+                    <div class="file-info">
+                        <input class="form-control form-control-sm" type="text" placeholder="新建文件夹" style="width: 100%; padding: 1px 4px; height: 22px; font-size: 0.9rem; box-sizing: border-box; display: inline-block;" />
+                    </div>
+                `;
+                const backRow = container.querySelector('.file-item[title*="返回"]');
+                if (backRow && backRow.nextSibling) {
+                    container.insertBefore(row, backRow.nextSibling);
+                } else {
+                    container.insertBefore(row, container.firstChild);
+                }
+
+                const input = row.querySelector('input');
+                if (input) {
+                    input.focus();
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const name = input.value.trim();
+                            if (!name) {
+                                row.remove();
+                                return;
+                            }
+                            createFolder(isSource ? 'source' : 'target', server, currentPath, name);
+                            row.remove();
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            row.remove();
+                        }
+                    });
+                    input.addEventListener('blur', () => row.remove());
+                }
+            }
+
+            function handleContextMenu(e, isSource) {
+                const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
+                const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                if (!server) return;
+
+                const item = e.target.closest('.file-item.selectable');
+                if (item && item.closest(`#${containerId}`)) {
+                    e.preventDefault();
+                    startInlineRename(item, isSource);
+                } else if (e.target.closest(`#${containerId}`)) {
+                    e.preventDefault();
+                    startInlineCreate(isSource);
+                }
+            }
+
+            if (sourceContainer) {
+                sourceContainer.addEventListener('contextmenu', (e) => handleContextMenu(e, true));
+            }
+            if (targetContainer) {
+                targetContainer.addEventListener('contextmenu', (e) => handleContextMenu(e, false));
+            }
+        }
+
         // 页面加载完成后的初始化
         document.addEventListener('DOMContentLoaded', function() {
             addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
@@ -3291,6 +3420,7 @@
 
             // 初始化面板调整功能
             initializeResizers();
+            bindContextMenus();
 
             // 大目录滚动懒加载
             const sourceContainer = document.getElementById('sourceFileBrowser');
