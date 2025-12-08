@@ -393,6 +393,46 @@
             backdrop-filter: blur(10px);
         }
 
+        /* Windows 风格右键菜单 */
+        .file-context-menu {
+            position: fixed;
+            display: none;
+            min-width: 180px;
+            background: #fdfdfd;
+            border: 1px solid #d9e2ec;
+            border-radius: 6px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+            padding: 4px 0;
+            z-index: 2000;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+        }
+
+        .file-context-menu .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            cursor: pointer;
+            line-height: 1.2;
+        }
+
+        .file-context-menu .menu-item:hover {
+            background: linear-gradient(135deg, #e7f1ff 0%, #dbeafe 100%);
+        }
+
+        .file-context-menu .menu-item.disabled {
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            background: transparent;
+        }
+
+        .file-context-menu .menu-item i {
+            width: 16px;
+            text-align: center;
+            font-size: 0.95rem;
+        }
+
         /* 分隔条样式 */
         .resizer {
             background: linear-gradient(135deg, var(--border-color) 0%, #cbd5e1 100%);
@@ -722,6 +762,19 @@
             border-radius: 4px;
             word-wrap: break-word;
             animation: logFadeIn 0.3s ease-in;
+        }
+
+        .log-entry .log-message,
+        .log-entry .log-run-block {
+            white-space: pre-wrap;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        }
+
+        .log-entry .log-run-block {
+            margin: 2px 0 0 0;
+            padding: 0;
+            background: transparent;
+            border: none;
         }
 
         .log-entry.log-info {
@@ -1212,7 +1265,22 @@
 
 
 
+    </div>
 
+    <!-- 文件区右键菜单 -->
+    <div id="fileContextMenu" class="file-context-menu">
+        <div class="menu-item" data-action="rename">
+            <i class="bi bi-pencil-square text-warning"></i>
+            <span>重命名</span>
+        </div>
+        <div class="menu-item" data-action="new-folder">
+            <i class="bi bi-folder-plus text-success"></i>
+            <span>新建文件夹</span>
+        </div>
+        <div class="menu-item" data-action="run">
+            <i class="bi bi-play-fill text-primary"></i>
+            <span>运行</span>
+        </div>
     </div>
 
     <!-- 传输日志模态窗口 -->
@@ -1283,6 +1351,7 @@
         let isTransferring = false;
         const MAX_LOG_ENTRIES = 100;
         const LOG_UPDATE_INTERVAL = 500; // 500ms批量更新
+        const runLogBlocks = {};
 
         // 智能日志函数
         function addLog(message, type = 'info') {
@@ -1648,12 +1717,99 @@
             }
         }
 
+        // 判断文件是否可运行（仅 .py / .sh）
+        function isRunnableFileName(name) {
+            if (!name) return false;
+            const lower = name.toLowerCase();
+            return lower.endsWith('.py') || lower.endsWith('.sh');
+        }
+
         function addLogWarning(message) {
             addLog(message, 'warning');
         }
 
         function addLogError(message) {
             addLog(message, 'error');
+        }
+
+        function logCommandOutput(text, isError = false) {
+            if (!text) return;
+            const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+            lines.forEach(line => addLog(line, isError ? 'error' : 'info'));
+        }
+
+        function appendRunLog(runId, text, isError = false, isFinal = false, exitCode = null) {
+            if (!text && !isFinal) return;
+            const logContent = document.getElementById('logContent');
+            const logContainer = document.getElementById('logContainer');
+            if (!logContent) return;
+
+            let block = runLogBlocks[runId];
+            if (!block) {
+                block = document.createElement('div');
+                block.className = `log-entry ${isError ? 'log-error' : 'log-info'}`;
+                const time = new Date().toLocaleTimeString();
+                block.innerHTML = `
+                    <span class="log-timestamp">${time}</span>
+                    <pre class="log-run-block"></pre>
+                `;
+                logContent.appendChild(block);
+                runLogBlocks[runId] = block;
+            }
+
+            const pre = block.querySelector('.log-run-block');
+            if (pre && text) {
+                pre.textContent += text;
+            }
+
+            if (isFinal && pre) {
+                if (exitCode !== null && text.indexOf('退出码') === -1) {
+                    pre.textContent += `\n[exit ${exitCode}]`;
+                }
+            }
+
+            block.className = `log-entry ${isError ? 'log-error' : 'log-info'}`;
+
+            if (logContainer) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
+            if (isFinal) {
+                delete runLogBlocks[runId];
+            }
+        }
+
+        // 运行远端/本地文件（仅 .py / .sh）
+        async function runFileOnServer(server, filePath, fileName) {
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return;
+            }
+            if (!filePath) {
+                addLogWarning('⚠️ 未找到要运行的文件');
+                return;
+            }
+
+            addLogInfo(`▶️ 正在运行: ${fileName || filePath}`);
+
+            try {
+                const resp = await fetch('/api/run_file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: server, path: filePath })
+                });
+
+                const result = await resp.json();
+
+                if (result.success) {
+                    const runId = result.run_id || '';
+                    addLogInfo(`⏳ 已开始运行，输出将实时显示${runId ? ` (ID: ${runId})` : ''}`);
+                } else {
+                    addLogError(`❌ 运行失败: ${result.error || '未知错误'}`);
+                }
+            } catch (error) {
+                addLogError(`❌ 运行异常: ${error.message}`);
+            }
         }
 
         function getPanelConfig(isSource) {
@@ -2759,6 +2915,15 @@
             }
         });
 
+        socket.on('run_output', function(data) {
+            const runId = data.run_id || 'run';
+            const msg = data.message || '';
+            const isError = data.is_error === true;
+            const isFinal = data.final === true;
+            const exitCode = typeof data.exit_code === 'number' ? data.exit_code : null;
+            appendRunLog(runId, msg, isError, isFinal, exitCode);
+        });
+
         socket.on('transfer_complete', function(data) {
             if (data.transfer_id === currentTransferId) {
                 // 传输结束，恢复日志记录
@@ -3277,10 +3442,60 @@
                 }
             });
 
-        // 右键菜单：文件/目录重命名，空白处新建文件夹（内联编辑，无弹窗）
+        // 右键菜单：Windows 风格菜单，选择重命名/新建文件夹
         function bindContextMenus() {
             const sourceContainer = document.getElementById('sourceFileBrowser');
             const targetContainer = document.getElementById('targetFileBrowser');
+            const contextMenu = document.getElementById('fileContextMenu');
+            const renameAction = contextMenu ? contextMenu.querySelector('[data-action="rename"]') : null;
+            const newFolderAction = contextMenu ? contextMenu.querySelector('[data-action="new-folder"]') : null;
+            const runAction = contextMenu ? contextMenu.querySelector('[data-action="run"]') : null;
+            let contextState = { isSource: true, targetRow: null };
+
+            function hideContextMenu() {
+                if (!contextMenu) return;
+                contextMenu.style.display = 'none';
+                contextMenu.dataset.visible = 'false';
+            }
+
+            function selectRowForContext(row, isSource) {
+                if (!row) return;
+                const alreadySelected = row.classList.contains('selected');
+
+                if (alreadySelected) {
+                    // 与 Windows 一致：在已选项上右击保留当前多选，仅清空另一侧
+                    if (isSource && selectedTargetFiles.length > 0) {
+                        clearSelectionsForPanel(false);
+                    } else if (!isSource && selectedSourceFiles.length > 0) {
+                        clearSelectionsForPanel(true);
+                    }
+                    lastActivePanel = isSource ? 'source' : 'target';
+                    updateSelectionInfo();
+                    return;
+                }
+
+                clearAllSelections();
+                row.classList.add('selected');
+                const item = {
+                    path: row.dataset.path,
+                    name: row.dataset.name,
+                    is_directory: String(row.dataset.isDirectory).toLowerCase() === 'true'
+                };
+                if (isSource) {
+                    selectedSourceFiles = [item];
+                    selectedTargetFiles = [];
+                    lastSelectedIndex.source = Number(row.dataset.idx || 0);
+                    lastSelectedIndex.target = null;
+                    lastActivePanel = 'source';
+                } else {
+                    selectedTargetFiles = [item];
+                    selectedSourceFiles = [];
+                    lastSelectedIndex.target = Number(row.dataset.idx || 0);
+                    lastSelectedIndex.source = null;
+                    lastActivePanel = 'target';
+                }
+                updateSelectionInfo();
+            }
 
             function startInlineRename(row, isSource) {
                 if (!row || row.dataset.editing === 'true') return;
@@ -3381,27 +3596,132 @@
                 }
             }
 
-            function handleContextMenu(e, isSource) {
+            function positionContextMenu(x, y) {
+                if (!contextMenu) return;
+                const rect = contextMenu.getBoundingClientRect();
+                const menuWidth = rect.width || 180;
+                const menuHeight = rect.height || 90;
+                const padding = 8;
+                let left = x;
+                let top = y;
+
+                if (left + menuWidth > window.innerWidth - padding) {
+                    left = window.innerWidth - menuWidth - padding;
+                }
+                if (top + menuHeight > window.innerHeight - padding) {
+                    top = window.innerHeight - menuHeight - padding;
+                }
+
+                contextMenu.style.left = `${Math.max(padding, left)}px`;
+                contextMenu.style.top = `${Math.max(padding, top)}px`;
+            }
+
+            function showContextMenu(e, isSource) {
                 const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
                 const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                const container = document.getElementById(containerId);
+
+                if (!contextMenu || !container || !e.target.closest(`#${containerId}`)) return;
                 if (!server) return;
 
-                const item = e.target.closest('.file-item.selectable');
-                if (item && item.closest(`#${containerId}`)) {
-                    e.preventDefault();
-                    startInlineRename(item, isSource);
-                } else if (e.target.closest(`#${containerId}`)) {
-                    e.preventDefault();
-                    startInlineCreate(isSource);
+                e.preventDefault();
+                hideContextMenu();
+
+                const row = e.target.closest('.file-item.selectable');
+                contextState = { isSource, targetRow: row || null };
+
+                if (row) {
+                    selectRowForContext(row, isSource);
+                    if (renameAction) renameAction.classList.remove('disabled');
+                } else if (renameAction) {
+                    renameAction.classList.add('disabled');
                 }
+
+                const canRun = row && String(row.dataset.isDirectory).toLowerCase() !== 'true' && isRunnableFileName(row.dataset.name);
+                if (runAction) {
+                    if (canRun) {
+                        runAction.classList.remove('disabled');
+                    } else {
+                        runAction.classList.add('disabled');
+                    }
+                }
+
+                const currentPath = getActivePath(isSource);
+                if (newFolderAction) {
+                    if (currentPath) {
+                        newFolderAction.classList.remove('disabled');
+                    } else {
+                        newFolderAction.classList.add('disabled');
+                    }
+                }
+
+                contextMenu.style.display = 'block';
+                positionContextMenu(e.clientX, e.clientY);
+                contextMenu.dataset.visible = 'true';
+            }
+
+            if (renameAction) {
+                renameAction.addEventListener('click', () => {
+                    if (renameAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { isSource, targetRow } = contextState;
+                    if (targetRow) {
+                        startInlineRename(targetRow, isSource);
+                    } else {
+                        showRenameDialog(isSource ? 'source' : 'target');
+                    }
+                });
+            }
+
+            if (newFolderAction) {
+                newFolderAction.addEventListener('click', () => {
+                    if (newFolderAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    startInlineCreate(contextState.isSource);
+                });
+            }
+
+            if (runAction) {
+                runAction.addEventListener('click', () => {
+                    if (runAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { isSource, targetRow } = contextState;
+                    if (!targetRow) {
+                        addLogWarning('⚠️ 请选择要运行的 .py 或 .sh 文件');
+                        return;
+                    }
+                    const isDir = String(targetRow.dataset.isDirectory).toLowerCase() === 'true';
+                    const fileName = targetRow.dataset.name || '';
+                    if (isDir || !isRunnableFileName(fileName)) {
+                        addLogWarning('⚠️ 仅支持运行 .py 或 .sh 文件');
+                        return;
+                    }
+                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                    runFileOnServer(server, targetRow.dataset.path, fileName);
+                });
             }
 
             if (sourceContainer) {
-                sourceContainer.addEventListener('contextmenu', (e) => handleContextMenu(e, true));
+                sourceContainer.addEventListener('contextmenu', (e) => showContextMenu(e, true));
+                sourceContainer.addEventListener('scroll', hideContextMenu, { passive: true });
             }
             if (targetContainer) {
-                targetContainer.addEventListener('contextmenu', (e) => handleContextMenu(e, false));
+                targetContainer.addEventListener('contextmenu', (e) => showContextMenu(e, false));
+                targetContainer.addEventListener('scroll', hideContextMenu, { passive: true });
             }
+
+            document.addEventListener('click', (evt) => {
+                if (contextMenu && contextMenu.dataset.visible === 'true' && !evt.target.closest('#fileContextMenu')) {
+                    hideContextMenu();
+                }
+            });
+            document.addEventListener('scroll', hideContextMenu, true);
+            window.addEventListener('resize', hideContextMenu);
+            document.addEventListener('keydown', (evt) => {
+                if (evt.key === 'Escape') {
+                    hideContextMenu();
+                }
+            });
         }
 
         // 页面加载完成后的初始化

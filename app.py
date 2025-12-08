@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 import shutil
 import shlex
+import uuid
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -3799,6 +3800,138 @@ def rename_file():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/run_file', methods=['POST'])
+def run_file():
+    """运行远端/本地的 .py 或 .sh 文件"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        file_path = data.get('path')
+
+        if not server_ip or not file_path:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in ['.py', '.sh']:
+            return jsonify({'success': False, 'error': '仅支持运行 .py 或 .sh 文件'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        # 简单的路径存在性检查（仅本地）
+        if is_local and not os.path.isfile(file_path):
+            return jsonify({'success': False, 'error': '文件不存在或不可访问'})
+
+        def quote_path(p):
+            if is_windows:
+                safe = p.replace('"', '\\"')
+                return f'"{safe}"'
+            return shlex.quote(p)
+
+        if ext == '.py':
+            # Linux/NAS 优先 python3，再回退 python；Windows 直接使用 python
+            if is_windows:
+                command = f'python -u {quote_path(file_path)}'
+            else:
+                command = f'python3 -u {quote_path(file_path)} || python -u {quote_path(file_path)}'
+        else:
+            # shell 脚本统一使用 bash
+            command = f'bash {quote_path(file_path)}'
+
+        run_id = f"run_{uuid.uuid4().hex}"
+        socketio.start_background_task(stream_run_command, server_ip, command, file_path, run_id, is_windows, is_local)
+
+        return jsonify({
+            'success': True,
+            'run_id': run_id,
+            'message': f'开始运行: {file_path}'
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None):
+    """向前端推送运行输出"""
+    try:
+        socketio.emit('run_output', {
+            'run_id': run_id,
+            'message': message,
+            'is_error': is_error,
+            'final': final,
+            'exit_code': exit_code
+        })
+    except Exception as e:
+        print(f"❌ 发送运行输出失败: {e}")
+
+
+def stream_local_command(command, run_id, file_path, is_windows):
+    """本地流式执行命令，合并 stdout/stderr"""
+    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False)
+    try:
+        with subprocess.Popen(
+            command + " 2>&1",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            executable=None if is_windows else '/bin/bash'
+        ) as proc:
+            if proc.stdout:
+                for line in proc.stdout:
+                    emit_run_output(run_id, line, is_error=False, final=False)
+            proc.wait()
+            exit_code = proc.returncode
+            emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code)
+    except Exception as e:
+        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1)
+
+
+def stream_remote_command(server_ip, command, run_id, file_path, is_windows):
+    """远程流式执行命令，合并 stdout/stderr"""
+    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False)
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        emit_run_output(run_id, f"无法连接到服务器 {server_ip}\n", is_error=True, final=True, exit_code=-1)
+        return
+
+    try:
+        # 合并输出到 stdout，便于保持终端顺序
+        full_cmd = command + " 2>&1"
+        stdin, stdout, stderr = ssh.exec_command(full_cmd, get_pty=True)
+        encoding = 'gbk' if is_windows else 'utf-8'
+
+        # 流式读取
+        while True:
+            line_bytes = stdout.readline()
+            if line_bytes:
+                try:
+                    line = line_bytes.decode(encoding, errors='ignore')
+                except Exception:
+                    line = str(line_bytes)
+                emit_run_output(run_id, line, is_error=False, final=False)
+            else:
+                if stdout.channel.exit_status_ready():
+                    break
+                time.sleep(0.05)
+
+        exit_code = stdout.channel.recv_exit_status()
+        emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code)
+    except Exception as e:
+        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1)
+
+
+def stream_run_command(server_ip, command, file_path, run_id, is_windows, is_local):
+    """后台线程：根据服务器类型流式执行命令"""
+    if is_local:
+        stream_local_command(command, run_id, file_path, is_windows)
+    else:
+        stream_remote_command(server_ip, command, run_id, file_path, is_windows)
+
 
 @app.route('/api/active_transfers', methods=['GET'])
 def get_active_transfers():
