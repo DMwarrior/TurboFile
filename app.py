@@ -51,7 +51,7 @@ SERVERS = {
 TURBOFILE_HOST_IP = "192.168.9.62"
 
 # 管理员权限开关（仅用于调试/排障）：开启后指定客户端IP可查看所有Windows服务器
-ADMIN_MODE_ENABLED = True  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
+ADMIN_MODE_ENABLED = False  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
 ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
 
 def is_admin_client_ip(ip: str) -> bool:
@@ -3830,15 +3830,20 @@ def run_file():
                 return f'"{safe}"'
             return shlex.quote(p)
 
+        work_dir = os.path.dirname(file_path) or '.'
+        script_name = os.path.basename(file_path)
+
         if ext == '.py':
             # Linux/NAS 优先 python3，再回退 python；Windows 直接使用 python
             if is_windows:
-                command = f'python -u {quote_path(file_path)}'
+                command = f'cd /d {quote_path(work_dir)} && python -u {quote_path(script_name)}'
             else:
-                command = f'python3 -u {quote_path(file_path)} || python -u {quote_path(file_path)}'
+                command = f'cd {quote_path(work_dir)} && (python3 -u {quote_path(script_name)} || python -u {quote_path(script_name)})'
         else:
+            if is_windows:
+                return jsonify({'success': False, 'error': 'Windows 不支持直接运行 .sh 脚本'})
             # shell 脚本统一使用 bash
-            command = f'bash {quote_path(file_path)}'
+            command = f'cd {quote_path(work_dir)} && bash {quote_path(script_name)}'
 
         run_id = f"run_{uuid.uuid4().hex}"
         socketio.start_background_task(stream_run_command, server_ip, command, file_path, run_id, is_windows, is_local)
@@ -3870,6 +3875,7 @@ def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None
 def stream_local_command(command, run_id, file_path, is_windows):
     """本地流式执行命令，合并 stdout/stderr"""
     emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False)
+    work_dir = os.path.dirname(file_path) or None
     try:
         with subprocess.Popen(
             command + " 2>&1",
@@ -3879,7 +3885,8 @@ def stream_local_command(command, run_id, file_path, is_windows):
             text=True,
             bufsize=1,
             universal_newlines=True,
-            executable=None if is_windows else '/bin/bash'
+            executable=None if is_windows else '/bin/bash',
+            cwd=work_dir
         ) as proc:
             if proc.stdout:
                 for line in proc.stdout:

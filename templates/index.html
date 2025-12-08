@@ -1082,16 +1082,6 @@
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
-                            <button type="button" class="btn btn-sm" title="新建文件夹"
-                                    onclick="showCreateFolderDialog('source')"
-                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                                <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
-                            </button>
-                            <button type="button" class="btn btn-sm" title="重命名"
-                                    onclick="showRenameDialog('source')"
-                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                                <i class="bi bi-pencil-square text-warning" style="font-size: 0.85rem;"></i>
-                            </button>
                             <button type="button" class="btn btn-sm" title="删除选中项"
                                     onclick="deleteSelected('source')"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -1136,16 +1126,6 @@
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
-                            <button type="button" class="btn btn-sm" title="新建文件夹"
-                                    onclick="showCreateFolderDialog('target')"
-                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                                <i class="bi bi-folder-plus text-success" style="font-size: 0.85rem;"></i>
-                            </button>
-                            <button type="button" class="btn btn-sm" title="重命名"
-                                    onclick="showRenameDialog('target')"
-                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
-                                <i class="bi bi-pencil-square text-warning" style="font-size: 0.85rem;"></i>
-                            </button>
                             <button type="button" class="btn btn-sm" title="删除选中项"
                                     onclick="deleteSelected('target')"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -3058,56 +3038,22 @@
 
         // 初始化面板调整功能
         function initializeResizers() {
-            // 垂直分隔条（左右面板）
+            // 固定左右面板宽度，并禁用拖拽调整
             const verticalResizer = document.getElementById('verticalResizer');
             const sourcePanel = document.getElementById('sourcePanel');
             const targetPanel = document.getElementById('targetPanel');
 
-            let isResizing = false;
-
-            verticalResizer.addEventListener('mousedown', function(e) {
-                isResizing = true;
-                document.addEventListener('mousemove', handleVerticalResize);
-                document.addEventListener('mouseup', stopResize);
-                e.preventDefault();
-            });
-
-        function handleVerticalResize(e) {
-                if (!isResizing) return;
-
-                const container = verticalResizer.parentElement;
-                const containerRect = container.getBoundingClientRect();
-                const percentage = ((e.clientX - containerRect.left) / containerRect.width) * 100;
-
-                if (percentage > 20 && percentage < 80) {
-                    sourcePanel.style.flexBasis = percentage + '%';
-                    targetPanel.style.flexBasis = (100 - percentage) + '%';
-                }
+            if (sourcePanel) {
+                sourcePanel.style.flexBasis = '50%';
+                sourcePanel.style.width = '50%';
             }
-
-            // 水平分隔条已移除
-
-            function stopResize() {
-                isResizing = false;
-                verticalResizer.classList.remove('dragging');
-                if (resizeFrame) {
-                    cancelAnimationFrame(resizeFrame);
-                    resizeFrame = null;
-                    applyResize();
-                }
-                // 回写最终宽度，确保刷新后状态持久（使用 flexBasis 已在拖动中更新，补写 width 防止外部样式覆盖）
-                if (sourcePanel && targetPanel) {
-                    const sourceWidth = sourcePanel.getBoundingClientRect().width;
-                    const targetWidth = targetPanel.getBoundingClientRect().width;
-                    const total = sourceWidth + targetWidth;
-                    if (total > 0) {
-                        const p = (sourceWidth / total) * 100;
-                        sourcePanel.style.width = p + '%';
-                        targetPanel.style.width = (100 - p) + '%';
-                    }
-                }
-                document.removeEventListener('mousemove', handleVerticalResize);
-                document.removeEventListener('mouseup', stopResize);
+            if (targetPanel) {
+                targetPanel.style.flexBasis = '50%';
+                targetPanel.style.width = '50%';
+            }
+            if (verticalResizer) {
+                verticalResizer.style.pointerEvents = 'none';
+                verticalResizer.style.cursor = 'default';
             }
         }
 
