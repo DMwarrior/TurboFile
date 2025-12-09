@@ -54,7 +54,7 @@ SERVERS = {
 TURBOFILE_HOST_IP = "192.168.9.62"
 
 # 管理员权限开关（仅用于调试/排障）：开启后指定客户端IP可查看所有Windows服务器
-ADMIN_MODE_ENABLED = False  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
+ADMIN_MODE_ENABLED = True  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
 ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
 
 def is_admin_client_ip(ip: str) -> bool:
@@ -3570,10 +3570,25 @@ def delete_files():
                 if is_local:
                     # 本地删除
                     if os.path.isdir(path):
-                        shutil.rmtree(path)
+                        try:
+                            shutil.rmtree(path)
+                            deleted_count += 1
+                        except PermissionError:
+                            try:
+                                subprocess.check_output(['sudo', '-n', 'rm', '-rf', path], stderr=subprocess.STDOUT)
+                                deleted_count += 1
+                            except subprocess.CalledProcessError as e:
+                                failed_items.append({'path': path, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
                     else:
-                        os.remove(path)
-                    deleted_count += 1
+                        try:
+                            os.remove(path)
+                            deleted_count += 1
+                        except PermissionError:
+                            try:
+                                subprocess.check_output(['sudo', '-n', 'rm', '-f', path], stderr=subprocess.STDOUT)
+                                deleted_count += 1
+                            except subprocess.CalledProcessError as e:
+                                failed_items.append({'path': path, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
                 else:
                     # 远程删除
                     if is_windows:
@@ -3597,9 +3612,12 @@ def delete_files():
                             print(f"❌ 删除失败: {win_path}, 错误: {error_msg}")
                             failed_items.append({'path': path, 'error': error_msg})
                     else:
-                        # Linux/NAS: 使用 rm -rf - 使用 shlex.quote() 安全转义路径
-                        rm_cmd = f'rm -rf {shlex.quote(path)}'
-                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
+                        # Linux/NAS: 优先 sudo，无密码则回退普通 rm
+                        rm_cmd_sudo = f"sudo -n rm -rf {shlex.quote(path)}"
+                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd_sudo)
+                        if exit_code != 0:
+                            rm_cmd = f'rm -rf {shlex.quote(path)}'
+                            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
 
                         if exit_code == 0:
                             deleted_count += 1
@@ -3781,7 +3799,13 @@ def rename_file():
         # 执行重命名
         if is_local:
             # 本地重命名
-            os.rename(old_path, new_path)
+            try:
+                os.rename(old_path, new_path)
+            except PermissionError:
+                try:
+                    subprocess.check_output(['sudo', '-n', 'mv', old_path, new_path], stderr=subprocess.STDOUT)
+                except subprocess.CalledProcessError as e:
+                    return jsonify({'success': False, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
         else:
             # 远程重命名
             if is_windows:
@@ -3794,6 +3818,11 @@ def rename_file():
                 rename_cmd = f'mv {shlex.quote(old_path)} {shlex.quote(new_path)}'
 
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rename_cmd)
+
+            if exit_code != 0 and not is_windows:
+                # 尝试 sudo
+                sudo_cmd = f'sudo -n mv {shlex.quote(old_path)} {shlex.quote(new_path)}'
+                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, sudo_cmd)
 
             if exit_code != 0:
                 return jsonify({'success': False, 'error': stderr or '重命名失败'})
@@ -3880,6 +3909,9 @@ def _escape_pwsh_literal(path: str) -> str:
     # PowerShell 单引号转义：'' 表示单个 '
     return path.replace("'", "''")
 
+def _human_timestamp():
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 @app.route('/api/compute_size', methods=['POST'])
 def compute_size():
     """计算文件/文件夹大小"""
@@ -3951,6 +3983,133 @@ def compute_size():
             'size_bytes': size_bytes,
             'human_size': _human_readable_size(size_bytes)
         })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/compress', methods=['POST'])
+def compress_path():
+    """压缩文件/文件夹为 zip"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        file_path = data.get('path')
+        if not server_ip or not file_path:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        base_dir = os.path.dirname(file_path)
+        name = os.path.basename(file_path.rstrip('/\\'))
+        zip_name = f"{name}.zip"
+        target_path = os.path.join(base_dir, zip_name) if is_windows else os.path.join(base_dir, zip_name)
+
+        if is_local:
+            if not os.path.exists(file_path):
+                return jsonify({'success': False, 'error': '路径不存在'})
+            if is_windows:
+                safe_src = _escape_pwsh_literal(file_path)
+                safe_dst = _escape_pwsh_literal(target_path)
+                cmd = [
+                    "powershell", "-NoProfile", "-Command",
+                    f"Compress-Archive -LiteralPath '{safe_src}' -DestinationPath '{safe_dst}' -Force"
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    return jsonify({'success': False, 'error': result.stderr or '压缩失败'})
+            else:
+                try:
+                    subprocess.check_output(['zip', '-r', '-q', target_path, name], cwd=base_dir, stderr=subprocess.STDOUT)
+                except subprocess.CalledProcessError as e:
+                    return jsonify({'success': False, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else '压缩失败'})
+        else:
+            if is_windows:
+                safe_src = _escape_pwsh_literal(file_path)
+                safe_dst = _escape_pwsh_literal(target_path)
+                ps_cmd = (
+                    "powershell -NoProfile -Command "
+                    f"\"Compress-Archive -LiteralPath '{safe_src}' -DestinationPath '{safe_dst}' -Force\""
+                )
+                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, ps_cmd)
+                if exit_code != 0:
+                    return jsonify({'success': False, 'error': stderr or '压缩失败'})
+            else:
+                zip_cmd = f"cd {shlex.quote(base_dir)} && zip -r -q {shlex.quote(zip_name)} {shlex.quote(name)}"
+                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, zip_cmd)
+                if exit_code != 0:
+                    return jsonify({'success': False, 'error': stderr or '压缩失败'})
+
+        return jsonify({'success': True, 'message': f'已生成: {zip_name}', 'zip_name': zip_name, 'zip_path': target_path})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/extract', methods=['POST'])
+def extract_archive():
+    """解压缩 zip/tar.gz/tgz/tar.bz2/tar.xz"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        file_path = data.get('path')
+        if not server_ip or not file_path:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        base_dir = os.path.dirname(file_path)
+        name = os.path.basename(file_path)
+
+        def is_tar_like(n):
+            return n.endswith('.tar.gz') or n.endswith('.tgz') or n.endswith('.tar.bz2') or n.endswith('.tar.xz') or n.endswith('.tar')
+
+        if is_local:
+            if not os.path.exists(file_path):
+                return jsonify({'success': False, 'error': '文件不存在'})
+            if is_windows:
+                safe_src = _escape_pwsh_literal(file_path)
+                safe_dst = _escape_pwsh_literal(base_dir)
+                cmd = [
+                    "powershell", "-NoProfile", "-Command",
+                    f"Expand-Archive -LiteralPath '{safe_src}' -DestinationPath '{safe_dst}' -Force"
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    return jsonify({'success': False, 'error': result.stderr or '解压失败'})
+            else:
+                try:
+                    if name.endswith('.zip'):
+                        subprocess.check_output(['unzip', '-o', file_path, '-d', base_dir], stderr=subprocess.STDOUT)
+                    elif is_tar_like(name):
+                        subprocess.check_output(['tar', '-xf', file_path, '-C', base_dir], stderr=subprocess.STDOUT)
+                    else:
+                        return jsonify({'success': False, 'error': '不支持的压缩格式'})
+                except subprocess.CalledProcessError as e:
+                    return jsonify({'success': False, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else '解压失败'})
+        else:
+            if is_windows:
+                safe_src = _escape_pwsh_literal(file_path)
+                safe_dst = _escape_pwsh_literal(base_dir)
+                ps_cmd = (
+                    "powershell -NoProfile -Command "
+                    f"\"Expand-Archive -LiteralPath '{safe_src}' -DestinationPath '{safe_dst}' -Force\""
+                )
+                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, ps_cmd)
+                if exit_code != 0:
+                    return jsonify({'success': False, 'error': stderr or '解压失败'})
+            else:
+                if name.endswith('.zip'):
+                    cmd = f"unzip -o {shlex.quote(file_path)} -d {shlex.quote(base_dir)}"
+                elif is_tar_like(name):
+                    cmd = f"tar -xf {shlex.quote(file_path)} -C {shlex.quote(base_dir)}"
+                else:
+                    return jsonify({'success': False, 'error': '不支持的压缩格式'})
+                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
+                if exit_code != 0:
+                    return jsonify({'success': False, 'error': stderr or '解压失败'})
+
+        return jsonify({'success': True, 'message': '解压完成'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 

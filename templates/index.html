@@ -1273,6 +1273,14 @@
             <i class="bi bi-hdd-network text-info"></i>
             <span>计算大小</span>
         </div>
+        <div class="menu-item" data-action="compress">
+            <i class="bi bi-archive text-primary"></i>
+            <span>压缩</span>
+        </div>
+        <div class="menu-item" data-action="extract">
+            <i class="bi bi-box-arrow-down text-success"></i>
+            <span>解压</span>
+        </div>
     </div>
 
     <!-- 传输日志模态窗口 -->
@@ -1948,6 +1956,44 @@
                 }
             } catch (err) {
                 addLogError(`❌ 计算异常: ${err.message}`);
+            }
+        }
+
+        // 压缩
+        async function compressPathOnServer(server, filePath, fileName) {
+            try {
+                const resp = await fetch('/api/compress', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: server, path: filePath })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    addLogSuccess(`🗜️ 压缩完成: ${result.zip_name || fileName + '.zip'}`);
+                } else {
+                    addLogError(`❌ 压缩失败: ${result.error || '未知错误'}`);
+                }
+            } catch (err) {
+                addLogError(`❌ 压缩异常: ${err.message}`);
+            }
+        }
+
+        // 解压
+        async function extractArchiveOnServer(server, filePath, fileName) {
+            try {
+                const resp = await fetch('/api/extract', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: server, path: filePath })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    addLogSuccess(`📂 解压完成: ${fileName}`);
+                } else {
+                    addLogError(`❌ 解压失败: ${result.error || '未知错误'}`);
+                }
+            } catch (err) {
+                addLogError(`❌ 解压异常: ${err.message}`);
             }
         }
 
@@ -2829,6 +2875,14 @@
             const fastSSH = true;
             const parallelTransfer = true;
 
+            // 剪切模式弹窗提醒
+            if (currentTransferMode === 'move') {
+                const ok = confirm('当前选择的是「剪切」模式，源文件将被删除。是否继续？');
+                if (!ok) {
+                    return;
+                }
+            }
+
             // 选择校验
             if (leftSelected && rightSelected) {
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
@@ -3301,12 +3355,15 @@
                 isSource: true
             };
 
-            function isImageFile(name) {
-                return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
-            }
-            function isTextEditable(name) {
-                return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh)$/i.test(name);
-            }
+        function isImageFile(name) {
+            return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
+        }
+        function isTextEditable(name) {
+            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp)$/i.test(name);
+        }
+        function isArchiveFile(name) {
+            return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i.test(name);
+        }
 
             function buildImageViewer(server, path, name, isSource) {
                 const state = isSource ? browseState.source : browseState.target;
@@ -3560,6 +3617,8 @@
             const newFolderAction = contextMenu ? contextMenu.querySelector('[data-action="new-folder"]') : null;
             const runAction = contextMenu ? contextMenu.querySelector('[data-action="run"]') : null;
             const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
+            const compressAction = contextMenu ? contextMenu.querySelector('[data-action="compress"]') : null;
+            const extractAction = contextMenu ? contextMenu.querySelector('[data-action="extract"]') : null;
             let contextState = { isSource: true, targetRow: null };
 
             function hideContextMenu() {
@@ -3773,6 +3832,22 @@
                     }
                 }
 
+                if (compressAction) {
+                    if (row) {
+                        compressAction.classList.remove('disabled');
+                    } else {
+                        compressAction.classList.add('disabled');
+                    }
+                }
+                if (extractAction) {
+                    const canExtract = row && isArchiveFile(row.dataset.name || '');
+                    if (canExtract) {
+                        extractAction.classList.remove('disabled');
+                    } else {
+                        extractAction.classList.add('disabled');
+                    }
+                }
+
                 contextMenu.style.display = 'block';
                 positionContextMenu(e.clientX, e.clientY);
                 contextMenu.dataset.visible = 'true';
@@ -3831,6 +3906,43 @@
                     const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
                     const name = targetRow.dataset.name || '';
                     computeSizeOnServer(server, targetRow.dataset.path, name);
+                });
+            }
+
+            if (compressAction) {
+                compressAction.addEventListener('click', () => {
+                    if (compressAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { isSource, targetRow } = contextState;
+                    if (!targetRow) {
+                        addLogWarning('⚠️ 请先选择文件或文件夹');
+                        return;
+                    }
+                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                    const name = targetRow.dataset.name || '';
+                    addLogInfo(`🗜️ 正在压缩: ${name}`);
+                    computeSizeOnServer(server, targetRow.dataset.path, name);
+                    compressPathOnServer(server, targetRow.dataset.path, name);
+                });
+            }
+
+            if (extractAction) {
+                extractAction.addEventListener('click', () => {
+                    if (extractAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { isSource, targetRow } = contextState;
+                    if (!targetRow) {
+                        addLogWarning('⚠️ 请先选择压缩文件');
+                        return;
+                    }
+                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                    const name = targetRow.dataset.name || '';
+                    if (!isArchiveFile(name)) {
+                        addLogWarning('⚠️ 仅支持 zip/tar/tgz/tar.gz/tar.bz2/tar.xz');
+                        return;
+                    }
+                    addLogInfo(`📂 正在解压: ${name}`);
+                    extractArchiveOnServer(server, targetRow.dataset.path, name);
                 });
             }
 
