@@ -24,6 +24,9 @@ import multiprocessing
 import shutil
 import shlex
 import uuid
+import signal
+import select
+import pty
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -686,6 +689,8 @@ class SSHManager:
             return None, str(e), -1
 
 ssh_manager = SSHManager()
+RUN_TASKS = {}
+RUN_TASKS_LOCK = threading.Lock()
 
 def get_ssh_command_with_port(server_ip, fast_ssh=True):
     """构建支持自定义端口的SSH命令字符串"""
@@ -3809,6 +3814,7 @@ def run_file():
         data = request.get_json()
         server_ip = data.get('server')
         file_path = data.get('path')
+        client_sid = data.get('sid')  # 获取客户端的 socket ID，用于定向发送输出
 
         if not server_ip or not file_path:
             return jsonify({'success': False, 'error': '缺少必要参数'})
@@ -3846,7 +3852,7 @@ def run_file():
             command = f'cd {quote_path(work_dir)} && bash {quote_path(script_name)}'
 
         run_id = f"run_{uuid.uuid4().hex}"
-        socketio.start_background_task(stream_run_command, server_ip, command, file_path, run_id, is_windows, is_local)
+        socketio.start_background_task(stream_run_command, server_ip, command, file_path, run_id, is_windows, is_local, client_sid)
 
         return jsonify({
             'success': True,
@@ -3858,58 +3864,126 @@ def run_file():
         return jsonify({'success': False, 'error': str(e)})
 
 
-def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None):
-    """向前端推送运行输出"""
+def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None, sid=None):
+    """向前端推送运行输出（仅发送给发起请求的客户端）"""
     try:
-        socketio.emit('run_output', {
+        data = {
             'run_id': run_id,
             'message': message,
             'is_error': is_error,
             'final': final,
             'exit_code': exit_code
-        })
+        }
+        if sid:
+            # 只发送给特定客户端，不广播给其他设备
+            socketio.emit('run_output', data, room=sid)
+        else:
+            # 没有指定 sid 时，广播给所有客户端（向后兼容）
+            socketio.emit('run_output', data)
     except Exception as e:
         print(f"❌ 发送运行输出失败: {e}")
 
 
-def stream_local_command(command, run_id, file_path, is_windows):
+def stream_local_command(command, run_id, file_path, is_windows, sid=None):
     """本地流式执行命令，合并 stdout/stderr"""
-    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False)
+    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False, sid=sid)
     work_dir = os.path.dirname(file_path) or None
+    proc = None
+    master_fd = None
     try:
-        with subprocess.Popen(
-            command + " 2>&1",
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-            executable=None if is_windows else '/bin/bash',
-            cwd=work_dir
-        ) as proc:
+        if not is_windows:
+            master_fd, slave_fd = pty.openpty()
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=work_dir,
+                preexec_fn=os.setsid,
+                close_fds=True
+            )
+            os.close(slave_fd)
+            with RUN_TASKS_LOCK:
+                RUN_TASKS[run_id] = {'type': 'local', 'process': proc, 'fd': master_fd, 'sid': sid}
+
+            while True:
+                rlist, _, _ = select.select([master_fd], [], [], 0.1)
+                if master_fd in rlist:
+                    try:
+                        data = os.read(master_fd, 1024)
+                        if data:
+                            try:
+                                text = data.decode('utf-8', errors='replace')
+                            except Exception:
+                                text = str(data)
+                            emit_run_output(run_id, text, is_error=False, final=False, sid=sid)
+                        else:
+                            break
+                    except OSError:
+                        break
+                if proc.poll() is not None:
+                    # 读完剩余
+                    try:
+                        while True:
+                            data = os.read(master_fd, 1024)
+                            if not data:
+                                break
+                            text = data.decode('utf-8', errors='replace')
+                            emit_run_output(run_id, text, is_error=False, final=False, sid=sid)
+                    except Exception:
+                        pass
+                    break
+
+            exit_code = proc.returncode
+            emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code, sid=sid)
+        else:
+            proc = subprocess.Popen(
+                command + " 2>&1",
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                cwd=work_dir,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+            with RUN_TASKS_LOCK:
+                RUN_TASKS[run_id] = {'type': 'local', 'process': proc, 'fd': None, 'sid': sid}
+
             if proc.stdout:
                 for line in proc.stdout:
-                    emit_run_output(run_id, line, is_error=False, final=False)
+                    emit_run_output(run_id, line, is_error=False, final=False, sid=sid)
             proc.wait()
             exit_code = proc.returncode
-            emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code)
+            emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code, sid=sid)
     except Exception as e:
-        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1)
+        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1, sid=sid)
+    finally:
+        with RUN_TASKS_LOCK:
+            RUN_TASKS.pop(run_id, None)
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except Exception:
+                pass
 
 
-def stream_remote_command(server_ip, command, run_id, file_path, is_windows):
+def stream_remote_command(server_ip, command, run_id, file_path, is_windows, sid=None):
     """远程流式执行命令，合并 stdout/stderr"""
-    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False)
+    emit_run_output(run_id, f"▶️ 开始运行: {file_path}\n", is_error=False, final=False, sid=sid)
     ssh = ssh_manager.get_connection(server_ip)
     if not ssh:
-        emit_run_output(run_id, f"无法连接到服务器 {server_ip}\n", is_error=True, final=True, exit_code=-1)
+        emit_run_output(run_id, f"无法连接到服务器 {server_ip}\n", is_error=True, final=True, exit_code=-1, sid=sid)
         return
 
     try:
         # 合并输出到 stdout，便于保持终端顺序
         full_cmd = command + " 2>&1"
         stdin, stdout, stderr = ssh.exec_command(full_cmd, get_pty=True)
+        with RUN_TASKS_LOCK:
+            RUN_TASKS[run_id] = {'type': 'remote', 'channel': stdout.channel, 'server': server_ip, 'sid': sid}
         encoding = 'gbk' if is_windows else 'utf-8'
 
         # 流式读取
@@ -3917,27 +3991,119 @@ def stream_remote_command(server_ip, command, run_id, file_path, is_windows):
             line_bytes = stdout.readline()
             if line_bytes:
                 try:
-                    line = line_bytes.decode(encoding, errors='ignore')
+                    line = line_bytes.decode(encoding, errors='replace')
                 except Exception:
                     line = str(line_bytes)
-                emit_run_output(run_id, line, is_error=False, final=False)
+                emit_run_output(run_id, line, is_error=False, final=False, sid=sid)
             else:
                 if stdout.channel.exit_status_ready():
                     break
                 time.sleep(0.05)
 
         exit_code = stdout.channel.recv_exit_status()
-        emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code)
+        emit_run_output(run_id, f"\n[运行结束，退出码 {exit_code}]\n", is_error=exit_code != 0, final=True, exit_code=exit_code, sid=sid)
     except Exception as e:
-        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1)
+        emit_run_output(run_id, f"运行异常: {e}\n", is_error=True, final=True, exit_code=-1, sid=sid)
+    finally:
+        with RUN_TASKS_LOCK:
+            RUN_TASKS.pop(run_id, None)
 
 
-def stream_run_command(server_ip, command, file_path, run_id, is_windows, is_local):
+def stream_run_command(server_ip, command, file_path, run_id, is_windows, is_local, sid=None):
     """后台线程：根据服务器类型流式执行命令"""
     if is_local:
-        stream_local_command(command, run_id, file_path, is_windows)
+        stream_local_command(command, run_id, file_path, is_windows, sid=sid)
     else:
-        stream_remote_command(server_ip, command, run_id, file_path, is_windows)
+        stream_remote_command(server_ip, command, run_id, file_path, is_windows, sid=sid)
+
+
+@app.route('/api/run_file/cancel', methods=['POST'])
+def cancel_run_file():
+    """取消正在运行的脚本"""
+    try:
+        data = request.get_json()
+        run_id = data.get('run_id')
+        if not run_id:
+            return jsonify({'success': False, 'error': '缺少 run_id'})
+
+        with RUN_TASKS_LOCK:
+            task = RUN_TASKS.get(run_id)
+
+        if not task:
+            return jsonify({'success': False, 'error': '未找到对应的运行任务，可能已结束'})
+
+        # 获取客户端 sid，用于定向发送消息
+        client_sid = task.get('sid')
+
+        if task['type'] == 'local':
+            proc = task.get('process')
+            if proc and proc.poll() is None:
+                try:
+                    if os.name != 'nt':
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        time.sleep(0.5)
+                        if proc.poll() is None:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.terminate()
+                except Exception as e:
+                    emit_run_output(run_id, f"中断失败: {e}\n", is_error=True, final=False, sid=client_sid)
+                    return jsonify({'success': False, 'error': f'中断失败: {e}'})
+        elif task['type'] == 'remote':
+            channel = task.get('channel')
+            try:
+                if channel:
+                    channel.close()
+            except Exception as e:
+                emit_run_output(run_id, f"远程中断失败: {e}\n", is_error=True, final=False, sid=client_sid)
+                return jsonify({'success': False, 'error': f'远程中断失败: {e}'})
+
+        emit_run_output(run_id, "⏹️ 已请求中断\n", is_error=True, final=False, sid=client_sid)
+        return jsonify({'success': True})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/run_file/input', methods=['POST'])
+def send_run_input():
+    """向正在运行的脚本发送输入"""
+    try:
+        data = request.get_json()
+        run_id = data.get('run_id')
+        user_input = data.get('data', '')
+        if not run_id:
+            return jsonify({'success': False, 'error': '缺少 run_id'})
+
+        with RUN_TASKS_LOCK:
+            task = RUN_TASKS.get(run_id)
+        if not task:
+            return jsonify({'success': False, 'error': '未找到对应的运行任务，可能已结束'})
+
+        payload = (user_input or '') + '\n'
+
+        if task['type'] == 'local':
+            fd = task.get('fd')
+            proc = task.get('process')
+            try:
+                if fd is not None:
+                    os.write(fd, payload.encode('utf-8', errors='ignore'))
+                elif proc and proc.stdin:
+                    proc.stdin.write(payload)
+                    proc.stdin.flush()
+            except Exception as e:
+                return jsonify({'success': False, 'error': f'发送输入失败: {e}'})
+        elif task['type'] == 'remote':
+            channel = task.get('channel')
+            try:
+                if channel:
+                    channel.send(payload)
+            except Exception as e:
+                return jsonify({'success': False, 'error': f'远程输入失败: {e}'})
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/api/active_transfers', methods=['GET'])

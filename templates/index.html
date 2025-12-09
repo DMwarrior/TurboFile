@@ -737,15 +737,23 @@
         }
 
         /* 模态窗口中的日志区域样式 */
+        #logModal .modal-dialog {
+            max-width: 60vw;
+        }
+
+        #logModal .modal-body {
+            max-height: ·70vh;
+        }
+
         .log-container {
-            height: 400px;
+            height: 70vh;
             overflow-y: auto;
             overflow-x: hidden;
             border: 1px solid var(--border-color);
             border-radius: 6px;
             background: #f8f9fa;
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
             line-height: 1.4;
             overscroll-behavior: contain;
             scroll-behavior: smooth;
@@ -1273,12 +1281,22 @@
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
-                <div class="modal-body">
+                    <div class="modal-body">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <small class="text-muted">实时显示传输过程中的详细信息</small>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="clearLog()" style="font-size: 0.75rem;">
-                            <i class="bi bi-trash3"></i> 清空日志
-                        </button>
+                        <div class="d-flex align-items-center" style="gap: 6px; flex-wrap: wrap;">
+                            <div class="input-group input-group-sm" style="width: 240px;">
+                                <input id="runInputBox" type="text" class="form-control" placeholder="向脚本输入内容，回车发送"
+                                       onkeydown="if(event.key === 'Enter'){ event.preventDefault(); sendRunInput(); }">
+                                <button id="runSendBtn" class="btn btn-outline-primary" type="button" onclick="sendRunInput()">发送</button>
+                            </div>
+                            <button id="runStopBtn" class="btn btn-outline-primary btn-sm" onclick="cancelCurrentRun()" style="font-size: 0.75rem;">
+                                <i class="bi bi-stop-circle"></i> 停止脚本
+                            </button>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="clearLog()" style="font-size: 0.75rem;">
+                                <i class="bi bi-trash3"></i> 清空日志
+                            </button>
+                        </div>
                     </div>
                     <div id="logContainer" class="log-container">
                         <div id="logContent" class="log-content">
@@ -1332,6 +1350,8 @@
         const MAX_LOG_ENTRIES = 100;
         const LOG_UPDATE_INTERVAL = 500; // 500ms批量更新
         const runLogBlocks = {};
+        let currentRunId = null;
+        let socketId = null;
 
         // 智能日志函数
         function addLog(message, type = 'info') {
@@ -1377,6 +1397,15 @@
                 updateLogDisplay();
                 logUpdateTimer = null;
             }, LOG_UPDATE_INTERVAL);
+        }
+
+        // 立即刷新日志，确保关键提示按顺序出现
+        function flushLogNow() {
+            if (logUpdateTimer) {
+                clearTimeout(logUpdateTimer);
+                logUpdateTimer = null;
+            }
+            updateLogDisplay();
         }
 
         // 更新日志显示
@@ -1712,10 +1741,68 @@
             addLog(message, 'error');
         }
 
+        function updateRunControls() {
+            const stopBtn = document.getElementById('runStopBtn');
+            const sendBtn = document.getElementById('runSendBtn');
+            const input = document.getElementById('runInputBox');
+            const disabled = !currentRunId;
+            if (stopBtn) stopBtn.disabled = disabled;
+            if (sendBtn) sendBtn.disabled = disabled;
+            if (input) input.disabled = disabled;
+        }
+
         function logCommandOutput(text, isError = false) {
             if (!text) return;
             const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
             lines.forEach(line => addLog(line, isError ? 'error' : 'info'));
+        }
+
+        async function cancelCurrentRun() {
+            if (!currentRunId) {
+                addLogWarning('当前没有正在运行的脚本');
+                return;
+            }
+            try {
+                const resp = await fetch('/api/run_file/cancel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ run_id: currentRunId })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    addLogWarning('⏹️ 已发送中断请求');
+                } else {
+                    addLogError(`❌ 中断失败: ${result.error || '未知错误'}`);
+                }
+            } catch (err) {
+                addLogError(`❌ 中断异常: ${err.message}`);
+            }
+        }
+
+        async function sendRunInput() {
+            const inputEl = document.getElementById('runInputBox');
+            if (!inputEl) return;
+            const val = inputEl.value;
+            if (!val || !val.trim()) return;
+            if (!currentRunId) {
+                addLogWarning('当前没有正在运行的脚本');
+                return;
+            }
+            try {
+                const resp = await fetch('/api/run_file/input', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ run_id: currentRunId, data: val })
+                });
+                const result = await resp.json();
+                if (!result.success) {
+                    addLogError(`❌ 发送输入失败: ${result.error || '未知错误'}`);
+                }
+            } catch (err) {
+                addLogError(`❌ 发送输入异常: ${err.message}`);
+            } finally {
+                inputEl.value = '';
+            }
         }
 
         function appendRunLog(runId, text, isError = false, isFinal = false, exitCode = null) {
@@ -1735,11 +1822,45 @@
                 `;
                 logContent.appendChild(block);
                 runLogBlocks[runId] = block;
+                // 初始化进度条状态：存储当前行内容，用于 \r 回车覆盖
+                block._currentLine = '';
             }
 
             const pre = block.querySelector('.log-run-block');
             if (pre && text) {
-                pre.textContent += text;
+                // 处理 \r 回车符实现原地更新（进度条效果）
+                // 初始化或获取已保存的完成行内容
+                if (block._completedLines === undefined) {
+                    block._completedLines = '';
+                }
+                let completedLines = block._completedLines;
+                let currentLine = block._currentLine || '';
+
+                for (let i = 0; i < text.length; i++) {
+                    const char = text[i];
+                    if (char === '\r') {
+                        // 回车符：清空当前行（下一个字符会覆盖）
+                        // 如果下一个字符是 \n，则跳过（Windows 的 \r\n）
+                        if (text[i + 1] === '\n') {
+                            continue; // 让 \n 处理换行
+                        }
+                        // 单独的 \r：覆盖当前行（实现进度条原地更新）
+                        currentLine = '';
+                    } else if (char === '\n') {
+                        // 换行符：将当前行追加到已完成行，并开始新行
+                        completedLines += currentLine + '\n';
+                        currentLine = '';
+                    } else {
+                        // 普通字符：追加到当前行
+                        currentLine += char;
+                    }
+                }
+
+                // 保存状态
+                block._completedLines = completedLines;
+                block._currentLine = currentLine;
+                // 更新 pre 的内容（已完成的行 + 当前正在编辑的行）
+                pre.textContent = completedLines + currentLine;
             }
 
             if (isFinal && pre) {
@@ -1771,19 +1892,24 @@
             }
 
             addLogInfo(`▶️ 正在运行: ${fileName || filePath}`);
+            // 立即刷新日志，确保这条提示先出现
+            if (typeof flushLogNow === 'function') {
+                flushLogNow();
+            }
 
             try {
                 const resp = await fetch('/api/run_file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: server, path: filePath })
+                    body: JSON.stringify({ server: server, path: filePath, sid: socket.id })
                 });
 
                 const result = await resp.json();
 
                 if (result.success) {
                     const runId = result.run_id || '';
-                    addLogInfo(`⏳ 已开始运行，输出将实时显示${runId ? ` (ID: ${runId})` : ''}`);
+                    currentRunId = runId || null;
+                    updateRunControls();
                 } else {
                     addLogError(`❌ 运行失败: ${result.error || '未知错误'}`);
                 }
@@ -2902,6 +3028,10 @@
             const isFinal = data.final === true;
             const exitCode = typeof data.exit_code === 'number' ? data.exit_code : null;
             appendRunLog(runId, msg, isError, isFinal, exitCode);
+            if (isFinal && currentRunId === runId) {
+                currentRunId = null;
+                updateRunControls();
+            }
         });
 
         socket.on('transfer_complete', function(data) {
@@ -3679,7 +3809,14 @@
             addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
             const CLIENT_IPV4 = JSON.parse('{{ client_ipv4|tojson|default("null") }}');
             if (CLIENT_IPV4) { addLogInfo('🖥️ 访问设备 IPv4: ' + CLIENT_IPV4); }
-
+            if (CLIENT_IPV4) {
+                socket.emit('register_client', { client_ip: CLIENT_IPV4 });
+            }
+            socket.on('connect', () => {
+                socketId = socket.id;
+                updateRunControls();
+            });
+            updateRunControls();
 
             // 默认使用标题并排模式，您可以调用 switchLogoDisplay('watermark') 或 switchLogoDisplay('footer') 切换
             switchLogoDisplay('header');
