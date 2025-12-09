@@ -1269,6 +1269,10 @@
             <i class="bi bi-play-fill text-primary"></i>
             <span>运行</span>
         </div>
+        <div class="menu-item" data-action="size">
+            <i class="bi bi-hdd-network text-info"></i>
+            <span>计算大小</span>
+        </div>
     </div>
 
     <!-- 传输日志模态窗口 -->
@@ -1281,7 +1285,7 @@
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
-                    <div class="modal-body">
+            <div class="modal-body">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <small class="text-muted">实时显示传输过程中的详细信息</small>
                         <div class="d-flex align-items-center" style="gap: 6px; flex-wrap: wrap;">
@@ -1915,6 +1919,35 @@
                 }
             } catch (error) {
                 addLogError(`❌ 运行异常: ${error.message}`);
+            }
+        }
+
+        // 计算文件/文件夹大小
+        async function computeSizeOnServer(server, filePath, fileName) {
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return;
+            }
+            if (!filePath) {
+                addLogWarning('⚠️ 未找到要计算的路径');
+                return;
+            }
+            addLogInfo(`📦 正在计算大小: ${fileName || filePath}`);
+            if (typeof flushLogNow === 'function') flushLogNow();
+            try {
+                const resp = await fetch('/api/compute_size', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: server, path: filePath })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    addLogSuccess(`📏 大小: ${result.human_size || result.size_bytes + ' bytes'} (${fileName || filePath})`);
+                } else {
+                    addLogError(`❌ 计算失败: ${result.error || '未知错误'}`);
+                }
+            } catch (err) {
+                addLogError(`❌ 计算异常: ${err.message}`);
             }
         }
 
@@ -3526,6 +3559,7 @@
             const renameAction = contextMenu ? contextMenu.querySelector('[data-action="rename"]') : null;
             const newFolderAction = contextMenu ? contextMenu.querySelector('[data-action="new-folder"]') : null;
             const runAction = contextMenu ? contextMenu.querySelector('[data-action="run"]') : null;
+            const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
             let contextState = { isSource: true, targetRow: null };
 
             function hideContextMenu() {
@@ -3731,6 +3765,14 @@
                     }
                 }
 
+                if (sizeAction) {
+                    if (row) {
+                        sizeAction.classList.remove('disabled');
+                    } else {
+                        sizeAction.classList.add('disabled');
+                    }
+                }
+
                 contextMenu.style.display = 'block';
                 positionContextMenu(e.clientX, e.clientY);
                 contextMenu.dataset.visible = 'true';
@@ -3777,6 +3819,21 @@
                 });
             }
 
+            if (sizeAction) {
+                sizeAction.addEventListener('click', () => {
+                    if (sizeAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { isSource, targetRow } = contextState;
+                    if (!targetRow) {
+                        addLogWarning('⚠️ 请先选择文件或文件夹');
+                        return;
+                    }
+                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                    const name = targetRow.dataset.name || '';
+                    computeSizeOnServer(server, targetRow.dataset.path, name);
+                });
+            }
+
             if (sourceContainer) {
                 sourceContainer.addEventListener('contextmenu', (e) => showContextMenu(e, true));
                 sourceContainer.addEventListener('scroll', hideContextMenu, { passive: true });
@@ -3812,6 +3869,11 @@
             if (CLIENT_IPV4) {
                 socket.emit('register_client', { client_ip: CLIENT_IPV4 });
             }
+            socket.on('connect', () => {
+                socketId = socket.id;
+                updateRunControls();
+            });
+            updateRunControls();
             socket.on('connect', () => {
                 socketId = socket.id;
                 updateRunControls();

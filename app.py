@@ -115,6 +115,7 @@ def is_local_server(server_ip):
 ssh_connections = {}
 active_transfers = {}
 transfer_processes = {}  # 存储传输进程，用于取消操作
+CLIENT_ROOMS = {}
 
 # 僵尸传输清理配置
 TRANSFER_WATCHDOG_INTERVAL = 60  # 秒，后台巡检间隔
@@ -3863,6 +3864,96 @@ def run_file():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+def _human_readable_size(num_bytes):
+    try:
+        num_bytes = float(num_bytes)
+    except Exception:
+        return f"{num_bytes} bytes"
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+    idx = 0
+    while num_bytes >= 1024 and idx < len(units) - 1:
+        num_bytes /= 1024.0
+        idx += 1
+    return f"{num_bytes:.2f} {units[idx]}"
+
+def _escape_pwsh_literal(path: str) -> str:
+    # PowerShell 单引号转义：'' 表示单个 '
+    return path.replace("'", "''")
+
+@app.route('/api/compute_size', methods=['POST'])
+def compute_size():
+    """计算文件/文件夹大小"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        file_path = data.get('path')
+        if not server_ip or not file_path:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        size_bytes = None
+
+        if is_local and not is_windows:
+            # 本地 Linux：直接用 du -sh 获取人类可读大小
+            if not os.path.exists(file_path):
+                return jsonify({'success': False, 'error': '路径不存在'})
+            du_human_cmd = f"du -sh {shlex.quote(file_path)} 2>/dev/null"
+            try:
+                output = subprocess.check_output(du_human_cmd, shell=True, text=True, stderr=subprocess.STDOUT)
+                human_size = (output or '').strip().split()[0]
+            except subprocess.CalledProcessError as e:
+                return jsonify({'success': False, 'error': e.output.strip() if e.output else '计算失败'})
+            return jsonify({
+                'success': True,
+                'size_bytes': None,
+                'human_size': human_size
+            })
+        else:
+            if is_windows:
+                safe_path = _escape_pwsh_literal(file_path)
+                pwsh_template = (
+                    "powershell -NoProfile -Command "
+                    "\"if (Test-Path -LiteralPath '{path}' -PathType Container) {{ "
+                    "(Get-ChildItem -LiteralPath '{path}' -Recurse -Force -ErrorAction SilentlyContinue "
+                    "| Measure-Object -Property Length -Sum).Sum "
+                    "}} elseif (Test-Path -LiteralPath '{path}' -PathType Leaf) {{ "
+                    "(Get-Item -LiteralPath '{path}').Length "
+                    "}} else {{ 'NOTFOUND' }}\""
+                )
+                pwsh_cmd = pwsh_template.format(path=safe_path)
+                output, error, exit_code = ssh_manager.execute_command(server_ip, pwsh_cmd)
+                if exit_code != 0 or not output:
+                    return jsonify({'success': False, 'error': error or '计算失败'})
+                text = (output or '').strip()
+                if text.upper().startswith('NOTFOUND'):
+                    return jsonify({'success': False, 'error': '路径不存在'})
+                try:
+                    size_bytes = int(text)
+                except Exception:
+                    return jsonify({'success': False, 'error': f'解析大小失败: {text}'})
+            else:
+                # 远程 Linux/NAS：用 du -sh 返回人类可读
+                du_human_cmd = f"du -sh {shlex.quote(file_path)} 2>/dev/null | awk '{{print $1}}'"
+                output, error, exit_code = ssh_manager.execute_command(server_ip, du_human_cmd)
+                if exit_code != 0 or not output:
+                    return jsonify({'success': False, 'error': error or '计算失败'})
+                human_size = (output or '').strip().splitlines()[0]
+                return jsonify({
+                    'success': True,
+                    'size_bytes': None,
+                    'human_size': human_size
+                })
+
+        return jsonify({
+            'success': True,
+            'size_bytes': size_bytes,
+            'human_size': _human_readable_size(size_bytes)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 
 def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None, sid=None):
     """向前端推送运行输出（仅发送给发起请求的客户端）"""
@@ -3874,11 +3965,15 @@ def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None
             'final': final,
             'exit_code': exit_code
         }
-        if sid:
-            # 只发送给特定客户端，不广播给其他设备
-            socketio.emit('run_output', data, room=sid)
+        target_room = sid
+        if not target_room:
+            with RUN_TASKS_LOCK:
+                task = RUN_TASKS.get(run_id)
+                if task:
+                    target_room = task.get('sid') or task.get('room')
+        if target_room:
+            socketio.emit('run_output', data, room=target_room)
         else:
-            # 没有指定 sid 时，广播给所有客户端（向后兼容）
             socketio.emit('run_output', data)
     except Exception as e:
         print(f"❌ 发送运行输出失败: {e}")
