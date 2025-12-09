@@ -1075,6 +1075,7 @@
                         </h6>
                         <div class="d-flex align-items-center" style="gap: 10px;">
                             <small id="sourceFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="sourceSelectedInfo" style="font-size: 0.75rem; color: #0d6efd; display: none;"></small>
                             <button class="btn btn-outline-primary btn-sm" onclick="refreshSource()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
                                 <i class="bi bi-arrow-clockwise"></i> 刷新
                             </button>
@@ -1119,6 +1120,7 @@
                         </h6>
                         <div class="d-flex align-items-center" style="gap: 10px;">
                             <small id="targetFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="targetSelectedInfo" style="font-size: 0.75rem; color: #198754; display: none;"></small>
                             <button class="btn btn-outline-success btn-sm" onclick="refreshTarget()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
                                 <i class="bi bi-arrow-clockwise"></i> 刷新
                             </button>
@@ -2827,9 +2829,27 @@
         function updateSelectionInfo() {
             if (selectedSourceFiles.length > 0 && selectedTargetFiles.length > 0) {
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
-                return;
             }
-            // 移除UI操作日志 - 不记录文件选择
+
+            function renderSelectedInfo(isSource, selectedArr) {
+                const el = document.getElementById(isSource ? 'sourceSelectedInfo' : 'targetSelectedInfo');
+                if (!el) return;
+                if (!selectedArr || selectedArr.length === 0) {
+                    el.style.display = 'none';
+                    el.textContent = '';
+                    return;
+                }
+                const fileCount = selectedArr.filter(it => !it.is_directory).length;
+                const dirCount = selectedArr.filter(it => it.is_directory).length;
+                const parts = [];
+                if (fileCount > 0) parts.push(`${fileCount} 文件`);
+                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
+                el.textContent = `已选中：${parts.join('，')}`;
+                el.style.display = 'inline';
+            }
+
+            renderSelectedInfo(true, selectedSourceFiles);
+            renderSelectedInfo(false, selectedTargetFiles);
         }
 
         // 拖拽功能已移除以提升性能
@@ -3967,6 +3987,20 @@
                     hideContextMenu();
                 }
             });
+
+            // 点击空白区域清空选择
+            function bindEmptyClick(container, isSource) {
+                if (!container) return;
+                container.addEventListener('click', (e) => {
+                    const row = e.target.closest('.file-item.selectable');
+                    if (row) return;
+                    clearSelectionsForPanel(isSource);
+                    updateSelectionInfo();
+                    lastActivePanel = isSource ? 'source' : 'target';
+                });
+            }
+            bindEmptyClick(sourceContainer, true);
+            bindEmptyClick(targetContainer, false);
         }
 
         // 页面加载完成后的初始化
