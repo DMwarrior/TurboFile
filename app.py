@@ -60,6 +60,32 @@ TURBOFILE_HOST_IP = "192.168.9.62"
 ADMIN_MODE_ENABLED = True  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
 ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
 
+def extract_client_ipv4_from_request(req) -> str:
+    """
+    从请求中提取客户端IPv4地址，优先使用反向代理头，保持各接口一致。
+    返回空字符串表示未获取到。
+    """
+    try:
+        def _extract_ipv4(s: str):
+            if not s:
+                return None
+            first = s.split(',')[0].strip()
+            m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
+            return m.group(1) if m else None
+
+        candidates = [
+            req.headers.get('X-Forwarded-For', ''),
+            req.headers.get('X-Real-IP', ''),
+            req.remote_addr
+        ]
+        for c in candidates:
+            ip = _extract_ipv4(c)
+            if ip:
+                return ip
+    except Exception:
+        pass
+    return ''
+
 def is_admin_client_ip(ip: str) -> bool:
     try:
         return bool(ADMIN_MODE_ENABLED and ip and ip in ADMIN_CLIENT_IPS)
@@ -114,11 +140,47 @@ def is_local_server(server_ip):
     local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
     return server_ip in local_aliases
 
+# 客户端路径记忆：按 IP 保存 source/target 的 server+path（覆盖写，不追加）
+def load_client_paths():
+    global client_paths_cache
+    if client_paths_cache:
+        return client_paths_cache
+    try:
+        if not os.path.exists(CLIENT_PATH_FILE):
+            os.makedirs(os.path.dirname(CLIENT_PATH_FILE), exist_ok=True)
+            client_paths_cache = {}
+            return client_paths_cache
+        with open(CLIENT_PATH_FILE, 'r', encoding='utf-8') as f:
+            text = f.read().strip()
+            client_paths_cache = json.loads(text) if text else {}
+    except Exception:
+        client_paths_cache = {}
+    return client_paths_cache
+
+def save_client_paths():
+    os.makedirs(os.path.dirname(CLIENT_PATH_FILE), exist_ok=True)
+    tmp = CLIENT_PATH_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(client_paths_cache, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CLIENT_PATH_FILE)
+
+def remember_path(client_ip: str, panel: str, server: str, path: str):
+    if not client_ip or not panel or not server or not path:
+        return
+    with CLIENT_PATH_LOCK:
+        load_client_paths()
+        client_paths_cache.setdefault(client_ip, {})
+        client_paths_cache[client_ip][panel] = {'server': server, 'path': path}
+        save_client_paths()
+
 # 全局变量
 ssh_connections = {}
 active_transfers = {}
 transfer_processes = {}  # 存储传输进程，用于取消操作
 CLIENT_ROOMS = {}
+CLIENT_PATH_LOCK = threading.Lock()
+CLIENT_PATH_FILE = os.path.join(os.path.dirname(__file__), 'data', 'client_paths.json')
+client_paths_cache = {}
 
 # 僵尸传输清理配置
 TRANSFER_WATCHDOG_INTERVAL = 60  # 秒，后台巡检间隔
@@ -3126,32 +3188,14 @@ def parse_rsync_progress(line):
 @app.route('/')
 def index():
     # 获取访问设备的 IPv4 地址，用于前端日志展示
-    # 依次尝试 X-Forwarded-For / X-Real-IP / remote_addr，并提取首个 IPv4
-    import re
-    def _extract_ipv4(s: str):
-        if not s:
-            return None
-        # X-Forwarded-For 可能为 "ip1, ip2"，取第一个并提取 IPv4
-        first = s.split(',')[0].strip()
-        m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', first)
-        return m.group(1) if m else None
-
-    candidates = [
-        request.headers.get('X-Forwarded-For', ''),
-        request.headers.get('X-Real-IP', ''),
-        request.remote_addr
-    ]
-    client_ipv4 = None
-    for c in candidates:
-        ip = _extract_ipv4(c)
-        if ip:
-            client_ipv4 = ip
-            break
+    client_ipv4 = extract_client_ipv4_from_request(request) or None
 
     # 判断是否为管理员客户端（基于IP且受开关控制）
     is_admin_client = is_admin_client_ip(client_ipv4)
+    with CLIENT_PATH_LOCK:
+        remembered_paths = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
 
-    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4, is_admin_client=is_admin_client)
+    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4, is_admin_client=is_admin_client, remembered_paths=remembered_paths)
 
 @app.route('/api/image/stream')
 def api_image_stream():
@@ -3826,6 +3870,20 @@ def create_file():
             'message': '创建文件成功',
             'full_path': full_path
         })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/client_path/save', methods=['POST'])
+def api_client_path_save():
+    data = request.get_json(silent=True) or {}
+    panel = data.get('panel')
+    server = data.get('server')
+    path = data.get('path')
+    client_ip = extract_client_ipv4_from_request(request)
+    try:
+        remember_path(client_ip, panel, server, path)
+        return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 

@@ -1628,6 +1628,7 @@
 
         // 预置服务器元数据（用于本地判定 Windows/Linux，避免额外网络请求）
         const SERVERS_DATA = JSON.parse('{{ servers|tojson }}');
+        const REMEMBERED_PATHS = JSON.parse('{{ remembered_paths|tojson }}' || '{}') || {};
 
         // 日志系统配置
         let logBuffer = [];
@@ -2437,6 +2438,10 @@
                         startIndex: startIndex
                     });
                     updateFileCountDisplay(isSource, state.loadedCount, total);
+                    state.path = targetPath;
+                    if (server && targetPath) {
+                        saveClientPath(isSource ? 'source' : 'target', server, targetPath);
+                    }
 
                     // 加载目录的提示不再写入日志，保持日志干净
                     if (state.hasMore) {
@@ -2496,6 +2501,20 @@
         async function browseTargetInstant(targetPath) {
             currentTargetPath = targetPath;
             return loadDirectory('target', targetPath, { reset: true });
+        }
+
+        async function saveClientPath(panel, server, path) {
+            if (!panel || !server || !path) return;
+            updateRememberedCache(panel, server, path);
+            try {
+                await fetch('/api/client_path/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ panel, server, path })
+                });
+            } catch (_) {
+                // 忽略失败
+            }
         }
 
         async function refreshTargetAsync() {
@@ -3605,6 +3624,49 @@
             return '/home/th';
         }
 
+        function getRememberedPath(serverIP, isSource) {
+            const panel = isSource ? 'source' : 'target';
+            const rec = (REMEMBERED_PATHS && REMEMBERED_PATHS[panel]) || null;
+            if (rec && rec.server === serverIP && rec.path) {
+                return rec.path;
+            }
+            return null;
+        }
+
+        function getDefaultPathWithRemember(serverIP, isSource) {
+            const rem = getRememberedPath(serverIP, isSource);
+            if (rem) return rem;
+            return getDefaultPath(serverIP);
+        }
+
+        function updateRememberedCache(panel, server, path) {
+            if (!panel || !server || !path) return;
+            if (typeof REMEMBERED_PATHS !== 'object' || REMEMBERED_PATHS === null) return;
+            REMEMBERED_PATHS[panel] = { server, path };
+        }
+
+        function applyRememberedSelections() {
+            if (!REMEMBERED_PATHS || Object.keys(REMEMBERED_PATHS).length === 0) return;
+
+            const applyOne = (panelKey, selectId) => {
+                const selectEl = document.getElementById(selectId);
+                const rec = REMEMBERED_PATHS && REMEMBERED_PATHS[panelKey];
+                if (!selectEl || !rec || !rec.server || !rec.path) return false;
+                const hasOption = Array.from(selectEl.options || []).some(opt => opt.value === rec.server);
+                if (!hasOption) return false;
+                selectEl.value = rec.server;
+                // 触发现有逻辑（会优先使用记忆的路径）
+                selectEl.dispatchEvent(new Event('change'));
+                return true;
+            };
+
+            const sourceApplied = applyOne('source', 'sourceServer');
+            const targetApplied = applyOne('target', 'targetServer');
+            if (sourceApplied || targetApplied) {
+                addLogInfo('🧭 已自动恢复上次使用的服务器和路径');
+            }
+        }
+
         // 检查是否为Windows服务器（使用模板内置数据，避免额外网络请求）
         function isWindowsServer(serverIP) {
             try {
@@ -3621,6 +3683,12 @@
                 const response = await fetch(`/api/windows_drives/${serverIP}`);
                 const data = await response.json();
 
+                const normalizeDrive = (letter) => {
+                    if (!letter) return null;
+                    const upper = String(letter).toUpperCase();
+                    return upper.endsWith(':') ? upper : `${upper}:`;
+                };
+
                 if (data.success && data.drives) {
                     if (isSource) {
                         windowsDrivesSource = data.drives;
@@ -3628,24 +3696,35 @@
                         windowsDrivesTarget = data.drives;
                     }
 
-                    // 自动选择 C 盘；若无 C 盘则选择第一个磁盘，并立即浏览该磁盘根目录
-                    const preferred = data.drives.find(d => (d.letter || '').toUpperCase() === 'C:' || (d.letter || '').toUpperCase() === 'C') || data.drives[0];
+                    const desiredPath = isSource ? currentSourcePath : currentTargetPath;
+                    const desiredDrive = normalizeDrive((desiredPath || '').split(/[\\/]/)[0]);
+
+                    const preferred = data.drives.find(d => normalizeDrive(d.letter) === desiredDrive) ||
+                        data.drives.find(d => normalizeDrive(d.letter) === 'C:') ||
+                        data.drives[0];
+
                     if (preferred) {
-                        const drivePath = (preferred.letter.endsWith(':') ? preferred.letter : (preferred.letter + ':')) + '/';
+                        const driveLabel = normalizeDrive(preferred.letter);
+                        const driveRoot = driveLabel ? `${driveLabel}/` : '/';
+                        const useDesiredPath = Boolean(desiredDrive && driveLabel === desiredDrive && desiredPath);
+                        const targetPath = useDesiredPath ? desiredPath : driveRoot;
+
                         if (isSource) {
-                            if (currentSourcePath !== drivePath) {
-                                currentSourcePath = drivePath;
+                            if (currentSourcePath !== targetPath) {
+                                currentSourcePath = targetPath;
                                 browseSourceInstant(currentSourcePath);
                             }
                             updatePathNavigation(currentSourcePath, true);
                         } else {
-                            if (currentTargetPath !== drivePath) {
-                                currentTargetPath = drivePath;
+                            if (currentTargetPath !== targetPath) {
+                                currentTargetPath = targetPath;
                                 browseTargetInstant(currentTargetPath);
                             }
                             updatePathNavigation(currentTargetPath, false);
                         }
-                        addLogInfo(`💾 默认选择磁盘: ${preferred.letter}`);
+                        if (!useDesiredPath) {
+                            addLogInfo(`💾 默认选择磁盘: ${preferred.letter}`);
+                        }
                     }
 
                     addLogInfo(`💾 已加载Windows磁盘列表: ${data.drives.length}个磁盘`);
@@ -4983,7 +5062,7 @@
                     const isWindows = isWindowsServer(this.value);
 
                     // 先确定默认路径并立即开始浏览（零延迟）
-                    const defaultPath = getDefaultPath(this.value);
+                    const defaultPath = getDefaultPathWithRemember(this.value, true);
                     currentSourcePath = defaultPath;
                     browseSourceInstant(currentSourcePath);
 
@@ -5002,7 +5081,7 @@
                     const isWindows = isWindowsServer(this.value);
 
                     // 先确定默认路径并立即开始浏览（零延迟）
-                    const defaultPath = getDefaultPath(this.value);
+                    const defaultPath = getDefaultPathWithRemember(this.value, false);
                     currentTargetPath = defaultPath;
                     browseTargetInstant(currentTargetPath);
 
@@ -5015,6 +5094,9 @@
                     }
                 }
             });
+
+                // 自动恢复上次浏览的服务器和路径（如果已记录）
+                applyRememberedSelections();
 
 
         });

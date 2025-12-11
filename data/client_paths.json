@@ -1,0 +1,32 @@
+{
+  "10.190.129.29": {
+    "source": {
+      "server": "10.190.129.29",
+      "path": "D:/images"
+    },
+    "target": {
+      "server": "192.168.9.62",
+      "path": "/home/th/Work/fankun/code"
+    }
+  },
+  "10.190.199.27": {
+    "target": {
+      "server": "192.168.9.62",
+      "path": "/home/th/Work_2/wangfei/datasets/DaMi_2cls"
+    },
+    "source": {
+      "server": "10.190.199.27",
+      "path": "D:/MX/20251211-094749_5_images"
+    }
+  },
+  "10.190.79.12": {
+    "source": {
+      "server": "192.168.9.60",
+      "path": "/home/th/Project_ssd/zs/code/objdetect_reg/yolov5-huang-InstanceAug-ding"
+    },
+    "target": {
+      "server": "192.168.9.60",
+      "path": "/home/th"
+    }
+  }
+}
