@@ -127,3 +127,5 @@ coverage.xml
 # 本地开发配置
 local_settings.py
 development.ini
+
+data/client_paths.json

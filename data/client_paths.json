@@ -1,12 +1,12 @@
 {
   "10.190.129.29": {
     "source": {
-      "server": "10.190.129.29",
-      "path": "D:/images"
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/Qingwei_Autotrain/model/lishi/ziwaiyumi/ziwaiyumi_40_1024_2"
     },
     "target": {
       "server": "192.168.9.62",
-      "path": "/home/th/Work/fankun/code"
+      "path": "/home/th/Work/fankun/code/TurboFile"
     }
   },
   "10.190.199.27": {

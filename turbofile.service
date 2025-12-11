@@ -1,0 +1,14 @@
+[Unit]
+Description=TurboFile 文件传输服务
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/th/Work/fankun/code/TurboFile
+ExecStart=/usr/bin/env python3 /home/th/Work/fankun/code/TurboFile/app.py --production
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

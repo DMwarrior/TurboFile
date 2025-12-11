@@ -31,34 +31,38 @@ from difflib import SequenceMatcher
 import cv2
 import numpy as np
 
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'data', 'config.json')
+
+def load_config():
+    """从data/config.json加载配置，缺失或格式错误则抛出异常。"""
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"配置文件不存在: {CONFIG_FILE}")
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("配置文件格式无效，顶层应为对象")
+    return cfg
+
+CONFIG = load_config()
+
+secret_key = CONFIG.get('secret_key')
+if not secret_key:
+    raise RuntimeError("配置缺少 secret_key")
+
+TURBOFILE_HOST_IP = CONFIG.get('host_ip') or ''
+if not TURBOFILE_HOST_IP:
+    raise RuntimeError("配置缺少 host_ip")
+
+SERVERS = CONFIG.get('servers')
+if not isinstance(SERVERS, dict) or not SERVERS:
+    raise RuntimeError("配置缺少 servers 列表")
+
+ADMIN_MODE_ENABLED = bool(CONFIG.get('admin_mode_enabled'))
+ADMIN_CLIENT_IPS = set(CONFIG.get('admin_client_ips') or [])
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = secret_key
 socketio = SocketIO(app, cors_allowed_origins="*")
-
-# 服务器配置
-SERVERS = {
-    "192.168.9.62": {"name": "62服务器", "user": "th", "password": "th123456", "default_path": "/home/th"},
-    "192.168.9.61": {"name": "61服务器", "user": "th", "password": "th123456", "default_path": "/home/th"},
-    "192.168.9.60": {"name": "60服务器", "user": "th", "password": "taiho603656_0", "default_path": "/home/th"},
-    "192.168.9.57": {"name": "57服务器", "user": "thgd", "password": "123456", "default_path": "/home/thgd"},
-    "192.168.9.64": {"name": "64服务器", "user": "ubuntu", "password": "asdf1234", "default_path": "/home/ubuntu"},
-    "10.190.21.253": {"name": "NAS", "user": "Algorithm", "password": "Ai123456", "port": 8000, "default_path": "/var/services/homes/Algorithm"},
-    "10.190.129.29": {"name": "樊坤", "user": "warrior", "password": "Fkcay929", "os_type": "windows", "default_path": "C:/"},
-    "10.190.78.30": {"name": "李园", "user": "LY981", "password": "taihe", "os_type": "windows", "default_path": "C:/"},
-    "10.190.79.12": {"name": "张帅", "user": "Administrator", "password": "     0", "os_type": "windows", "default_path": "C:/"},
-    "10.190.78.32": {"name": "梁颖蕙", "user": "Administrator", "password": "123456", "os_type": "windows", "default_path": "C:/"},
-    "10.190.22.114": {"name": "黄海婷", "user": "admin", "password": "123456", "os_type": "windows", "default_path": "C:/"},
-    "10.190.199.27": {"name": "王飞", "user": "wangfei", "password": "952416", "os_type": "windows", "default_path": "C:/"},
-    "10.190.22.1": {"name": "朱冠菲", "user": "Administrator", "password": "qwer+123", "os_type": "windows", "default_path": "C:/"},
-    "10.190.21.230": {"name": "张兵", "user": "Administrator", "password": "12345678", "os_type": "windows", "default_path": "C:/"}
-}
-
-# TurboFile运行的主机IP（当前运行在192.168.9.62上）
-TURBOFILE_HOST_IP = "192.168.9.62"
-
-# 管理员权限开关（仅用于调试/排障）：开启后指定客户端IP可查看所有Windows服务器
-ADMIN_MODE_ENABLED = True  # True=开启管理员权限；False=关闭，仅显示本机对应的Windows服务器
-ADMIN_CLIENT_IPS = {"10.190.129.29"}  # 具有管理员权限的客户端IPv4（例如：樊坤的Windows）
 
 def extract_client_ipv4_from_request(req) -> str:
     """
@@ -4836,7 +4840,7 @@ if __name__ == '__main__':
     is_production = len(sys.argv) > 1 and sys.argv[1] == '--production'
 
     print("🚀 启动Web文件传输系统...")
-    print("📱 访问地址: http://192.168.9.62:5000")
+    print(f"📱 访问地址: http://{TURBOFILE_HOST_IP}:5000")
     print("🔧 确保所有服务器SSH密钥已配置")
 
     if is_production:

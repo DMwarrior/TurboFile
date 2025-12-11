@@ -4,6 +4,10 @@
 Flask==2.3.3
 Flask-SocketIO==5.3.6
 
+# 图像/数组处理
+numpy==1.26.4
+opencv-python==4.8.1.78
+
 # SSH连接
 paramiko==3.3.1
 

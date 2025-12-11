@@ -1607,8 +1607,8 @@
         let selectedTargetFiles = [];
         let currentTransferDirection = 'ltr';
         let currentTransferMode = 'copy'; // 'copy' 或 'move'
-        let currentSourcePath = '/home/th';
-        let currentTargetPath = '/home/thgd';
+        let currentSourcePath = '';
+        let currentTargetPath = '';
 
         // Windows 磁盘缓存（分别用于源/目标），供路径导航下拉使用
         let windowsDrivesSource = [];
@@ -3621,7 +3621,7 @@
         function getDefaultPath(serverIP) {
             const meta = SERVERS_DATA && SERVERS_DATA[serverIP];
             if (meta && meta.default_path) return meta.default_path;
-            return '/home/th';
+            return '';
         }
 
         function getRememberedPath(serverIP, isSource) {
@@ -5063,6 +5063,10 @@
 
                     // 先确定默认路径并立即开始浏览（零延迟）
                     const defaultPath = getDefaultPathWithRemember(this.value, true);
+                    if (!defaultPath) {
+                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                        return;
+                    }
                     currentSourcePath = defaultPath;
                     browseSourceInstant(currentSourcePath);
 
@@ -5082,6 +5086,10 @@
 
                     // 先确定默认路径并立即开始浏览（零延迟）
                     const defaultPath = getDefaultPathWithRemember(this.value, false);
+                    if (!defaultPath) {
+                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                        return;
+                    }
                     currentTargetPath = defaultPath;
                     browseTargetInstant(currentTargetPath);
 
