@@ -198,8 +198,8 @@
             width: 95vw;
             max-width: 1400px;
             height: 90vh;
-            background: #1e1e1e;
-            color: #d4d4d4;
+            background: #272b33;
+            color: #e6e8eb;
             border-radius: 8px;
             box-shadow: 0 18px 40px rgba(0,0,0,0.4);
             display: flex;
@@ -207,21 +207,34 @@
         }
         .editor-header {
             padding: 10px 14px;
-            border-bottom: 1px solid #2a2a2a;
+            border-bottom: 1px solid #323741;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            background: #2f343d;
         }
         .editor-body {
             flex: 1;
             overflow: hidden;
+            display: flex;
+            background: #23272f;
+        }
+        .editor-text-wrapper {
+            position: relative;
+            flex: 1;
+        }
+        .editor-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
         }
         .editor-textarea {
             width: 100%;
             height: 100%;
             padding: 12px 14px;
-            background: #1e1e1e;
-            color: #d4d4d4;
+            background: #23272f;
+            color: #e6e8eb;
             border: none;
             outline: none;
             resize: none;
@@ -232,10 +245,251 @@
             overflow: auto;
             tab-size: 4;
             scrollbar-color: #3a3a3a #1e1e1e;
+            position: relative;
+            z-index: 2;
+            background: transparent; /* 下层高亮背景透出 */
+        }
+        .editor-highlight-layer {
+            position: absolute;
+            inset: 0;
+            margin: 0;
+            padding: 12px 14px;
+            background: #23272f;
+            color: transparent !important; /* 仅保留背景高亮 */
+            pointer-events: none;
+            white-space: pre;
+            font-family: 'Consolas','Menlo','Monaco','Courier New',monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            overflow: hidden;
+            tab-size: 4;
+            z-index: 1; /* 位于 textarea 下层 */
+        }
+        .editor-highlight-layer .hl {
+            background: transparent;
+            color: transparent !important;
+            border-radius: 0;
+            padding: 0;
         }
 
         .progress-container {
             display: none;
+        }
+
+        /* Sublime 风格 minimap */
+        /* 查找/替换面板 */
+        .find-replace-bar {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #2f343d;
+            border-top: 1px solid #3a404c;
+            padding: 6px 10px;
+            display: none;
+            gap: 6px;
+            align-items: center;
+            z-index: 10;
+        }
+        .find-replace-bar input {
+            background: #22262e;
+            border: 1px solid #3a404c;
+            color: #e6e8eb;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 12px;
+            min-width: 200px;
+        }
+        .find-replace-bar button {
+            border: none;
+            background: #3b82f6;
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .find-replace-bar .secondary {
+            background: #4b5563;
+        }
+
+        /* 图片网格视图 */
+        #imageGridModal {
+            background: #11161f;
+        }
+        /* 预览层在网格之上，确保ESC只关闭预览，不影响网格 */
+        #imagePreviewModal {
+            z-index: 1100 !important;
+        }
+        #imageGridContainer {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 12px;
+        }
+        .image-grid-card {
+            background: #1b2230;
+            border: 1px solid #222b3a;
+            border-radius: 10px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            cursor: pointer;
+            transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+        .image-grid-card:hover {
+            transform: translateY(-2px);
+            border-color: #3b82f6;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+        }
+        .image-grid-card img {
+            width: 100%;
+            height: 150px;
+            object-fit: contain;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        .image-grid-name {
+            font-size: 12px;
+            color: #e5e7eb;
+            word-break: break-all;
+            text-align: center;
+        }
+        .image-grid-empty {
+            color: #9ca3af;
+            font-size: 13px;
+            text-align: center;
+            grid-column: 1/-1;
+            padding: 20px 0;
+        }
+        @media (max-width: 768px) {
+            #imageGridContainer {
+                grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            }
+        }
+
+        /* VSCode 风格 Diff 模态框 */
+        #diffModal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 1200;
+            display: none;
+        }
+        .diff-dialog {
+            position: absolute;
+            top: 4vh;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 96vw;
+            max-width: 1600px;
+            height: 90vh;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 8px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            border: 1px solid #2a2a2a;
+        }
+        .diff-header {
+            background: #252526;
+            border-bottom: 1px solid #2d2d2d;
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            color: #9cdcfe;
+        }
+        .diff-header .paths {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            color: #9cdcfe;
+        }
+        .diff-close-btn {
+            background: #3a3d41;
+            border: 1px solid #4b4d50;
+            color: #d4d4d4;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.2;
+        }
+        .diff-close-btn:hover {
+            background: #45484d;
+        }
+        .diff-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .diff-grid {
+            flex: 1;
+            overflow: auto;
+            padding: 10px;
+        }
+        .diff-rows {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            font-family: 'Consolas','Menlo','Monaco','Courier New', monospace;
+            font-size: 13px;
+        }
+        .diff-line {
+            display: flex;
+            background: #1e1e1e;
+            border-bottom: 1px solid #2a2a2a;
+        }
+        .diff-side {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 54px 1fr;
+            min-height: 20px;
+        }
+        .diff-lineno {
+            background: transparent;
+            color: #858585;
+            padding: 2px 6px;
+            text-align: right;
+            user-select: none;
+            border-right: 1px solid #2a2a2a;
+        }
+        .diff-code {
+            padding: 2px 8px;
+            white-space: pre;
+            overflow: hidden;
+            background: transparent;
+            color: #d4d4d4;
+        }
+        .diff-line.equal .diff-code {
+            background: #1e1e1e;
+        }
+        .diff-line.insert .diff-side.right .diff-code,
+        .diff-line.insert .diff-side.right .diff-lineno {
+            background: #294436;
+            border-left: 3px solid #4b8b3b;
+        }
+        .diff-line.delete .diff-side.left .diff-code,
+        .diff-line.delete .diff-side.left .diff-lineno {
+            background: #5d2626;
+            border-left: 3px solid #f14c4c;
+        }
+        .diff-line.replace .diff-side.left .diff-code,
+        .diff-line.replace .diff-side.left .diff-lineno,
+        .diff-line.replace .diff-side.right .diff-code,
+        .diff-line.replace .diff-side.right .diff-lineno {
+            background: #42321d;
+            border-left: 3px solid #c5a332;
+        }
+        .diff-summary {
+            padding: 6px 12px;
+            background: #252526;
+            border-top: 1px solid #2d2d2d;
+            font-size: 12px;
+            color: #9cdcfe;
         }
 
         .server-panel {
@@ -455,8 +709,8 @@
             background: var(--card-bg);
             border: 2px solid var(--border-color);
             border-radius: 8px;
-            padding: 8px 12px;
-            margin-bottom: 12px;
+            padding: 4px 8px;
+            margin-bottom: 8px;
             font-size: 0.875rem;
             font-family: 'JetBrains Mono', monospace;
             box-shadow: var(--shadow-sm);
@@ -474,7 +728,7 @@
             text-decoration: none;
             font-weight: 500;
             transition: all 0.2s ease;
-            padding: 2px 4px;
+            padding: 1px 2px;
             border-radius: 4px;
         }
 
@@ -485,7 +739,7 @@
         }
 
         .path-separator {
-            margin: 0 6px;
+            margin: 0 3px;
             color: var(--text-secondary);
             font-weight: 300;
         }
@@ -841,8 +1095,8 @@
             background: var(--card-bg);
             border: 1px solid var(--border-color);
             border-radius: 4px;
-            padding: 2px 6px;
-            margin-bottom: 4px;
+            padding: 2px 4px;
+            margin-bottom: 2px;
             font-size: 0.75rem;
             font-family: 'JetBrains Mono', monospace;
             box-shadow: var(--shadow-sm);
@@ -851,7 +1105,7 @@
         /* Windows 磁盘下拉视觉优化：更小字体，风格与整体融合 */
         .path-nav .dropdown-toggle {
             font-size: 0.80rem; /* 与路径段接近的字号，避免突兀 */
-            padding: 1px 6px;
+            padding: 1px 4px;
             line-height: 1.2;
         }
         .path-nav .dropdown-menu {
@@ -1101,6 +1355,11 @@
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
                             </button>
+                            <button type="button" class="btn btn-sm" title="展开图片"
+                                    onclick="openImageGrid(true)"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-grid-3x3-gap text-info" style="font-size: 0.9rem;"></i>
+                            </button>
                         </div>
                     </div>
                     <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
@@ -1145,6 +1404,11 @@
                                     onclick="copyPath('target')"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-files text-secondary" style="font-size: 0.85rem;"></i>
+                            </button>
+                            <button type="button" class="btn btn-sm" title="展开图片"
+                                    onclick="openImageGrid(false)"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-grid-3x3-gap text-success" style="font-size: 0.9rem;"></i>
                             </button>
                         </div>
                     </div>
@@ -1263,6 +1527,10 @@
             <i class="bi bi-pencil-square text-warning"></i>
             <span>重命名</span>
         </div>
+        <div class="menu-item" data-action="new-file">
+            <i class="bi bi-file-earmark-plus text-primary"></i>
+            <span>新建文件</span>
+        </div>
         <div class="menu-item" data-action="new-folder">
             <i class="bi bi-folder-plus text-success"></i>
             <span>新建文件夹</span>
@@ -1270,6 +1538,10 @@
         <div class="menu-item" data-action="run">
             <i class="bi bi-play-fill text-primary"></i>
             <span>运行</span>
+        </div>
+        <div class="menu-item" data-action="compare">
+            <i class="bi bi-shuffle text-info"></i>
+            <span>对比</span>
         </div>
         <div class="menu-item" data-action="size">
             <i class="bi bi-hdd-network text-info"></i>
@@ -1366,6 +1638,9 @@
         const runLogBlocks = {};
         let currentRunId = null;
         let socketId = null;
+        let imageZoom = 1;
+        let imageOffsetX = 0;
+        let imageOffsetY = 0;
 
         // 智能日志函数
         function addLog(message, type = 'info') {
@@ -1660,6 +1935,35 @@
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件夹异常: ${error.message}`);
+            }
+        }
+
+        // 创建空文件
+        async function createFile(type, server, parentPath, fileName) {
+            try {
+                addLogInfo(`📄 正在创建文件: ${fileName}...`);
+                const response = await fetch('/api/create_file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        parent_path: parentPath,
+                        file_name: fileName
+                    })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    addLogSuccess(`✅ ${result.message || '创建文件成功'}`);
+                    if (type === 'source') {
+                        await refreshSourceAsync();
+                    } else {
+                        await refreshTargetAsync();
+                    }
+                } else {
+                    addLogError(`❌ 创建文件失败: ${result.error || '未知错误'}`);
+                }
+            } catch (error) {
+                addLogError(`❌ 创建文件异常: ${error.message}`);
             }
         }
 
@@ -2354,7 +2658,7 @@
 
         // 双击配置 - 参考WinSCP等专业文件管理器的标准
         const DOUBLE_CLICK_CONFIG = {
-            timeWindow: 250,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
+            timeWindow: 300,  // 双击时间窗口（毫秒）- 比标准200ms更宽容
             debounceDelay: 50 // 防抖延迟（毫秒）- 提高响应速度
         };
 
@@ -3375,6 +3679,23 @@
                 isSource: true
             };
 
+        async function getImageBlobUrl(server, path) {
+            const key = server + '|' + path;
+            if (!PreviewCache.has(key)) {
+                const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+                const resp = await fetch(url, { cache: 'no-store' });
+                if (!resp.ok) {
+                    let msg = '';
+                    try { msg = await resp.text(); } catch (_) {}
+                    throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                }
+                const blob = await resp.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                PreviewCache.set(key, blobUrl);
+            }
+            return PreviewCache.get(key);
+        }
+
         function isImageFile(name) {
             return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
         }
@@ -3404,6 +3725,11 @@
                 ImageViewer.isSource = isSource;
             }
 
+            function applyImageTransform(img) {
+                if (!img) return;
+                img.style.transform = `translate(${imageOffsetX}px, ${imageOffsetY}px) scale(${imageZoom})`;
+            }
+
             async function showImageAt(index) {
                 if (!ImageViewer.items || ImageViewer.items.length === 0) return;
                 const len = ImageViewer.items.length;
@@ -3413,7 +3739,6 @@
                 ImageViewer.index = index;
                 const item = ImageViewer.items[index];
                 const server = ImageViewer.server;
-                const key = server + '|' + item.path;
 
                 // 立即显示模态框，避免等待感
                 const modal = document.getElementById('imagePreviewModal');
@@ -3422,22 +3747,14 @@
                     modal.style.display = 'block';
                     img.style.opacity = '0.3';
                     img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+                    imageZoom = 1;
+                    imageOffsetX = 0;
+                    imageOffsetY = 0;
+                    applyImageTransform(img);
                 }
 
                 try {
-                    if (!PreviewCache.has(key)) {
-                        const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(item.path)}`;
-                        const resp = await fetch(url, { cache: 'no-store' });
-                        if (!resp.ok) {
-                            let msg = '';
-                            try { msg = await resp.text(); } catch(_) {}
-                            throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
-                        }
-                        const blob = await resp.blob();
-                        const blobUrl = URL.createObjectURL(blob);
-                        PreviewCache.set(key, blobUrl);
-                    }
-                    const blobUrl = PreviewCache.get(key);
+                    const blobUrl = await getImageBlobUrl(server, item.path);
 
                     // 图片加载完成后显示
                     if (img) {
@@ -3541,20 +3858,392 @@
                 modal.style.display = 'none';
                 const img = modal.querySelector('img');
                 if (img) img.removeAttribute('src');
+                imageZoom = 1;
+                imageOffsetX = 0;
+                imageOffsetY = 0;
                 const caption = document.getElementById('imagePreviewCaption');
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
                 ImageViewer.index = -1;
             }
 
+            let imageGridObserver = null;
+
+            function initImageGridObserver(rootEl) {
+                if (imageGridObserver) imageGridObserver.disconnect();
+                if (!('IntersectionObserver' in window)) {
+                    imageGridObserver = null;
+                    return;
+                }
+                imageGridObserver = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (!entry.isIntersecting) return;
+                        const card = entry.target;
+                        const imgEl = card.querySelector('img');
+                        if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') {
+                            imageGridObserver.unobserve(card);
+                            return;
+                        }
+                        imgEl.dataset.loading = '1';
+                        const server = card.dataset.server;
+                        const path = card.dataset.path;
+                        getImageBlobUrl(server, path)
+                            .then(url => {
+                                imgEl.src = url;
+                                imgEl.dataset.loaded = '1';
+                            })
+                            .catch(err => {
+                                imgEl.alt = '加载失败';
+                                imgEl.title = err.message || String(err);
+                                imgEl.dataset.loaded = 'err';
+                            })
+                            .finally(() => {
+                                imageGridObserver && imageGridObserver.unobserve(card);
+                            });
+                    });
+                }, {
+                    root: rootEl || null,
+                    rootMargin: '200px',
+                    threshold: 0.01
+                });
+            }
+
+            function loadImageCardImmediately(card) {
+                const imgEl = card.querySelector('img');
+                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
+                imgEl.dataset.loading = '1';
+                const server = card.dataset.server;
+                const path = card.dataset.path;
+                getImageBlobUrl(server, path)
+                    .then(url => {
+                        imgEl.src = url;
+                        imgEl.dataset.loaded = '1';
+                    })
+                    .catch(err => {
+                        imgEl.alt = '加载失败';
+                        imgEl.title = err.message || String(err);
+                        imgEl.dataset.loaded = 'err';
+                    });
+            }
+
+            async function openImageGrid(isSource) {
+                const serverSelectId = isSource ? 'sourceServer' : 'targetServer';
+                const server = document.getElementById(serverSelectId)?.value;
+                const state = isSource ? browseState.source : browseState.target;
+                if (!server) {
+                    addLogWarning('⚠️ 请先选择服务器');
+                    return;
+                }
+                if (!state.path) {
+                    addLogWarning('⚠️ 请先进入一个目录');
+                    return;
+                }
+
+                const modal = document.getElementById('imageGridModal');
+                const container = document.getElementById('imageGridContainer');
+                if (!modal || !container) return;
+                modal.style.display = 'block';
+                document.body.style.overflow = 'hidden';
+                container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
+                initImageGridObserver(modal);
+
+                const renderBatch = (items, server) => {
+                    const frag = document.createDocumentFragment();
+                    for (const item of items) {
+                        const card = document.createElement('div');
+                        card.className = 'image-grid-card';
+                        card.dataset.server = server;
+                        card.dataset.path = item.path;
+
+                        const imgEl = document.createElement('img');
+                        imgEl.alt = item.name;
+                        imgEl.loading = 'lazy';
+                        imgEl.dataset.loaded = '0';
+
+                        const nameEl = document.createElement('div');
+                        nameEl.className = 'image-grid-name';
+                        nameEl.textContent = item.name;
+
+                        card.appendChild(imgEl);
+                        card.appendChild(nameEl);
+                        card.addEventListener('click', () => {
+                            previewImage(server, item.path, item.name, isSource);
+                        });
+
+                        frag.appendChild(card);
+                        if (imageGridObserver) {
+                            imageGridObserver.observe(card);
+                        } else {
+                            loadImageCardImmediately(card);
+                        }
+                    }
+                    container.appendChild(frag);
+                };
+
+                const appendImagesChunked = (images, server, chunkSize = 60) => {
+                    container.innerHTML = '';
+                    let idx = 0;
+                    const step = () => {
+                        const slice = images.slice(idx, idx + chunkSize);
+                        renderBatch(slice, server);
+                        idx += chunkSize;
+                        if (idx < images.length) {
+                            requestAnimationFrame(step);
+                        }
+                    };
+                    step();
+                };
+
+                const ensureAndRender = async () => {
+                    try {
+                        const initial = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
+                        if (initial.length) {
+                            appendImagesChunked(initial, server);
+                        } else {
+                            container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
+                        }
+
+                        // 增量拉取剩余分页，边拉边渲染
+                        if (state.hasMore || state.fullHasMore || !state.fullItems) {
+                            let localOffset = state.fullOffset || state.loadedCount || (state.offset || 0);
+                            while (true) {
+                                const params = new URLSearchParams({
+                                    path: state.path,
+                                    show_hidden: document.getElementById(isSource ? 'sourceShowHidden' : 'targetShowHidden').checked,
+                                    offset: localOffset,
+                                    limit: BROWSE_PAGE_SIZE_MAX
+                                });
+                                const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
+                                const data = await resp.json();
+                                if (!data.success) break;
+                                const pageFiles = (data.files || []).filter(it => it && !it.is_directory && isImageFile(it.name));
+                                if (pageFiles.length) {
+                                    if (!container.innerHTML || container.innerHTML.includes('加载中')) {
+                                        container.innerHTML = '';
+                                    }
+                                    renderBatch(pageFiles, server);
+                                }
+                                state.fullItems = (state.fullItems || []).concat(data.files || []);
+                                state.total = data.total_count || data.file_count || state.total || 0;
+                                state.fullOffset = data.next_offset ?? (localOffset + (data.files || []).length);
+                                state.fullHasMore = data.has_more;
+                                state.loadedCount = Math.max(state.loadedCount || 0, state.fullOffset || 0);
+                                localOffset = state.fullOffset || localOffset + (data.files || []).length;
+                                if (!data.has_more) break;
+                            }
+                        }
+
+                        const imgs = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
+                        if (!imgs.length) {
+                            container.innerHTML = '<div class="image-grid-empty">当前目录没有图片</div>';
+                        } else {
+                            addLogInfo(`🖼️ 已展开 ${imgs.length} 张图片`);
+                        }
+                    } catch (e) {
+                        container.innerHTML = `<div class="image-grid-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
+                        addLogError('❌ 图片网格加载失败: ' + (e.message || e));
+                    }
+                };
+
+                ensureAndRender();
+            }
+
+            function closeImageGrid() {
+                const modal = document.getElementById('imageGridModal');
+                const container = document.getElementById('imageGridContainer');
+                if (modal) modal.style.display = 'none';
+                if (container) container.innerHTML = '';
+                document.body.style.overflow = '';
+                if (imageGridObserver) {
+                    imageGridObserver.disconnect();
+                }
+            }
+
             function openEditorModal(server, path, title, content) {
                 const modal = document.getElementById('editorModal');
                 modal.querySelector('.modal-title').textContent = title;
-                const ta = modal.querySelector('textarea');
+                const ta = modal.querySelector('#editorTextarea');
                 ta.value = content;
                 ta.dataset.server = server;
                 ta.dataset.path = path;
+                const findInput = document.getElementById('findInput');
+                const replaceInput = document.getElementById('replaceInput');
+                if (findInput) findInput.value = '';
+                if (replaceInput) replaceInput.value = '';
+                const countEl = document.getElementById('findCount');
+                if (countEl) countEl.textContent = '';
+                syncMinimap();
+                renderFindHighlights();
                 modal.style.display = 'block';
+                hideFindReplace();
+                ta.focus();
+            }
+
+            function compareFromSelection() {
+                const srcServer = document.getElementById('sourceServer').value;
+                const tgtServer = document.getElementById('targetServer').value;
+                const leftSelection = selectedSourceFiles.filter(f => !f.is_directory).map(f => ({ ...f, server: srcServer }));
+                const rightSelection = selectedTargetFiles.filter(f => !f.is_directory).map(f => ({ ...f, server: tgtServer }));
+                const all = [...leftSelection, ...rightSelection];
+                if (all.length !== 2) {
+                    addLogWarning('⚠️ 请按Ctrl选中两个文件后再点击对比（可跨服务器）');
+                    return;
+                }
+                if (!all[0].server || !all[1].server) {
+                    addLogWarning('⚠️ 请先选择左右服务器');
+                    return;
+                }
+                const [a, b] = all;
+                const extA = (a.name.lastIndexOf('.') >= 0) ? a.name.slice(a.name.lastIndexOf('.')).toLowerCase() : '';
+                const extB = (b.name.lastIndexOf('.') >= 0) ? b.name.slice(b.name.lastIndexOf('.')).toLowerCase() : '';
+                if (extA !== extB) {
+                    addLogWarning('⚠️ 仅支持相同类型的文件进行对比');
+                    return;
+                }
+                performCompare(
+                    { server: a.server, path: a.path, name: a.name, ext: extA },
+                    { server: b.server, path: b.path, name: b.name, ext: extB }
+                );
+            }
+
+            async function performCompare(left, right) {
+                try {
+                    addLogInfo(`🧐 正在对比：${left.name} ⇆ ${right.name}`);
+                    const resp = await fetch('/api/compare_files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            server_a: left.server,
+                            path_a: left.path,
+                            server_b: right.server,
+                            path_b: right.path
+                        })
+                    });
+                    const data = await resp.json();
+                    if (!data.success) {
+                        addLogError(`❌ 对比失败: ${data.error || '未知错误'}`);
+                        return;
+                    }
+                    showDiffModal(data.lines || [], left, right);
+                } catch (e) {
+                    addLogError(`❌ 对比异常: ${e.message || e}`);
+                }
+            }
+
+            function showDiffModal(lines, leftMeta, rightMeta) {
+                const modal = document.getElementById('diffModal');
+                const rows = document.getElementById('diffRows');
+                const leftPath = document.getElementById('diffLeftPath');
+                const rightPath = document.getElementById('diffRightPath');
+                const summary = document.getElementById('diffSummary');
+                if (!modal || !rows) return;
+
+                rows.innerHTML = '';
+                leftPath.textContent = leftMeta ? `${leftMeta.name} (${leftMeta.server})` : '';
+                rightPath.textContent = rightMeta ? `${rightMeta.name} (${rightMeta.server})` : '';
+
+                let addCount = 0, delCount = 0, repCount = 0;
+                (lines || []).forEach(line => {
+                    const tag = line.tag || 'equal';
+                    if (tag === 'insert') addCount++;
+                    else if (tag === 'delete') delCount++;
+                    else if (tag === 'replace') repCount++;
+
+                    const pair = document.createElement('div');
+                    pair.className = 'diff-line';
+                    pair.classList.add(tag);
+
+                    const leftSide = document.createElement('div');
+                    leftSide.className = 'diff-side left';
+                    const lno = document.createElement('div');
+                    lno.className = 'diff-lineno';
+                    lno.textContent = line.left_no ? line.left_no : '';
+                    const lcode = document.createElement('div');
+                    lcode.className = 'diff-code';
+                    lcode.textContent = (line.left ?? '');
+                    leftSide.appendChild(lno);
+                    leftSide.appendChild(lcode);
+
+                    const rightSide = document.createElement('div');
+                    rightSide.className = 'diff-side right';
+                    const rno = document.createElement('div');
+                    rno.className = 'diff-lineno';
+                    rno.textContent = line.right_no ? line.right_no : '';
+                    const rcode = document.createElement('div');
+                    rcode.className = 'diff-code';
+                    rcode.textContent = (line.right ?? '');
+                    rightSide.appendChild(rno);
+                    rightSide.appendChild(rcode);
+
+                    pair.appendChild(leftSide);
+                    pair.appendChild(rightSide);
+                    rows.appendChild(pair);
+                });
+
+                if (summary) {
+                    summary.textContent = `新增 ${addCount}，删除 ${delCount}，修改 ${repCount}`;
+                }
+
+                modal.style.display = 'block';
+                document.body.style.overflow = 'hidden';
+            }
+
+            function closeDiffModal() {
+                const modal = document.getElementById('diffModal');
+                const rows = document.getElementById('diffRows');
+                if (modal) modal.style.display = 'none';
+                if (rows) rows.innerHTML = '';
+                document.body.style.overflow = '';
+            }
+
+            function setupImageWheelZoom() {
+                const modal = document.getElementById('imagePreviewModal');
+                const img = modal ? modal.querySelector('img') : null;
+                if (!modal || !img) return;
+                let dragging = false;
+                let startX = 0;
+                let startY = 0;
+                let lastX = 0;
+                let lastY = 0;
+                let rafPending = false;
+
+                modal.addEventListener('wheel', (e) => {
+                    if (modal.style.display === 'none') return;
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                    imageZoom = Math.min(5, Math.max(0.2, imageZoom + delta));
+                    applyImageTransform(img);
+                }, { passive: false });
+
+                modal.addEventListener('mousedown', (e) => {
+                    if (modal.style.display === 'none') return;
+                    if (e.target.closest('#imagePreviewCloseBtn')) return;
+                    dragging = true;
+                    startX = e.clientX - imageOffsetX;
+                    startY = e.clientY - imageOffsetY;
+                    lastX = imageOffsetX;
+                    lastY = imageOffsetY;
+                    e.preventDefault();
+                });
+
+                modal.addEventListener('mousemove', (e) => {
+                    if (!dragging) return;
+                    lastX = e.clientX - startX;
+                    lastY = e.clientY - startY;
+                    if (!rafPending) {
+                        rafPending = true;
+                        requestAnimationFrame(() => {
+                            imageOffsetX = lastX;
+                            imageOffsetY = lastY;
+                            applyImageTransform(img);
+                            rafPending = false;
+                        });
+                    }
+                });
+
+                ['mouseup', 'mouseleave'].forEach(ev => {
+                    modal.addEventListener(ev, () => { dragging = false; });
+                });
             }
             function closeEditorModal() {
                 document.getElementById('editorModal').style.display = 'none';
@@ -3578,6 +4267,29 @@
                 const nextBtn = document.getElementById('imageNextBtn');
                 if (prevBtn) prevBtn.addEventListener('click', () => showImageAt(ImageViewer.index - 1));
                 if (nextBtn) nextBtn.addEventListener('click', () => showImageAt(ImageViewer.index + 1));
+
+                const ta = document.getElementById('editorTextarea');
+                if (ta) {
+                    ta.addEventListener('input', renderFindHighlights);
+                    ta.addEventListener('scroll', renderFindHighlights);
+                    renderFindHighlights();
+                }
+
+        document.addEventListener('keydown', (e) => {
+            const modalVisible = document.getElementById('editorModal') && document.getElementById('editorModal').style.display !== 'none';
+            if (!modalVisible) return;
+            if (document.activeElement && document.activeElement.id === 'editorTextarea' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+                // 让 textarea 自己处理全选
+                return;
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                showFindReplace(false);
+            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+                e.preventDefault();
+                        showFindReplace(true);
+                    }
+                });
             });
 
                 const data = await resp.json();
@@ -3591,11 +4303,158 @@
                 }
             }
 
+            function syncMinimap() {
+                // minimap 已移除，留空函数防止引用错误
+            }
+
+            function syncMinimapHighlight() {
+                // minimap 已移除，留空函数防止引用错误
+            }
+
+            function renderFindHighlights() {
+                const layer = document.getElementById('editorHighlightLayer');
+                const ta = document.getElementById('editorTextarea');
+                const findInput = document.getElementById('findInput');
+                const query = findInput ? findInput.value : '';
+                const countEl = document.getElementById('findCount');
+                if (!layer || !ta) return;
+                const text = ta.value || '';
+                if (!query) {
+                    layer.innerHTML = escapeHtml(text);
+                    if (countEl) countEl.textContent = '';
+                    return;
+                }
+                const safeQuery = query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                const regex = new RegExp(safeQuery, 'g');
+                let matchCount = 0;
+                text.replace(regex, () => { matchCount++; return ''; });
+                layer.innerHTML = escapeHtml(text);
+                if (countEl) {
+                    countEl.textContent = matchCount > 0 ? `${matchCount} 条` : '0 条';
+                }
+            }
+
+            // 查找/替换
+            function showFindReplace(withReplace) {
+                const bar = document.getElementById('findReplaceBar');
+                const findInput = document.getElementById('findInput');
+                const replaceInput = document.getElementById('replaceInput');
+                const replaceBtn = document.getElementById('replaceBtn');
+                const replaceAllBtn = document.getElementById('replaceAllBtn');
+                if (!bar) return;
+                bar.style.display = 'flex';
+                if (withReplace) {
+                    replaceInput.style.display = 'inline-block';
+                    replaceBtn.style.display = 'inline-block';
+                    replaceAllBtn.style.display = 'inline-block';
+                } else {
+                    replaceInput.style.display = 'none';
+                    replaceBtn.style.display = 'none';
+                    replaceAllBtn.style.display = 'none';
+                }
+                setTimeout(() => findInput && findInput.focus(), 0);
+            }
+
+            function hideFindReplace() {
+                const bar = document.getElementById('findReplaceBar');
+                const findInput = document.getElementById('findInput');
+                const replaceInput = document.getElementById('replaceInput');
+                const countEl = document.getElementById('findCount');
+                if (findInput) findInput.value = '';
+                if (replaceInput) replaceInput.value = '';
+                if (countEl) countEl.textContent = '';
+                renderFindHighlights();
+                if (bar) bar.style.display = 'none';
+            }
+
+            function findNext() {
+                const ta = document.getElementById('editorTextarea');
+                const query = document.getElementById('findInput').value;
+                renderFindHighlights();
+                if (!ta || !query) return;
+                const start = ta.selectionEnd;
+                const idx = ta.value.indexOf(query, start);
+                if (idx !== -1) {
+                    ta.focus();
+                    ta.setSelectionRange(idx, idx + query.length);
+                    scrollToSelectionCenter();
+                    return;
+                }
+                // 循环查找
+                const wrapIdx = ta.value.indexOf(query, 0);
+                if (wrapIdx !== -1) {
+                    ta.focus();
+                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
+                    scrollToSelectionCenter();
+                }
+            }
+
+            function findPrev() {
+                const ta = document.getElementById('editorTextarea');
+                const query = document.getElementById('findInput').value;
+                renderFindHighlights();
+                if (!ta || !query) return;
+                const start = ta.selectionStart - 1;
+                const idx = ta.value.lastIndexOf(query, start);
+                if (idx !== -1) {
+                    ta.focus();
+                    ta.setSelectionRange(idx, idx + query.length);
+                    scrollToSelectionCenter();
+                    return;
+                }
+                const wrapIdx = ta.value.lastIndexOf(query);
+                if (wrapIdx !== -1) {
+                    ta.focus();
+                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
+                    scrollToSelectionCenter();
+                }
+            }
+
+            function scrollToSelectionCenter() {
+                const ta = document.getElementById('editorTextarea');
+                if (!ta) return;
+                const selStart = ta.selectionStart || 0;
+                const beforeText = ta.value.slice(0, selStart);
+                const lines = beforeText.split('\n');
+                const lineHeight = parseFloat(getComputedStyle(ta).lineHeight || '16');
+                const targetTop = (lines.length - 1) * lineHeight;
+                const centerOffset = ta.clientHeight / 2;
+                ta.scrollTop = Math.max(0, targetTop - centerOffset);
+            }
+
+            function replaceOne() {
+                const ta = document.getElementById('editorTextarea');
+                const query = document.getElementById('findInput').value;
+                const replacement = document.getElementById('replaceInput').value;
+                if (!ta || !query) return;
+                const selText = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+                if (selText === query) {
+                    const before = ta.value.substring(0, ta.selectionStart);
+                    const after = ta.value.substring(ta.selectionEnd);
+                    const pos = before.length + replacement.length;
+                    ta.value = before + replacement + after;
+                    ta.setSelectionRange(pos - replacement.length, pos);
+                    syncMinimap();
+                }
+                findNext();
+                renderFindHighlights();
+            }
+
+            function replaceAll() {
+                const ta = document.getElementById('editorTextarea');
+                const query = document.getElementById('findInput').value;
+                const replacement = document.getElementById('replaceInput').value;
+                if (!ta || !query) return;
+                ta.value = ta.value.split(query).join(replacement);
+                syncMinimap();
+                renderFindHighlights();
+            }
             // 键盘ESC关闭
-            document.addEventListener('keydown', (e) => {
+        document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     closeImageModal();
                     closeEditorModal();
+                    closeDiffModal();
                 }
                 const modal = document.getElementById('imagePreviewModal');
                 const visible = modal && modal.style.display !== 'none';
@@ -3634,8 +4493,10 @@
             const targetContainer = document.getElementById('targetFileBrowser');
             const contextMenu = document.getElementById('fileContextMenu');
             const renameAction = contextMenu ? contextMenu.querySelector('[data-action="rename"]') : null;
+            const newFileAction = contextMenu ? contextMenu.querySelector('[data-action="new-file"]') : null;
             const newFolderAction = contextMenu ? contextMenu.querySelector('[data-action="new-folder"]') : null;
             const runAction = contextMenu ? contextMenu.querySelector('[data-action="run"]') : null;
+            const compareAction = contextMenu ? contextMenu.querySelector('[data-action="compare"]') : null;
             const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
             const compressAction = contextMenu ? contextMenu.querySelector('[data-action="compress"]') : null;
             const extractAction = contextMenu ? contextMenu.querySelector('[data-action="extract"]') : null;
@@ -3652,18 +4513,12 @@
                 const alreadySelected = row.classList.contains('selected');
 
                 if (alreadySelected) {
-                    // 与 Windows 一致：在已选项上右击保留当前多选，仅清空另一侧
-                    if (isSource && selectedTargetFiles.length > 0) {
-                        clearSelectionsForPanel(false);
-                    } else if (!isSource && selectedSourceFiles.length > 0) {
-                        clearSelectionsForPanel(true);
-                    }
                     lastActivePanel = isSource ? 'source' : 'target';
                     updateSelectionInfo();
                     return;
                 }
 
-                clearAllSelections();
+                // 右键未选中的文件：不清空已有选择，直接追加，便于跨面板对比
                 row.classList.add('selected');
                 const item = {
                     path: row.dataset.path,
@@ -3671,18 +4526,17 @@
                     is_directory: String(row.dataset.isDirectory).toLowerCase() === 'true'
                 };
                 if (isSource) {
-                    selectedSourceFiles = [item];
-                    selectedTargetFiles = [];
+                    if (!selectedSourceFiles.find(f => f.path === item.path)) {
+                        selectedSourceFiles.push(item);
+                    }
                     lastSelectedIndex.source = Number(row.dataset.idx || 0);
-                    lastSelectedIndex.target = null;
-                    lastActivePanel = 'source';
                 } else {
-                    selectedTargetFiles = [item];
-                    selectedSourceFiles = [];
+                    if (!selectedTargetFiles.find(f => f.path === item.path)) {
+                        selectedTargetFiles.push(item);
+                    }
                     lastSelectedIndex.target = Number(row.dataset.idx || 0);
-                    lastSelectedIndex.source = null;
-                    lastActivePanel = 'target';
                 }
+                lastActivePanel = isSource ? 'source' : 'target';
                 updateSelectionInfo();
             }
 
@@ -3785,6 +4639,54 @@
                 }
             }
 
+            function startInlineCreateFile(isSource) {
+                const { containerId } = getPanelConfig(isSource);
+                const container = document.getElementById(containerId);
+                const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+                const currentPath = getActivePath(isSource);
+                if (!container || !server || !currentPath) return;
+
+                const existing = container.querySelector('.file-item.temp-new-file');
+                if (existing) existing.remove();
+
+                const row = document.createElement('div');
+                row.className = 'file-item selectable temp-new-file';
+                row.innerHTML = `
+                    <i class="bi bi-file-earmark-plus text-primary"></i>
+                    <div class="file-info">
+                        <input class="form-control form-control-sm" type="text" placeholder="新建文件" style="width: 100%; padding: 1px 4px; height: 22px; font-size: 0.9rem; box-sizing: border-box; display: inline-block;" />
+                    </div>
+                `;
+                const backRow = container.querySelector('.file-item[title*="返回"]');
+                if (backRow && backRow.nextSibling) {
+                    container.insertBefore(row, backRow.nextSibling);
+                } else {
+                    container.insertBefore(row, container.firstChild);
+                }
+
+                const input = row.querySelector('input');
+                if (input) {
+                    input.focus();
+                    const cleanup = () => row.remove();
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const name = (input.value || '').trim();
+                            if (!name) {
+                                cleanup();
+                                return;
+                            }
+                            createFile(isSource ? 'source' : 'target', server, currentPath, name);
+                            cleanup();
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cleanup();
+                        }
+                    });
+                    input.addEventListener('blur', () => cleanup(), { once: true });
+                }
+            }
+
             function positionContextMenu(x, y) {
                 if (!contextMenu) return;
                 const rect = contextMenu.getBoundingClientRect();
@@ -3834,8 +4736,23 @@
                         runAction.classList.add('disabled');
                     }
                 }
+                const totalSelectedFiles = selectedSourceFiles.filter(f => !f.is_directory).length + selectedTargetFiles.filter(f => !f.is_directory).length;
+                if (compareAction) {
+                    if (totalSelectedFiles >= 2) {
+                        compareAction.classList.remove('disabled');
+                    } else {
+                        compareAction.classList.add('disabled');
+                    }
+                }
 
                 const currentPath = getActivePath(isSource);
+                if (newFileAction) {
+                    if (currentPath) {
+                        newFileAction.classList.remove('disabled');
+                    } else {
+                        newFileAction.classList.add('disabled');
+                    }
+                }
                 if (newFolderAction) {
                     if (currentPath) {
                         newFolderAction.classList.remove('disabled');
@@ -3891,6 +4808,22 @@
                     if (newFolderAction.classList.contains('disabled')) return;
                     hideContextMenu();
                     startInlineCreate(contextState.isSource);
+                });
+            }
+
+            if (newFileAction) {
+                newFileAction.addEventListener('click', () => {
+                    if (newFileAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    startInlineCreateFile(contextState.isSource);
+                });
+            }
+
+            if (compareAction) {
+                compareAction.addEventListener('click', () => {
+                    if (compareAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    compareFromSelection();
                 });
             }
 
@@ -4004,17 +4937,18 @@
         }
 
         // 页面加载完成后的初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
-            addLogInfo('📋 请选择源服务器和目标服务器开始传输');
-            addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
-            addLogInfo(`⚡ 双击优化: 时间窗口${DOUBLE_CLICK_CONFIG.timeWindow}ms，响应更宽容友好`);
-            addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
-            const CLIENT_IPV4 = JSON.parse('{{ client_ipv4|tojson|default("null") }}');
-            if (CLIENT_IPV4) { addLogInfo('🖥️ 访问设备 IPv4: ' + CLIENT_IPV4); }
-            if (CLIENT_IPV4) {
-                socket.emit('register_client', { client_ip: CLIENT_IPV4 });
-            }
+            document.addEventListener('DOMContentLoaded', function() {
+                addLogInfo('🚀 TurboFile 极速传文件传输系统已启动');
+                addLogInfo('📋 请选择源服务器和目标服务器开始传输');
+                addLogInfo('💡 提示: 传输过程中详细进度信息将不在日志中显示以保持最佳性能');
+                addLogInfo(`⚡ 双击优化: 时间窗口${DOUBLE_CLICK_CONFIG.timeWindow}ms，响应更宽容友好`);
+                addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
+                setupImageWheelZoom();
+                const CLIENT_IPV4 = JSON.parse('{{ client_ipv4|tojson|default("null") }}');
+                if (CLIENT_IPV4) { addLogInfo('🖥️ 访问设备 IPv4: ' + CLIENT_IPV4); }
+                if (CLIENT_IPV4) {
+                    socket.emit('register_client', { client_ip: CLIENT_IPV4 });
+                }
             socket.on('connect', () => {
                 socketId = socket.id;
                 updateRunControls();
@@ -4088,10 +5022,11 @@
 
     <!-- 极简图片预览模态框 -->
     <div id="imagePreviewModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1050;">
-        <button id="imagePreviewCloseBtn" aria-label="关闭" title="关闭"
-                style="position:absolute; top:14px; right:18px; width:40px; height:40px; border:none; border-radius:50%; background:rgba(0,0,0,0.6); color:#fff; font-size:22px; line-height:40px; text-align:center; cursor:pointer;">×</button>
+        <div style="position:absolute; top:14px; right:18px; z-index:1201; display:flex; gap:8px;">
+            <button id="imagePreviewCloseBtn" type="button" class="btn btn-sm btn-outline-light" onclick="closeImageModal()" style="padding:4px 10px;">关闭</button>
+        </div>
         <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
-            <img src="" alt="预览" style="max-width: 98vw; max-height: 95vh; object-fit: contain; display:block;" />
+            <img src="" alt="预览" style="max-width: 98vw; max-height: 95vh; object-fit: contain; display:block; transition: transform 120ms ease; transform-origin: center center;" />
         </div>
         <button id="imagePrevBtn" aria-label="上一张" title="上一张"
                 style="position:absolute; left:20px; top:50%; transform: translateY(-50%); width:48px; height:48px; border:none; border-radius:50%; background:rgba(255,255,255,0.2); color:#fff; font-size:24px; cursor:pointer;">‹</button>
@@ -4100,18 +5035,68 @@
         <div id="imagePreviewCaption" style="position:absolute; bottom:18px; left:50%; transform: translateX(-50%); color:#fff; font-size:14px; background:rgba(0,0,0,0.35); padding:6px 10px; border-radius:10px;"></div>
     </div>
 
+    <!-- 图片网格视图 -->
+    <div id="imageGridModal" style="display:none; position:fixed; inset:0; background:#11161f; z-index:1060; overflow:auto; padding:16px;">
+        <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom:12px; color:#e5e7eb;">
+            <div style="font-weight:600;">图片网格视图</div>
+            <div>
+                <button class="btn btn-sm btn-outline-light" onclick="closeImageGrid()" style="margin-right:6px;">关闭</button>
+            </div>
+        </div>
+        <div id="imageGridContainer" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px;"></div>
+    </div>
+
+    <!-- 文件对比模态框（VSCode风格） -->
+    <div id="diffModal">
+        <div class="diff-dialog">
+            <div class="diff-header">
+                <div class="paths">
+                    <span id="diffLeftPath"></span>
+                    <i class="bi bi-arrow-left-right text-secondary"></i>
+                    <span id="diffRightPath"></span>
+                </div>
+                <button class="diff-close-btn" type="button" onclick="closeDiffModal()">关闭</button>
+            </div>
+            <div class="diff-body">
+                <div class="diff-grid" id="diffGrid">
+                    <div class="diff-rows" id="diffRows">
+                        <!-- 动态填充 -->
+                    </div>
+                </div>
+                <div class="diff-summary" id="diffSummary"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- 轻量级在线编辑器模态框 -->
 <div id="editorModal" class="editor-modal">
         <div class="editor-dialog">
             <div class="editor-header">
                 <strong class="modal-title" style="font-size: 0.95rem;">在线编辑</strong>
                 <div>
-                    <button class="btn btn-sm btn-primary" onclick="saveEditorContent()">保存</button>
+                    <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(false)" style="margin-right:6px;">查找</button>
+                    <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(true)" style="margin-right:10px;">替换</button>
+                    <button class="btn btn-sm btn-primary" onclick="saveEditorContent()" style="margin-right:6px;">保存</button>
                     <button class="btn btn-sm btn-danger" onclick="closeEditorModal()">关闭</button>
                 </div>
             </div>
-            <div class="editor-body">
-                <textarea class="editor-textarea" wrap="off"></textarea>
+                <div class="editor-body">
+                <div class="editor-main" style="position: relative;">
+                    <div class="editor-text-wrapper">
+                        <pre id="editorHighlightLayer" class="editor-highlight-layer"></pre>
+                        <textarea class="editor-textarea" wrap="off" id="editorTextarea"></textarea>
+                    </div>
+                    <div id="findReplaceBar" class="find-replace-bar">
+                        <input id="findInput" type="text" placeholder="查找 (Ctrl+F)" style="min-width: 260px;" />
+                        <span id="findCount" style="color:#9ca3af; font-size:12px; min-width:60px; display:inline-block;"></span>
+                        <input id="replaceInput" type="text" placeholder="替换 (Ctrl+H)" style="display:none; min-width: 260px;" />
+                        <button class="secondary" onclick="findPrev()">上一个</button>
+                        <button class="secondary" onclick="findNext()">下一个</button>
+                        <button id="replaceBtn" class="secondary" style="display:none;" onclick="replaceOne()">替换</button>
+                        <button id="replaceAllBtn" style="display:none;" onclick="replaceAll()">全部替换</button>
+                        <button class="secondary" onclick="hideFindReplace()">关闭</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

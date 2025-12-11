@@ -27,6 +27,9 @@ import uuid
 import signal
 import select
 import pty
+from difflib import SequenceMatcher
+import cv2
+import numpy as np
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -3154,39 +3157,59 @@ def index():
 def api_image_stream():
     server_ip = request.args.get('server')
     path = request.args.get('path')
+    try:
+        new_w = int(request.args.get('width', 0) or 0)
+        new_h = int(request.args.get('height', 0) or 0)
+    except ValueError:
+        new_w = new_h = 0
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
 
     try:
+        def resize_bytes(img_bytes: bytes):
+            if not new_w and not new_h:
+                return img_bytes, None
+            arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                return img_bytes, None
+            h, w = img.shape[:2]
+            target_w, target_h = new_w, new_h
+            if target_w <= 0 and target_h > 0:
+                target_w = int(w * (target_h / h))
+            elif target_h <= 0 and target_w > 0:
+                target_h = int(h * (target_w / w))
+            if target_w <= 0 or target_h <= 0:
+                return img_bytes, None
+            resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+            ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if not ok:
+                return img_bytes, None
+            return enc.tobytes(), 'image/jpeg'
+
         # 本地读取
         if is_local_server(server_ip):
-            def generate():
-                with open(path, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-            return Response(generate(), mimetype='application/octet-stream')
+            with open(path, 'rb') as f:
+                data = f.read()
+            data, mime = resize_bytes(data)
+            return Response(data, mimetype=mime or 'application/octet-stream')
         # 远程读取
         ssh = ssh_manager.get_connection(server_ip)
         if not ssh:
             return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
         sftp = ssh.open_sftp()
-        def generate_sftp():
+        try:
+            with sftp.file(path, 'rb') as f:
+                data = f.read()
+                if not isinstance(data, (bytes, bytearray)):
+                    data = bytes(data)
+            data, mime = resize_bytes(data)
+            return Response(data, mimetype=mime or 'application/octet-stream')
+        finally:
             try:
-                with sftp.file(path, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk if isinstance(chunk, (bytes, bytearray)) else bytes(chunk)
-            finally:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
-        return Response(generate_sftp(), mimetype='application/octet-stream')
+                sftp.close()
+            except Exception:
+                pass
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -3747,6 +3770,151 @@ def create_folder():
             'full_path': full_path
         })
 
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/create_file', methods=['POST'])
+def create_file():
+    """创建空文件"""
+    try:
+        data = request.get_json()
+        server_ip = data.get('server')
+        parent_path = data.get('parent_path')
+        file_name = data.get('file_name')
+
+        if not server_ip or not parent_path or not file_name:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        is_windows = is_windows_server(server_ip)
+        is_local = is_local_server(server_ip)
+
+        # 构建完整路径
+        if is_windows:
+            import ntpath
+            full_path = ntpath.join(parent_path, file_name)
+        else:
+            full_path = os.path.join(parent_path, file_name)
+
+        if is_local:
+            if os.path.exists(full_path):
+                return jsonify({'success': False, 'error': '文件已存在'})
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write('')
+        else:
+            if is_windows:
+                ps_cmd = f"""
+                if (Test-Path -LiteralPath '{full_path}') {{
+                    Write-Output '__EXIST__'
+                }} else {{
+                    New-Item -ItemType File -Path '{full_path}' -Force | Out-Null
+                }}
+                """
+                cmd = f"powershell -Command \"{ps_cmd}\""
+            else:
+                safe_path = shlex.quote(full_path)
+                cmd = f'if [ -e {safe_path} ]; then echo "__EXIST__"; else touch {safe_path}; fi'
+
+            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
+            if '__EXIST__' in (stdout or ''):
+                return jsonify({'success': False, 'error': '文件已存在'})
+            if exit_code != 0:
+                return jsonify({'success': False, 'error': stderr or '创建文件失败'})
+
+        return jsonify({
+            'success': True,
+            'message': '创建文件成功',
+            'full_path': full_path
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/compare_files', methods=['POST'])
+def compare_files():
+    """
+    对比两个文件，返回逐行差异（仿 VSCode Git Diff）
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        server_a = data.get('server_a')
+        server_b = data.get('server_b')
+        path_a = data.get('path_a')
+        path_b = data.get('path_b')
+
+        if not all([server_a, server_b, path_a, path_b]):
+            return jsonify({'success': False, 'error': '缺少必要参数'})
+
+        def read_text(server, path):
+            if is_local_server(server):
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    return f.read()
+            ssh = ssh_manager.get_connection(server)
+            if not ssh:
+                raise RuntimeError('SSH连接失败')
+            sftp = ssh.open_sftp()
+            try:
+                with sftp.file(path, 'r') as f:
+                    data_bytes = f.read()
+                if isinstance(data_bytes, (bytes, bytearray)):
+                    return data_bytes.decode('utf-8', errors='ignore')
+                return str(data_bytes)
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        left_text = read_text(server_a, path_a).splitlines()
+        right_text = read_text(server_b, path_b).splitlines()
+
+        sm = SequenceMatcher(None, left_text, right_text)
+        diff_lines = []
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == 'equal':
+                for k in range(i2 - i1):
+                    diff_lines.append({
+                        'left_no': i1 + k + 1,
+                        'right_no': j1 + k + 1,
+                        'left': left_text[i1 + k],
+                        'right': right_text[j1 + k],
+                        'tag': 'equal'
+                    })
+            elif tag == 'replace':
+                max_len = max(i2 - i1, j2 - j1)
+                for k in range(max_len):
+                    left_line = left_text[i1 + k] if (i1 + k) < i2 else ''
+                    right_line = right_text[j1 + k] if (j1 + k) < j2 else ''
+                    diff_lines.append({
+                        'left_no': i1 + k + 1 if (i1 + k) < i2 else None,
+                        'right_no': j1 + k + 1 if (j1 + k) < j2 else None,
+                        'left': left_line,
+                        'right': right_line,
+                        'tag': 'replace'
+                    })
+            elif tag == 'delete':
+                for k in range(i2 - i1):
+                    diff_lines.append({
+                        'left_no': i1 + k + 1,
+                        'right_no': None,
+                        'left': left_text[i1 + k],
+                        'right': '',
+                        'tag': 'delete'
+                    })
+            elif tag == 'insert':
+                for k in range(j2 - j1):
+                    diff_lines.append({
+                        'left_no': None,
+                        'right_no': j1 + k + 1,
+                        'left': '',
+                        'right': right_text[j1 + k],
+                        'tag': 'insert'
+                    })
+
+        return jsonify({
+            'success': True,
+            'lines': diff_lines
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
