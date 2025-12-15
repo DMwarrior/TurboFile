@@ -1,32 +1,62 @@
 {
   "10.190.129.29": {
     "source": {
-      "server": "192.168.9.64",
-      "path": "/home/ubuntu/work/Qingwei_Autotrain/model/lishi/ziwaiyumi/ziwaiyumi_40_1024_2"
+      "server": "192.168.9.62",
+      "path": "/home/th/Work/fankun"
     },
     "target": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work/fankun/code/TurboFile"
+      "server": "10.190.129.29",
+      "path": "D:/Work/test"
     }
   },
   "10.190.199.27": {
     "target": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work_2/wangfei/datasets/DaMi_2cls"
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/Qingwei_Autotrain/model/lvdai"
     },
     "source": {
       "server": "10.190.199.27",
-      "path": "D:/MX/20251211-094749_5_images"
+      "path": "D:/MX"
     }
   },
   "10.190.79.12": {
     "source": {
       "server": "192.168.9.60",
-      "path": "/home/th/Project_ssd/zs/code/objdetect_reg/yolov5-huang-InstanceAug-ding"
+      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi"
     },
     "target": {
       "server": "192.168.9.60",
-      "path": "/home/th"
+      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi/classifier/classifier_o"
+    }
+  },
+  "10.190.64.140": {
+    "source": {
+      "server": "10.190.21.253",
+      "path": "/var/services/homes/Algorithm/57服务器huang/data/x/label_binglang/images"
+    },
+    "target": {
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/AUTOTRAIN/datasets/images"
+    }
+  },
+  "10.190.21.230": {
+    "source": {
+      "server": "192.168.9.62",
+      "path": "/home/th/Work/fankun/data/绿豆_chaofen"
+    },
+    "target": {
+      "server": "10.190.21.230",
+      "path": "E:/jiemi/CHECK-2/second_check"
+    }
+  },
+  "10.190.78.32": {
+    "target": {
+      "server": "192.168.9.57",
+      "path": "/home/thgd/huang/data/haimiantai/1024_192_10cls_xingjiang_xiaoliao/single"
+    },
+    "source": {
+      "server": "192.168.9.62",
+      "path": "/home/th/Work/lyh/retrieve/pytorch/loss"
     }
   }
 }

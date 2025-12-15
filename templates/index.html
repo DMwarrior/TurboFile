@@ -2390,6 +2390,11 @@
             const requestToken = `${Date.now()}_${Math.random()}`;
             state.requestToken = requestToken;
 
+            // “刷新目录”必须同步清理预览缓存，否则同路径文件被删除/重建/覆盖时会继续命中内存缓存，导致前端显示旧内容
+            if (forceRefresh) {
+                invalidatePreviewCacheUnderDir(server, targetPath);
+            }
+
             const params = new URLSearchParams({
                 path: targetPath,
                 show_hidden: showHidden,
@@ -3750,7 +3755,69 @@
 
 
             // 轻量级图片预览与在线编辑（懒加载、异步、性能优先）
-            const PreviewCache = new Map(); // 路径->BlobURL / 文本缓存
+            // 注意：预览缓存一定要支持失效/清理，否则“同路径文件被删除后重建/覆盖”会导致前端一直显示旧内容（只能整页刷新才能清空内存缓存）。
+            const PreviewCache = new Map(); // key -> { type: 'blob'|'text', value: string, ts: number }
+
+            function normalizePreviewPath(path) {
+                return String(path || '').replace(/\\/g, '/');
+            }
+
+            function getPreviewKey(server, path) {
+                return `${server}|${normalizePreviewPath(path)}`;
+            }
+
+            function revokePreviewEntry(entry) {
+                if (!entry) return;
+                if (entry.type === 'blob' && typeof entry.value === 'string' && entry.value.startsWith('blob:')) {
+                    try { URL.revokeObjectURL(entry.value); } catch (_) {}
+                }
+            }
+
+            function previewCacheGet(server, path, type) {
+                const key = getPreviewKey(server, path);
+                const entry = PreviewCache.get(key);
+                if (!entry) return null;
+                if (type && entry.type !== type) return null;
+                return entry;
+            }
+
+            function previewCacheSet(server, path, type, value) {
+                const key = getPreviewKey(server, path);
+                const prev = PreviewCache.get(key);
+                if (prev && prev.type === 'blob' && prev.value !== value) {
+                    revokePreviewEntry(prev);
+                }
+                PreviewCache.set(key, { type, value, ts: Date.now() });
+            }
+
+            function invalidatePreviewCache(server, paths) {
+                if (!server || !Array.isArray(paths) || paths.length === 0) return;
+                const normalized = paths.map(normalizePreviewPath).filter(Boolean);
+                if (normalized.length === 0) return;
+
+                const serverPrefix = `${server}|`;
+                const exact = new Set(normalized);
+                const prefixes = normalized.map(p => (p.endsWith('/') ? p : p + '/'));
+
+                const keysToDelete = [];
+                for (const key of PreviewCache.keys()) {
+                    if (!key.startsWith(serverPrefix)) continue;
+                    const cachedPath = key.slice(serverPrefix.length);
+                    if (exact.has(cachedPath) || prefixes.some(prefix => cachedPath.startsWith(prefix))) {
+                        keysToDelete.push(key);
+                    }
+                }
+                keysToDelete.forEach((k) => {
+                    const entry = PreviewCache.get(k);
+                    revokePreviewEntry(entry);
+                    PreviewCache.delete(k);
+                });
+            }
+
+            function invalidatePreviewCacheUnderDir(server, dirPath) {
+                if (!server || !dirPath) return;
+                invalidatePreviewCache(server, [dirPath]);
+            }
             const ImageViewer = {
                 items: [],
                 index: -1,
@@ -3759,20 +3826,20 @@
             };
 
         async function getImageBlobUrl(server, path) {
-            const key = server + '|' + path;
-            if (!PreviewCache.has(key)) {
-                const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
-                const resp = await fetch(url, { cache: 'no-store' });
-                if (!resp.ok) {
-                    let msg = '';
-                    try { msg = await resp.text(); } catch (_) {}
-                    throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
-                }
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                PreviewCache.set(key, blobUrl);
+            const cached = previewCacheGet(server, path, 'blob');
+            if (cached) return cached.value;
+
+            const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
+            const resp = await fetch(url, { cache: 'no-store' });
+            if (!resp.ok) {
+                let msg = '';
+                try { msg = await resp.text(); } catch (_) {}
+                throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
             }
-            return PreviewCache.get(key);
+            const blob = await resp.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            previewCacheSet(server, path, 'blob', blobUrl);
+            return blobUrl;
         }
 
         function isImageFile(name) {
@@ -3868,17 +3935,10 @@
 
             async function editTextFile(server, path, name) {
                 try {
-                    const key = server + '|' + path;
-
                     // 立即打开编辑器，提升感知速度
-                    openEditorModal(server, path, name, '正在加载...');
-                    let content = PreviewCache.get(key);
-                    if (content) {
-                        // 缓存命中，立即填充
-                        const ta = document.querySelector('#editorModal textarea');
-                        if (ta) ta.value = content;
-                        return;
-                    }
+                    const cached = previewCacheGet(server, path, 'text');
+                    openEditorModal(server, path, name, cached ? cached.value : '正在加载...');
+                    if (cached) return;
 
                     // 异步拉取内容
                     const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
@@ -3890,8 +3950,8 @@
                     }
                     const data = await resp.json();
                     if (!data.success) throw new Error(data.error || '读取失败');
-                    content = data.content || '';
-                    PreviewCache.set(key, content);
+                    const content = data.content || '';
+                    previewCacheSet(server, path, 'text', content);
 
                     // 填充内容
                     const ta = document.querySelector('#editorModal textarea');
@@ -4375,7 +4435,7 @@
                 if (data.success) {
                     addLogInfo('💾 已保存: ' + path);
                     // 更新缓存
-                    PreviewCache.set(server + '|' + path, content);
+                    previewCacheSet(server, path, 'text', content);
                     closeEditorModal();
                 } else {
                     addLogError('保存失败: ' + (data.error || '未知错误'));
