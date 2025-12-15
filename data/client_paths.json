@@ -1,12 +1,12 @@
 {
   "10.190.129.29": {
     "source": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work/fankun"
+      "server": "192.168.9.61",
+      "path": "/home/th"
     },
     "target": {
-      "server": "10.190.129.29",
-      "path": "D:/Work/test"
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/fankun/data/GanLaJiao_tongliao_2048x512/classifier_train/cugan"
     }
   },
   "10.190.199.27": {
@@ -21,12 +21,12 @@
   },
   "10.190.79.12": {
     "source": {
-      "server": "192.168.9.60",
-      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi"
+      "server": "192.168.9.62",
+      "path": "/home/th/Work/zs/Project_ssd/code/objdetect_reg/yolov5-huang-InstanceAug-ding/runs/train/ShuiDaoZhongLi"
     },
     "target": {
       "server": "192.168.9.60",
-      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi/classifier/classifier_o"
+      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi"
     }
   },
   "10.190.64.140": {
@@ -55,8 +55,8 @@
       "path": "/home/thgd/huang/data/haimiantai/1024_192_10cls_xingjiang_xiaoliao/single"
     },
     "source": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work/lyh/retrieve/pytorch/loss"
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/AUTOTRAIN/datasets/x400kaikousongzibaibeijing"
     }
   }
 }

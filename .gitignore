@@ -128,4 +128,4 @@ coverage.xml
 local_settings.py
 development.ini
 
-data/client_paths.json
+data

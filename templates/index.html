@@ -312,21 +312,96 @@
             background: #4b5563;
         }
 
-        /* 图片网格视图 */
-        #imageGridModal {
-            background: #11161f;
-        }
-        /* 预览层在网格之上，确保ESC只关闭预览，不影响网格 */
-        #imagePreviewModal {
-            z-index: 1100 !important;
-        }
-        #imageGridContainer {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-            gap: 12px;
-        }
-        .image-grid-card {
-            background: #1b2230;
+	        /* 图片网格视图 */
+	        #imageGridModal {
+	            background: #11161f;
+	            padding: 0 !important; /* 覆盖内联 padding，让标题栏贴顶 */
+	        }
+	        .image-grid-header {
+	            display: flex;
+	            justify-content: space-between;
+	            align-items: center;
+	            position: sticky;
+	            top: 0;
+	            z-index: 2;
+	            background: #11161f;
+	            border-bottom: 1px solid rgba(148,163,184,0.12);
+	            padding: 6px 16px;
+	            margin-bottom: 8px;
+	            color: #e5e7eb;
+	            gap: 10px;
+	        }
+	        .image-grid-header-left {
+	            display: flex;
+	            align-items: center;
+	            gap: 12px;
+	            min-width: 0;
+	        }
+	        .image-grid-title {
+	            font-weight: 600;
+	            font-size: 14px;
+	            line-height: 1.2;
+	            white-space: nowrap;
+	        }
+	        .image-grid-cols-control {
+	            display: flex;
+	            align-items: center;
+	            gap: 8px;
+	            padding: 4px 8px;
+	            border-radius: 10px;
+	            background: rgba(255,255,255,0.03);
+	            border: 1px solid rgba(148,163,184,0.15);
+	        }
+	        .image-grid-cols-label {
+	            color: #9ca3af;
+	            font-size: 12px;
+	            font-weight: 600;
+	            letter-spacing: 0.2px;
+	            white-space: nowrap;
+	        }
+	        .image-grid-cols-buttons {
+	            display: flex;
+	            align-items: center;
+	            gap: 8px;
+	        }
+	        .image-grid-cols-btn {
+	            border: none;
+	            background: transparent;
+	            color: #cbd5e1;
+	            padding: 3px 5px;
+	            border-radius: 6px;
+	            font-size: 12px;
+	            font-weight: 600;
+	            line-height: 1.2;
+	            cursor: pointer;
+	            transition: background 120ms ease, color 120ms ease;
+	        }
+	        .image-grid-close-btn {
+	            padding: 4px 10px;
+	        }
+	        .image-grid-cols-btn:hover {
+	            background: rgba(255,255,255,0.06);
+	            color: #e5e7eb;
+	        }
+	        .image-grid-cols-btn.active {
+	            background: rgba(59,130,246,0.14);
+	            color: #93c5fd;
+	        }
+	        /* 预览层在网格之上，确保ESC只关闭预览，不影响网格 */
+	        #imagePreviewModal {
+	            z-index: 1100 !important;
+	        }
+	        #imageGridContainer {
+	            display: grid;
+	            --image-grid-cols: 8;
+	            grid-template-columns: repeat(var(--image-grid-cols), minmax(0, 1fr));
+	            gap: 12px;
+	            padding: 0 16px 16px;
+	            box-sizing: border-box;
+	            will-change: grid-template-columns;
+	        }
+	        .image-grid-card {
+	            background: #1b2230;
             border: 1px solid #222b3a;
             border-radius: 10px;
             padding: 10px;
@@ -340,14 +415,15 @@
             transform: translateY(-2px);
             border-color: #3b82f6;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-        }
-        .image-grid-card img {
-            width: 100%;
-            height: 150px;
-            object-fit: contain;
-            background: #0f172a;
-            border-radius: 8px;
-        }
+	        }
+	        .image-grid-card img {
+	            width: 100%;
+	            height: auto;
+	            aspect-ratio: 220 / 150;
+	            object-fit: contain;
+	            background: #0f172a;
+	            border-radius: 8px;
+	        }
         .image-grid-name {
             font-size: 12px;
             color: #e5e7eb;
@@ -361,11 +437,15 @@
             grid-column: 1/-1;
             padding: 20px 0;
         }
-        @media (max-width: 768px) {
-            #imageGridContainer {
-                grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-            }
-        }
+	        @media (max-width: 768px) {
+	            .image-grid-header {
+	                flex-wrap: wrap;
+	            }
+	            .image-grid-cols-control {
+	                width: 100%;
+	                justify-content: space-between;
+	            }
+	        }
 
         /* VSCode 风格 Diff 模态框 */
         #diffModal {
@@ -4004,66 +4084,124 @@
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
                 ImageViewer.index = -1;
-            }
+	            }
 
-            let imageGridObserver = null;
+		            let imageGridObserver = null;
+		            const IMAGE_GRID_COLS_DEFAULT = 8;
+		            const IMAGE_GRID_COLS_OPTIONS = [4, 6, 8, 10, 12];
+		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
+		            let imageGridColsControlsBound = false;
+		            let imageGridColsRaf = 0;
+		            const IMAGE_GRID_MAX_PARALLEL = 4;
+		            const imageGridLoadQueue = [];
+		            let imageGridLoadingCount = 0;
 
-            function initImageGridObserver(rootEl) {
-                if (imageGridObserver) imageGridObserver.disconnect();
-                if (!('IntersectionObserver' in window)) {
-                    imageGridObserver = null;
+		            function normalizeImageGridCols(value) {
+		                const n = Number.parseInt(value, 10);
+		                if (!Number.isFinite(n)) return IMAGE_GRID_COLS_DEFAULT;
+		                return IMAGE_GRID_COLS_OPTIONS.includes(n) ? n : IMAGE_GRID_COLS_DEFAULT;
+	            }
+
+		            function applyImageGridColumns(cols) {
+		                const normalized = normalizeImageGridCols(cols);
+		                imageGridCols = normalized;
+
+		                const btnWrap = document.getElementById('imageGridColsButtons');
+		                if (btnWrap) {
+		                    btnWrap.querySelectorAll('.image-grid-cols-btn').forEach(btn => {
+		                        const btnCols = normalizeImageGridCols(btn.dataset.cols);
+		                        btn.classList.toggle('active', btnCols === normalized);
+		                    });
+		                }
+
+		                const container = document.getElementById('imageGridContainer');
+		                if (!container) return;
+		                if (imageGridColsRaf) {
+		                    try { cancelAnimationFrame(imageGridColsRaf); } catch (_) {}
+		                }
+		                imageGridColsRaf = requestAnimationFrame(() => {
+		                    container.style.setProperty('--image-grid-cols', String(normalized));
+		                    imageGridColsRaf = 0;
+		                });
+		            }
+
+	            function ensureImageGridColsControls() {
+	                if (imageGridColsControlsBound) return;
+	                const btnWrap = document.getElementById('imageGridColsButtons');
+	                if (!btnWrap) return;
+
+	                btnWrap.addEventListener('click', (e) => {
+	                    const btn = e.target.closest('.image-grid-cols-btn[data-cols]');
+	                    if (!btn) return;
+	                    applyImageGridColumns(btn.dataset.cols);
+	                });
+	                imageGridColsControlsBound = true;
+
+	                const initialBtn = btnWrap.querySelector('.image-grid-cols-btn.active[data-cols]');
+		                const initialCols = initialBtn ? initialBtn.dataset.cols : IMAGE_GRID_COLS_DEFAULT;
+		                applyImageGridColumns(initialCols);
+		            }
+
+		            function processImageGridQueue() {
+		                if (imageGridLoadingCount >= IMAGE_GRID_MAX_PARALLEL) return;
+		                const task = imageGridLoadQueue.shift();
+		                if (!task) return;
+		                imageGridLoadingCount++;
+		                getImageBlobUrl(task.server, task.path)
+		                    .then(url => {
+		                        if (task.imgEl && task.imgEl.dataset.loaded !== '1') {
+		                            task.imgEl.src = url;
+		                            task.imgEl.dataset.loaded = '1';
+		                        }
+		                    })
+		                    .catch(err => {
+		                        if (task.imgEl) {
+		                            task.imgEl.alt = '加载失败';
+		                            task.imgEl.title = err.message || String(err);
+		                            task.imgEl.dataset.loaded = 'err';
+		                        }
+		                    })
+		                    .finally(() => {
+		                        imageGridLoadingCount = Math.max(0, imageGridLoadingCount - 1);
+		                        requestAnimationFrame(processImageGridQueue);
+		                    });
+		            }
+
+		            function scheduleImageGridLoad(card) {
+		                const imgEl = card.querySelector('img');
+		                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
+		                imgEl.dataset.loading = '1';
+		                imageGridLoadQueue.push({
+		                    server: card.dataset.server,
+		                    path: card.dataset.path,
+		                    imgEl
+		                });
+		                processImageGridQueue();
+		            }
+
+	            function initImageGridObserver(rootEl) {
+	                if (imageGridObserver) imageGridObserver.disconnect();
+	                if (!('IntersectionObserver' in window)) {
+	                    imageGridObserver = null;
                     return;
                 }
-                imageGridObserver = new IntersectionObserver((entries) => {
-                    entries.forEach(entry => {
-                        if (!entry.isIntersecting) return;
-                        const card = entry.target;
-                        const imgEl = card.querySelector('img');
-                        if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') {
-                            imageGridObserver.unobserve(card);
-                            return;
-                        }
-                        imgEl.dataset.loading = '1';
-                        const server = card.dataset.server;
-                        const path = card.dataset.path;
-                        getImageBlobUrl(server, path)
-                            .then(url => {
-                                imgEl.src = url;
-                                imgEl.dataset.loaded = '1';
-                            })
-                            .catch(err => {
-                                imgEl.alt = '加载失败';
-                                imgEl.title = err.message || String(err);
-                                imgEl.dataset.loaded = 'err';
-                            })
-                            .finally(() => {
-                                imageGridObserver && imageGridObserver.unobserve(card);
-                            });
-                    });
-                }, {
-                    root: rootEl || null,
-                    rootMargin: '200px',
-                    threshold: 0.01
-                });
-            }
+	                imageGridObserver = new IntersectionObserver((entries) => {
+	                    entries.forEach(entry => {
+	                        if (!entry.isIntersecting) return;
+	                        const card = entry.target;
+	                        scheduleImageGridLoad(card);
+	                        imageGridObserver && imageGridObserver.unobserve(card);
+	                    });
+	                }, {
+	                    root: rootEl || null,
+	                    rootMargin: '120px',
+	                    threshold: 0.01
+	                });
+	            }
 
-            function loadImageCardImmediately(card) {
-                const imgEl = card.querySelector('img');
-                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
-                imgEl.dataset.loading = '1';
-                const server = card.dataset.server;
-                const path = card.dataset.path;
-                getImageBlobUrl(server, path)
-                    .then(url => {
-                        imgEl.src = url;
-                        imgEl.dataset.loaded = '1';
-                    })
-                    .catch(err => {
-                        imgEl.alt = '加载失败';
-                        imgEl.title = err.message || String(err);
-                        imgEl.dataset.loaded = 'err';
-                    });
-            }
+	            function loadImageCardImmediately(card) {
+	                scheduleImageGridLoad(card);
+	            }
 
             async function openImageGrid(isSource) {
                 const serverSelectId = isSource ? 'sourceServer' : 'targetServer';
@@ -4078,13 +4216,15 @@
                     return;
                 }
 
-                const modal = document.getElementById('imageGridModal');
-                const container = document.getElementById('imageGridContainer');
-                if (!modal || !container) return;
-                modal.style.display = 'block';
-                document.body.style.overflow = 'hidden';
-                container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
-                initImageGridObserver(modal);
+	                const modal = document.getElementById('imageGridModal');
+	                const container = document.getElementById('imageGridContainer');
+	                if (!modal || !container) return;
+	                ensureImageGridColsControls();
+	                applyImageGridColumns(imageGridCols);
+	                modal.style.display = 'block';
+	                document.body.style.overflow = 'hidden';
+	                container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
+	                initImageGridObserver(modal);
 
                 const renderBatch = (items, server) => {
                     const frag = document.createDocumentFragment();
@@ -4188,15 +4328,17 @@
             }
 
             function closeImageGrid() {
-                const modal = document.getElementById('imageGridModal');
-                const container = document.getElementById('imageGridContainer');
-                if (modal) modal.style.display = 'none';
-                if (container) container.innerHTML = '';
-                document.body.style.overflow = '';
-                if (imageGridObserver) {
-                    imageGridObserver.disconnect();
-                }
-            }
+	                const modal = document.getElementById('imageGridModal');
+	                const container = document.getElementById('imageGridContainer');
+	                if (modal) modal.style.display = 'none';
+	                if (container) container.innerHTML = '';
+	                document.body.style.overflow = '';
+	                if (imageGridObserver) {
+	                    imageGridObserver.disconnect();
+	                }
+	                imageGridLoadQueue.length = 0;
+	                imageGridLoadingCount = 0;
+	            }
 
             function openEditorModal(server, path, title, content) {
                 const modal = document.getElementById('editorModal');
@@ -5185,16 +5327,28 @@
         <div id="imagePreviewCaption" style="position:absolute; bottom:18px; left:50%; transform: translateX(-50%); color:#fff; font-size:14px; background:rgba(0,0,0,0.35); padding:6px 10px; border-radius:10px;"></div>
     </div>
 
-    <!-- 图片网格视图 -->
-    <div id="imageGridModal" style="display:none; position:fixed; inset:0; background:#11161f; z-index:1060; overflow:auto; padding:16px;">
-        <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom:12px; color:#e5e7eb;">
-            <div style="font-weight:600;">图片网格视图</div>
-            <div>
-                <button class="btn btn-sm btn-outline-light" onclick="closeImageGrid()" style="margin-right:6px;">关闭</button>
-            </div>
-        </div>
-        <div id="imageGridContainer" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:12px;"></div>
-    </div>
+	    <!-- 图片网格视图 -->
+	    <div id="imageGridModal" style="display:none; position:fixed; inset:0; background:#11161f; z-index:1060; overflow:auto; padding:16px;">
+	        <div class="image-grid-header">
+	            <div class="image-grid-header-left">
+	                <div class="image-grid-title">图片网格视图</div>
+	                <div class="image-grid-cols-control" aria-label="选择列数">
+	                    <span class="image-grid-cols-label">列数</span>
+	                    <div class="image-grid-cols-buttons" id="imageGridColsButtons">
+	                        <button type="button" class="image-grid-cols-btn" data-cols="4">4列</button>
+	                        <button type="button" class="image-grid-cols-btn" data-cols="6">6列</button>
+	                        <button type="button" class="image-grid-cols-btn active" data-cols="8">8列</button>
+	                        <button type="button" class="image-grid-cols-btn" data-cols="10">10列</button>
+	                        <button type="button" class="image-grid-cols-btn" data-cols="12">12列</button>
+	                    </div>
+	                </div>
+	            </div>
+	            <div>
+	                <button class="btn btn-sm btn-outline-light image-grid-close-btn" onclick="closeImageGrid()" style="margin-right:6px;">关闭</button>
+	            </div>
+	        </div>
+	        <div id="imageGridContainer"></div>
+	    </div>
 
     <!-- 文件对比模态框（VSCode风格） -->
     <div id="diffModal">
