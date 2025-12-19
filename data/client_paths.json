@@ -1,32 +1,32 @@
 {
   "10.190.129.29": {
     "source": {
-      "server": "192.168.9.61",
-      "path": "/home/th"
+      "server": "10.190.129.29",
+      "path": "D:/"
     },
     "target": {
       "server": "192.168.9.64",
-      "path": "/home/ubuntu/work/fankun/data/GanLaJiao_tongliao_2048x512/classifier_train/cugan"
+      "path": "/home/ubuntu/work/fankun/test"
     }
   },
   "10.190.199.27": {
     "target": {
-      "server": "192.168.9.64",
-      "path": "/home/ubuntu/work/Qingwei_Autotrain/model/lvdai"
+      "server": "192.168.9.60",
+      "path": "/home/th/Project_ssd/Qingwei_Autotrain/data/xianxia_chaofen/20251015/images"
     },
     "source": {
       "server": "10.190.199.27",
-      "path": "D:/MX"
+      "path": "D:/suiyi"
     }
   },
   "10.190.79.12": {
     "source": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work/zs/Project_ssd/code/objdetect_reg/yolov5-huang-InstanceAug-ding/runs/train/ShuiDaoZhongLi"
+      "server": "10.190.79.12",
+      "path": "F:/data/shuidao/reg_test/model/ShuiDaoZhongli_addmi"
     },
     "target": {
       "server": "192.168.9.60",
-      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Zhongli/20251215_addmi"
+      "path": "/home/th/Project_ssd/zs/dataset/ShuiDao_Changli/20251219_addjixing"
     }
   },
   "10.190.64.140": {
@@ -41,22 +41,42 @@
   },
   "10.190.21.230": {
     "source": {
-      "server": "192.168.9.62",
-      "path": "/home/th/Work/fankun/data/绿豆_chaofen"
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/AUTOTRAIN/datasets/x600baozhuangbinglang"
     },
     "target": {
       "server": "10.190.21.230",
-      "path": "E:/jiemi/CHECK-2/second_check"
+      "path": "E:/"
     }
   },
   "10.190.78.32": {
     "target": {
-      "server": "192.168.9.57",
-      "path": "/home/thgd/huang/data/haimiantai/1024_192_10cls_xingjiang_xiaoliao/single"
+      "server": "192.168.9.62",
+      "path": "/home/th/Work"
     },
     "source": {
       "server": "192.168.9.64",
-      "path": "/home/ubuntu/work/AUTOTRAIN/datasets/x400kaikousongzibaibeijing"
+      "path": "/home/ubuntu/work/AUTOTRAIN/YOLOV5_v6.0_auto_train"
+    }
+  },
+  "10.190.78.30": {
+    "target": {
+      "server": "10.190.78.30",
+      "path": "C:/Users/LY981/Desktop/baishahuashengguo/20251218/duantou_detect"
+    },
+    "source": {
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/liyuan/dataset/HuaShengGuo_BaiSha"
+    }
+  },
+  "10.190.21.253": {
+    "source": {
+      "server": "192.168.9.60",
+      "path": "/home/th/Project"
+    },
+    "target": {
+      "server": "192.168.9.64",
+      "path": "/home/ubuntu/work/yfd/codes"
     }
   }
 }

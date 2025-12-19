@@ -28,8 +28,6 @@ import signal
 import select
 import pty
 from difflib import SequenceMatcher
-import cv2
-import numpy as np
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'data', 'config.json')
 
@@ -98,6 +96,7 @@ def is_admin_client_ip(ip: str) -> bool:
 
 
 # 获取当前主机的实际IP地址
+@lru_cache(maxsize=1)
 def get_current_host_ip():
     """获取当前主机的IP地址"""
     try:
@@ -180,7 +179,35 @@ def remember_path(client_ip: str, panel: str, server: str, path: str):
 # 全局变量
 ssh_connections = {}
 active_transfers = {}
-transfer_processes = {}  # 存储传输进程，用于取消操作
+transfer_processes = {}  # transfer_id -> list[proc_info]，用于取消/巡检
+TRANSFER_PROCESS_LOCK = threading.Lock()
+
+def register_transfer_process(transfer_id: str, proc_info: dict) -> None:
+    """登记传输进程/通道（支持同一传输多个并行子进程）。"""
+    if not transfer_id or not isinstance(proc_info, dict):
+        return
+    with TRANSFER_PROCESS_LOCK:
+        bucket = transfer_processes.get(transfer_id)
+        if bucket is None:
+            transfer_processes[transfer_id] = [proc_info]
+        elif isinstance(bucket, list):
+            bucket.append(proc_info)
+        elif isinstance(bucket, dict):
+            transfer_processes[transfer_id] = [bucket, proc_info]
+        else:
+            transfer_processes[transfer_id] = [proc_info]
+
+def get_transfer_processes_snapshot(transfer_id: str):
+    """获取某个传输的进程/通道快照，避免遍历时并发修改。"""
+    with TRANSFER_PROCESS_LOCK:
+        bucket = transfer_processes.get(transfer_id)
+        if bucket is None:
+            return []
+        if isinstance(bucket, list):
+            return list(bucket)
+        if isinstance(bucket, dict):
+            return [bucket]
+        return []
 CLIENT_ROOMS = {}
 CLIENT_PATH_LOCK = threading.Lock()
 CLIENT_PATH_FILE = os.path.join(os.path.dirname(__file__), 'data', 'client_paths.json')
@@ -212,7 +239,7 @@ PERFORMANCE_CONFIG = {
 # - aes128-ctr 是最快且仍被支持的加密算法（CTR模式，可并行，低延迟）
 # - umac-64 是最快的 MAC 算法
 # - 禁用所有安全检查和压缩
-RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-ctr -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o MACs=umac-64@openssh.com"
+RSYNC_SSH_CMD = "ssh -o Compression=no -o Ciphers=aes128-ctr -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o MACs=umac-64@openssh.com -o ControlMaster=auto -o ControlPersist=300 -o ControlPath=/tmp/turbofile-ssh-%r@%h:%p"
 
 # 🎯 UI日志过滤配置 - 只在前端显示关键传输日志
 UI_LOG_FILTER_CONFIG = {
@@ -563,6 +590,11 @@ progress_manager = ProgressManager()
 def _is_transfer_process_active(proc_info):
     """判断记录的传输进程是否仍在运行。"""
     try:
+        if not proc_info:
+            return False
+        # 支持同一 transfer_id 下的多个并行子进程/通道
+        if isinstance(proc_info, list):
+            return any(_is_transfer_process_active(p) for p in proc_info)
         ptype = proc_info.get('type')
         if ptype == 'subprocess':
             proc = proc_info.get('process')
@@ -579,8 +611,8 @@ def _cleanup_transfer_state(transfer_id):
     """统一清理传输相关状态，避免残留僵尸任务。"""
     if transfer_id in active_transfers:
         del active_transfers[transfer_id]
-    if transfer_id in transfer_processes:
-        del transfer_processes[transfer_id]
+    with TRANSFER_PROCESS_LOCK:
+        transfer_processes.pop(transfer_id, None)
     progress_manager.cleanup_transfer(transfer_id)
     speed_simulator.cleanup_transfer(transfer_id)
 
@@ -603,7 +635,7 @@ def start_transfer_watchdog():
                     if age < STALE_TRANSFER_TIMEOUT:
                         continue
 
-                    proc_info = transfer_processes.get(tid)
+                    proc_info = get_transfer_processes_snapshot(tid)
                     if proc_info and _is_transfer_process_active(proc_info):
                         # 进程仍在跑，跳过
                         continue
@@ -1577,7 +1609,7 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
     speed_thread.daemon = True
     speed_thread.start()
 
-def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True):
+def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True):
     """启动即时并行传输任务 - 无预分析，立即开始"""
     def _log_transfer_summary(status: str, total_time: str = "", error: str = ""):
         meta = active_transfers.get(transfer_id, {})
@@ -1627,10 +1659,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
             # 🚀 性能优化：减少WebSocket通信，只发送关键信息
             if not PERFORMANCE_CONFIG.get('reduce_websocket_traffic', True):
-                emit_transfer_log(transfer_id, f'� 立即开始传输 {total_files} 个项目...')
+                emit_transfer_log(transfer_id, f'🚀 立即开始传输 {total_files} 个项目...')
 
             # 检查是否启用并行传输
-            if not PARALLEL_TRANSFER_CONFIG['enable_parallel'] or total_files == 1:
+            if not parallel_enabled or total_files == 1:
                 # 🎯 关键修复：在真正开始传输前启动计时器，确保只计算实际传输时间
                 time_tracker.start_transfer(transfer_id)
                 # 单文件或禁用并行时使用顺序传输
@@ -1770,8 +1802,8 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             # 清理传输记录
             if transfer_id in active_transfers:
                 del active_transfers[transfer_id]
-            if transfer_id in transfer_processes:
-                del transfer_processes[transfer_id]
+            with TRANSFER_PROCESS_LOCK:
+                transfer_processes.pop(transfer_id, None)
             progress_manager.cleanup_transfer(transfer_id)
             speed_simulator.cleanup_transfer(transfer_id)
 
@@ -2043,11 +2075,11 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         preexec_fn=os.setsid  # 创建新的进程组
     )
 
-    # 存储进程用于取消操作
-    transfer_processes[transfer_id] = {
+    # 存储进程用于取消操作（支持同一传输多个并行子进程）
+    register_transfer_process(transfer_id, {
         'type': 'subprocess',
         'process': process
-    }
+    })
 
     # 等待传输完成（无进度读取，提升性能）
     try:
@@ -2267,11 +2299,11 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         preexec_fn=os.setsid  # 创建新的进程组
     )
 
-    # 存储进程用于取消操作
-    transfer_processes[transfer_id] = {
+    # 存储进程用于取消操作（支持同一传输多个并行子进程）
+    register_transfer_process(transfer_id, {
         'type': 'subprocess',
         'process': process
-    }
+    })
 
     # 等待传输完成（无进度读取，提升性能）
     try:
@@ -2590,7 +2622,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
         start_time = time.time()
         stdin, stdout, stderr = ssh.exec_command(remote_cmd)
-        transfer_processes[transfer_id] = {'type': 'ssh', 'channel': stdout.channel}
+        register_transfer_process(transfer_id, {'type': 'ssh', 'channel': stdout.channel})
         exit_status = stdout.channel.recv_exit_status()
         end_time = time.time()
         transfer_duration = end_time - start_time
@@ -2651,7 +2683,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     if not ssh:
         raise Exception(f"无法连接到源服务器 {source_server}")
     stdin, stdout, stderr = ssh.exec_command(remote_cmd)
-    transfer_processes[transfer_id] = {'type': 'ssh', 'channel': stdout.channel}
+    register_transfer_process(transfer_id, {'type': 'ssh', 'channel': stdout.channel})
     exit_status = stdout.channel.recv_exit_status()
     end_time = time.time()
     transfer_duration = end_time - start_time
@@ -2755,11 +2787,11 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     # 执行rsync并实时读取进度
     _, stdout, stderr = ssh.exec_command(remote_cmd)
 
-    # 存储SSH通道用于取消操作
-    transfer_processes[transfer_id] = {
+    # 存储SSH通道用于取消操作（支持同一传输多个并行通道）
+    register_transfer_process(transfer_id, {
         'type': 'ssh',
         'channel': stdout.channel
-    }
+    })
 
     # 等待传输完成（无进度读取，提升性能）
     exit_status = stdout.channel.recv_exit_status()
@@ -2989,11 +3021,11 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                 # 执行rsync
                 _, stdout, stderr = ssh.exec_command(remote_cmd)
 
-                # 存储SSH通道用于取消操作
-                transfer_processes[transfer_id] = {
+                # 存储SSH通道用于取消操作（支持同一传输多个并行通道）
+                register_transfer_process(transfer_id, {
                     'type': 'ssh',
                     'channel': stdout.channel
-                }
+                })
 
                 # 等待传输完成
                 exit_status = stdout.channel.recv_exit_status()
@@ -3214,6 +3246,9 @@ def api_image_stream():
         return jsonify({'success': False, 'error': '缺少参数'}), 400
 
     try:
+        import cv2
+        import numpy as np
+
         def resize_bytes(img_bytes: bytes):
             if not new_w and not new_h:
                 return img_bytes, None
@@ -3472,10 +3507,10 @@ def browse_directory(server_ip):
 
 @socketio.on('start_transfer')
 def handle_start_transfer(data):
-    transfer_id = f"transfer_{int(time.time())}"
+    transfer_id = f"transfer_{uuid.uuid4().hex}"
 
-    # 更新并行传输配置
-    PARALLEL_TRANSFER_CONFIG['enable_parallel'] = data.get('parallel_transfer', True)
+    # 传输级别配置（避免不同客户端互相覆盖全局配置）
+    parallel_enabled = bool(data.get('parallel_transfer', True))
 
     # 获取客户端IP
     client_ip = _get_client_ip()
@@ -3487,7 +3522,7 @@ def handle_start_transfer(data):
         'target_server': data['target_server'],
         'target_path': data['target_path'],
         'mode': data.get('mode', 'copy'),
-        'parallel_enabled': data.get('parallel_transfer', True),
+        'parallel_enabled': parallel_enabled,
         'start_time': datetime.now(),
         'client_ip': client_ip
     }
@@ -3500,7 +3535,8 @@ def handle_start_transfer(data):
         data['target_server'],
         data['target_path'],
         data.get('mode', 'copy'),
-        data.get('fast_ssh', True)
+        data.get('fast_ssh', True),
+        parallel_enabled=parallel_enabled
     )
 
     emit('transfer_started', {'transfer_id': transfer_id})
@@ -3524,13 +3560,19 @@ def handle_cancel_transfer(data):
     else:
         print(f"收到取消传输请求: {transfer_id}")
 
-    # 立即强制终止相关进程
-    if transfer_id in transfer_processes:
-        process_info = transfer_processes[transfer_id]
+    # 先标记取消，阻止新的并行任务继续启动/继续提交
+    if transfer_id in active_transfers:
+        del active_transfers[transfer_id]
+
+    # 立即强制终止相关进程（支持并行传输的多个子进程）
+    for process_info in get_transfer_processes_snapshot(transfer_id):
         try:
-            if process_info['type'] == 'subprocess':
+            ptype = (process_info or {}).get('type')
+            if ptype == 'subprocess':
                 # 强制终止subprocess进程和整个进程组
-                process = process_info['process']
+                process = (process_info or {}).get('process')
+                if not process:
+                    continue
                 import os
                 import signal
 
@@ -3568,22 +3610,23 @@ def handle_cancel_transfer(data):
                             except subprocess.TimeoutExpired:
                                 process.kill()
                         process.wait()
-                    except:
+                    except Exception:
                         pass
-
-            elif process_info['type'] == 'ssh':
+            elif ptype == 'ssh':
                 # 强制关闭SSH通道和连接
-                channel = process_info['channel']
+                channel = (process_info or {}).get('channel')
+                if not channel:
+                    continue
                 try:
                     # 发送中断信号到远程命令
                     channel.send('\x03')  # Ctrl+C
                     channel.close()
                     print(f"已发送中断信号并关闭SSH通道: {transfer_id}")
-                except:
+                except Exception:
                     try:
                         channel.close()
                         print(f"已强制关闭SSH通道: {transfer_id}")
-                    except:
+                    except Exception:
                         pass
         except Exception as e:
             print(f"终止进程时出错: {e}")
@@ -3591,8 +3634,8 @@ def handle_cancel_transfer(data):
     # 清理传输记录
     if transfer_id in active_transfers:
         del active_transfers[transfer_id]
-    if transfer_id in transfer_processes:
-        del transfer_processes[transfer_id]
+    with TRANSFER_PROCESS_LOCK:
+        transfer_processes.pop(transfer_id, None)
 
     # 发送取消确认
     emit('transfer_cancelled', {
@@ -3622,10 +3665,8 @@ def delete_files():
         deleted_count = 0
         failed_items = []
         parent_dirs = set()
-
-
+        # 记录父目录用于后续清理缓存
         for path in paths:
-            # 记录父目录用于后续清理缓存
             try:
                 if is_windows:
                     import ntpath
@@ -3637,9 +3678,10 @@ def delete_files():
             except Exception:
                 pass
 
-            try:
-                if is_local:
-                    # 本地删除
+        if is_local:
+            # 本地删除
+            for path in paths:
+                try:
                     if os.path.isdir(path):
                         try:
                             shutil.rmtree(path)
@@ -3660,42 +3702,114 @@ def delete_files():
                                 deleted_count += 1
                             except subprocess.CalledProcessError as e:
                                 failed_items.append({'path': path, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
-                else:
-                    # 远程删除
-                    if is_windows:
-                        # Windows: 统一使用 PowerShell 强制删除，避免类型检测的额外往返
-                        win_path = normalize_windows_path_for_cmd(path)
-                        ps_path = win_path.replace("'", "''")
-                        delete_cmd = (
-                            "powershell -NoProfile -Command "
-                            f"\"Remove-Item -LiteralPath '{ps_path}' -Force -Recurse -ErrorAction SilentlyContinue; "
-                            f"if (Test-Path -LiteralPath '{ps_path}') {{ exit 1 }}\""
-                        )
+                except Exception as e:
+                    failed_items.append({'path': path, 'error': str(e)})
+        else:
+            # 远程删除
+            if is_windows:
+                # Windows：优先批量删除（减少 SSH 往返），失败再回退逐个删除
+                try:
+                    path_pairs = []
+                    win_to_orig = {}
+                    for p in paths:
+                        win_p = normalize_windows_path_for_cmd(p)
+                        path_pairs.append((p, win_p))
+                        win_to_orig[win_p.lower()] = p
 
-                        print(f"🗑️ Windows删除命令: {delete_cmd}")
-                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
+                    ps_items = ",".join([f"'{_escape_pwsh_literal(win_p)}'" for _, win_p in path_pairs])
+                    ps_script = (
+                        "$failed=@();"
+                        f"$paths=@({ps_items});"
+                        "foreach($p in $paths){"
+                        "  if(Test-Path -LiteralPath $p){"
+                        "    $err='';"
+                        "    try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                        "    if(Test-Path -LiteralPath $p){"
+                        "      if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                        "      $failed += [pscustomobject]@{path=$p; error=$err}"
+                        "    }"
+                        "  }"
+                        "}"
+                        "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                        "exit 0"
+                    )
+                    delete_cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
 
-                        if exit_code == 0:
-                            deleted_count += 1
-                            print(f"✅ 成功删除: {win_path}")
-                        else:
-                            error_msg = stderr or '删除失败'
-                            print(f"❌ 删除失败: {win_path}, 错误: {error_msg}")
-                            failed_items.append({'path': path, 'error': error_msg})
+                    if exit_code == 0:
+                        deleted_count = len(paths)
                     else:
-                        # Linux/NAS: 优先 sudo，无密码则回退普通 rm
-                        rm_cmd_sudo = f"sudo -n rm -rf {shlex.quote(path)}"
+                        parsed = None
+                        try:
+                            text = (stdout or '').strip()
+                            if text:
+                                parsed = json.loads(text)
+                        except Exception:
+                            parsed = None
+
+                        if parsed is None:
+                            raise RuntimeError(stderr or '批量删除失败')
+
+                        failed_list = parsed if isinstance(parsed, list) else [parsed]
+                        failed_items = []
+                        for item in failed_list:
+                            if not isinstance(item, dict):
+                                continue
+                            win_p = str(item.get('path', '') or '')
+                            orig_p = win_to_orig.get(win_p.lower(), win_p)
+                            failed_items.append({'path': orig_p, 'error': str(item.get('error', '') or '删除失败')})
+                        deleted_count = max(0, len(paths) - len(failed_items))
+                except Exception:
+                    # 回退逐个删除，确保能返回更明确的失败项
+                    deleted_count = 0
+                    failed_items = []
+                    for path in paths:
+                        try:
+                            win_path = normalize_windows_path_for_cmd(path)
+                            ps_path = win_path.replace("'", "''")
+                            delete_cmd = (
+                                "powershell -NoProfile -Command "
+                                f"\"Remove-Item -LiteralPath '{ps_path}' -Force -Recurse -ErrorAction SilentlyContinue; "
+                                f"if (Test-Path -LiteralPath '{ps_path}') {{ exit 1 }}\""
+                            )
+
+                            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
+                            if exit_code == 0:
+                                deleted_count += 1
+                            else:
+                                failed_items.append({'path': path, 'error': stderr or '删除失败'})
+                        except Exception as e:
+                            failed_items.append({'path': path, 'error': str(e)})
+            else:
+                # Linux/NAS：优先批量 rm -rf（减少 SSH 往返），失败再回退逐个删除（便于定位失败项）
+                batch_ok = False
+                if len(paths) > 1:
+                    quoted_paths = " ".join([shlex.quote(p) for p in paths if p])
+                    if quoted_paths:
+                        rm_cmd_sudo = f"sudo -n rm -rf -- {quoted_paths}"
                         stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd_sudo)
                         if exit_code != 0:
-                            rm_cmd = f'rm -rf {shlex.quote(path)}'
+                            rm_cmd = f"rm -rf -- {quoted_paths}"
                             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
-
                         if exit_code == 0:
-                            deleted_count += 1
-                        else:
-                            failed_items.append({'path': path, 'error': stderr or '删除失败'})
-            except Exception as e:
-                failed_items.append({'path': path, 'error': str(e)})
+                            deleted_count = len(paths)
+                            batch_ok = True
+
+                if not batch_ok:
+                    for path in paths:
+                        try:
+                            rm_cmd_sudo = f"sudo -n rm -rf {shlex.quote(path)}"
+                            stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd_sudo)
+                            if exit_code != 0:
+                                rm_cmd = f"rm -rf {shlex.quote(path)}"
+                                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd)
+
+                            if exit_code == 0:
+                                deleted_count += 1
+                            else:
+                                failed_items.append({'path': path, 'error': stderr or '删除失败'})
+                        except Exception as e:
+                            failed_items.append({'path': path, 'error': str(e)})
 
         # 对受影响的父目录清理缓存，确保浏览区及时刷新
         cache_cleared = 0
@@ -4718,11 +4832,11 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             preexec_fn=os.setsid  # 创建新的进程组
         )
 
-        # 存储进程用于取消操作
-        transfer_processes[transfer_id] = {
+        # 存储进程用于取消操作（支持同一传输多个并行子进程）
+        register_transfer_process(transfer_id, {
             'type': 'subprocess',
             'process': process
-        }
+        })
 
         import time
         start_time = time.time()

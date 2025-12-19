@@ -1706,6 +1706,255 @@
         const lastSelectedIndex = { source: null, target: null };
         let lastActivePanel = 'source';
 
+
+        // 文件传输剪贴板（Ctrl+C / Ctrl+X / Ctrl+V）
+        // 目标：快捷键触发的传输与“手动选择 + 点击开始传输”走同一套后端流程与参数，速度一致
+        let transferClipboard = null; // { mode: 'copy'|'move', sourcePanel: 'source'|'target', sourceServer: string, files: Array<{path,name,is_directory}>, ts: number }
+        let transferRefreshOverride = null; // { refreshSource: boolean, refreshTarget: boolean } | null
+
+        function _cloneTransferFiles(files) {
+            return (files || []).map(f => ({
+                path: f.path,
+                name: f.name,
+                is_directory: !!f.is_directory
+            }));
+        }
+
+        function _isEditableElement(el) {
+            if (!el) return false;
+            const tag = (el.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+            return !!el.isContentEditable;
+        }
+
+        function _hasTextSelection() {
+            try {
+                const sel = window.getSelection && window.getSelection();
+                return !!(sel && String(sel.toString() || '').trim());
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function _getPanelServer(panel) {
+            const id = panel === 'target' ? 'targetServer' : 'sourceServer';
+            const el = document.getElementById(id);
+            return el ? (el.value || '') : '';
+        }
+
+        function _getPanelPath(panel) {
+            return panel === 'target' ? currentTargetPath : currentSourcePath;
+        }
+
+        function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null) {
+            if (isTransferring) {
+                addLogWarning('⚠️ 已有传输任务在进行中');
+                return false;
+            }
+
+            const files = _cloneTransferFiles(sourceFiles || []);
+            if (!files.length) {
+                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
+                return false;
+            }
+
+            const finalMode = (mode === 'move') ? 'move' : 'copy';
+            currentTransferMode = finalMode;
+            currentTransferDirection = direction || currentTransferDirection || 'ltr';
+
+            const fastSSH = true;
+            const parallelTransfer = true;
+
+            // 剪切模式弹窗提醒（与 startTransfer 保持一致）
+            if (finalMode === 'move') {
+                const ok = confirm('当前选择的是「剪切」模式，源文件将被删除。是否继续？');
+                if (!ok) {
+                    return false;
+                }
+            }
+
+            // 服务器与路径校验
+            if (!sourceServer || !targetServer || !targetPath) {
+                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
+                alert('请选择源服务器、目标服务器和目标路径');
+                return false;
+            }
+
+            // 同服务器路径冲突校验
+            if (sourceServer === targetServer) {
+                const hasConflict = files.some(file =>
+                    file.path === targetPath || targetPath.startsWith(file.path + '/')
+                );
+                if (hasConflict) {
+                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+                    alert('源路径和目标路径不能相同或存在包含关系');
+                    return false;
+                }
+            }
+
+            // 同侧粘贴时，仅刷新当前侧，避免刷新另一侧造成干扰
+            transferRefreshOverride = refreshOverride;
+
+            // 设置传输状态
+            isTransferring = true;
+
+            // 显示进度面板
+            document.getElementById('progressContainer').style.display = 'block';
+            const startBtn = document.getElementById('startTransferBtn');
+            if (startBtn) startBtn.style.display = 'none';
+            document.getElementById('cancelTransferBtn').style.display = 'inline-block';
+
+            const fileNames = files.map(f => f.name).join(', ');
+            addLogInfo(`📤 源: ${sourceServer} (${files.length}项)`);
+            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+
+            // 发送传输请求
+            socket.emit('start_transfer', {
+                source_server: sourceServer,
+                source_files: files,
+                target_server: targetServer,
+                target_path: targetPath,
+                mode: finalMode,
+                fast_ssh: fastSSH,
+                parallel_transfer: parallelTransfer
+            });
+
+            return true;
+        }
+
+        function setTransferClipboardFromSelection(mode) {
+            if (isTransferring) {
+                addLogWarning('⚠️ 传输进行中，暂不支持复制/剪切');
+                return;
+            }
+
+            const leftSelected = selectedSourceFiles.length > 0;
+            const rightSelected = selectedTargetFiles.length > 0;
+
+            // 与 startTransfer 一致：只允许一侧选中以确定源
+            if (leftSelected && rightSelected) {
+                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择');
+                alert('左右两侧同时选择了项目，请只在一侧选择');
+                return;
+            }
+            if (!leftSelected && !rightSelected) {
+                addLogWarning('⚠️ 请先选择要复制/剪切的文件或文件夹');
+                return;
+            }
+
+            const sourcePanel = leftSelected ? 'source' : 'target';
+            const sourceServer = _getPanelServer(sourcePanel);
+            if (!sourceServer) {
+                addLogWarning('⚠️ 请先选择源服务器');
+                return;
+            }
+
+            const sourceFiles = _cloneTransferFiles(leftSelected ? selectedSourceFiles : selectedTargetFiles);
+            transferClipboard = {
+                mode: mode === 'move' ? 'move' : 'copy',
+                sourcePanel,
+                sourceServer,
+                files: sourceFiles,
+                ts: Date.now()
+            };
+
+            const opText = transferClipboard.mode === 'move' ? '剪切' : '复制';
+            addLogSuccess(`📋 已${opText} ${sourceFiles.length} 项（Ctrl+V 粘贴到当前激活侧）`);
+        }
+
+        function pasteTransferClipboard() {
+            if (!transferClipboard || !transferClipboard.files || transferClipboard.files.length === 0) {
+                addLogWarning('⚠️ 剪贴板为空：请先 Ctrl+C 或 Ctrl+X 选择文件');
+                return;
+            }
+            if (isTransferring) {
+                addLogWarning('⚠️ 已有传输任务在进行中');
+                return;
+            }
+
+            // 源面板服务器被切换时，剪贴板内容可能不再有效，避免误传
+            const currentSourceServer = _getPanelServer(transferClipboard.sourcePanel);
+            if (currentSourceServer && transferClipboard.sourceServer && currentSourceServer !== transferClipboard.sourceServer) {
+                addLogWarning(`⚠️ 源面板服务器已从 ${transferClipboard.sourceServer} 切换为 ${currentSourceServer}，请重新 Ctrl+C/Ctrl+X 选择后再粘贴`);
+                return;
+            }
+
+            // 粘贴到“当前激活面板”（支持同侧与跨侧）
+            const destPanel = (lastActivePanel === 'target') ? 'target' : 'source';
+            const targetServer = _getPanelServer(destPanel);
+            const targetPath = _getPanelPath(destPanel);
+
+            if (!targetServer) {
+                addLogWarning(destPanel === 'source' ? '⚠️ 请先选择源服务器' : '⚠️ 请先选择目标服务器');
+                return;
+            }
+            if (!targetPath) {
+                addLogWarning('⚠️ 请先浏览到目标目录');
+                return;
+            }
+
+            const mode = transferClipboard.mode === 'move' ? 'move' : 'copy';
+            const modeEl = document.getElementById(mode === 'move' ? 'modeMove' : 'modeCopy');
+            if (modeEl) modeEl.checked = true;
+
+            // 方向用于兼容现有完成后刷新逻辑；同侧粘贴时通过 refreshOverride 控制只刷新当前侧
+            let direction = (destPanel === 'target') ? 'ltr' : 'rtl';
+            if (transferClipboard.sourcePanel === 'source' && destPanel === 'target') direction = 'ltr';
+            if (transferClipboard.sourcePanel === 'target' && destPanel === 'source') direction = 'rtl';
+
+            let refreshOverride = null;
+            if (destPanel === transferClipboard.sourcePanel) {
+                refreshOverride = {
+                    refreshSource: destPanel === 'source',
+                    refreshTarget: destPanel === 'target'
+                };
+            }
+
+            const started = startTransferWithParams(
+                transferClipboard.sourceServer,
+                targetServer,
+                targetPath,
+                transferClipboard.files,
+                mode,
+                direction,
+                refreshOverride
+            );
+
+            // 剪切语义：通常只粘贴一次；若用户在确认弹窗中取消，则不清空剪贴板
+            if (started && mode === 'move') {
+                transferClipboard = null;
+            }
+        }
+
+        function setupTransferClipboardHotkeys() {
+            document.addEventListener('keydown', (event) => {
+                const key = (event.key || '').toLowerCase();
+                const isMod = event.ctrlKey || event.metaKey;
+                if (!isMod) return;
+                if (event.altKey || event.shiftKey) return;
+
+                // 输入框/编辑器内保持默认复制粘贴行为
+                if (_isEditableElement(event.target)) return;
+
+                // 若用户选中了文本（例如复制日志），Ctrl+C/Ctrl+X 交给浏览器默认行为
+                if ((key === 'c' || key === 'x') && _hasTextSelection()) return;
+
+                if (key === 'c') {
+                    event.preventDefault();
+                    setTransferClipboardFromSelection('copy');
+                } else if (key === 'x') {
+                    event.preventDefault();
+                    setTransferClipboardFromSelection('move');
+                } else if (key === 'v') {
+                    event.preventDefault();
+                    pasteTransferClipboard();
+                }
+            }, { capture: true });
+        }
+
+        setupTransferClipboardHotkeys();
+
         // 预置服务器元数据（用于本地判定 Windows/Linux，避免额外网络请求）
         const SERVERS_DATA = JSON.parse('{{ servers|tojson }}');
         const REMEMBERED_PATHS = JSON.parse('{{ remembered_paths|tojson }}' || '{}') || {};
@@ -3466,6 +3715,7 @@
             { const el = document.getElementById('transferredBytes'); if (el) el.textContent = '-'; }
             { const el = document.getElementById('eta'); if (el) el.textContent = '-'; }
 
+            transferRefreshOverride = null;
             currentTransferId = null;
         }
 
@@ -3554,6 +3804,9 @@
                 // 传输结束，恢复日志记录
                 isTransferring = false;
 
+                const refreshOverride = transferRefreshOverride;
+                transferRefreshOverride = null;
+
                 if (data.status === 'success') {
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
                     { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
@@ -3576,6 +3829,23 @@
                     // 根据方向自动刷新对应目录，显示最新传输的文件
                     setTimeout(() => {
                         const isMoveMode = (currentTransferMode === 'move');
+
+                        if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
+                            if (refreshOverride.refreshSource) {
+                                const sourceServer = document.getElementById('sourceServer').value;
+                                if (sourceServer && currentSourcePath) {
+                                    refreshSourceAsync();
+                                }
+                            }
+                            if (refreshOverride.refreshTarget) {
+                                const targetServer = document.getElementById('targetServer').value;
+                                if (targetServer && currentTargetPath) {
+                                    refreshTargetAsync();
+                                }
+                            }
+                            return;
+                        }
+
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
@@ -3627,6 +3897,23 @@
                     // 部分成功也刷新对应目录（剪切模式下同样需要刷新两侧，保证删除/新增都可见）
                     setTimeout(() => {
                         const isMoveMode = (currentTransferMode === 'move');
+
+                        if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
+                            if (refreshOverride.refreshSource) {
+                                const sourceServer = document.getElementById('sourceServer').value;
+                                if (sourceServer && currentSourcePath) {
+                                    refreshSourceAsync();
+                                }
+                            }
+                            if (refreshOverride.refreshTarget) {
+                                const targetServer = document.getElementById('targetServer').value;
+                                if (targetServer && currentTargetPath) {
+                                    refreshTargetAsync();
+                                }
+                            }
+                            return;
+                        }
+
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
@@ -3668,6 +3955,7 @@
             if (data.transfer_id === currentTransferId) {
                 // 传输取消，恢复日志记录
                 isTransferring = false;
+                transferRefreshOverride = null;
 
                 if (data.status === 'success') {
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输已取消'; }
