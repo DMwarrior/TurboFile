@@ -695,7 +695,7 @@ class SSHManager:
                 'hostname': server_ip,
                 'username': server_config["user"],
                 'port': server_config.get("port", 22),  # 支持自定义端口，默认22
-                'timeout': 5,  # 减少超时时间
+                'timeout': 5,  # 默认超时
                 'compress': False,  # 局域网不需要压缩
                 'look_for_keys': True,
                 'allow_agent': True,
@@ -711,6 +711,11 @@ class SSHManager:
 
             # 针对NAS服务器（通常未配置密钥认证）直接使用密码连接，避免密钥尝试导致的超时卡顿
             if is_nas_server(server_ip):
+                # NAS首连可能较慢，适当增加超时
+                connect_kwargs['timeout'] = 15
+                connect_kwargs['banner_timeout'] = 15
+                connect_kwargs['auth_timeout'] = 15
+                connect_kwargs['channel_timeout'] = 15
                 connect_kwargs['password'] = server_config.get("password")
                 connect_kwargs['look_for_keys'] = False
                 connect_kwargs['allow_agent'] = False

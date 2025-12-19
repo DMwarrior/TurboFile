@@ -4395,6 +4395,8 @@
             currentTransferId = data.transfer_id;
             window.transferModeLogged = false; // 重置传输模式日志标志
             { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输中...'; }
+            { const el = document.getElementById('elapsedTime'); if (el) el.textContent = '00:00:00'; }
+            { const el = document.getElementById('transferSpeed'); if (el) el.textContent = '0 MB/s'; }
 
         });
 
