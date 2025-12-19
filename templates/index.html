@@ -1070,6 +1070,99 @@
             scroll-padding-bottom: 20px;
         }
 
+        /* 下载到Windows弹窗（精简版） */
+        .download-win-dialog {
+            position: fixed;
+            margin: 0;
+            width: 420px;
+            max-width: calc(100vw - 16px);
+            max-height: calc(100vh - 16px);
+            transform: none;
+        }
+
+        .download-win-modal {
+            font-size: 0.8rem;
+        }
+
+        .download-win-modal .modal-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .download-win-modal .modal-header {
+            padding: 8px 12px;
+        }
+
+        .download-win-modal .modal-body {
+            padding: 10px 12px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .download-win-modal .modal-footer {
+            padding: 8px 12px 12px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .download-win-modal .form-select,
+        .download-win-modal .btn {
+            font-size: 0.8rem;
+        }
+
+        .download-win-drive-row .form-label {
+            white-space: nowrap;
+        }
+
+        .download-win-drive {
+            min-width: 110px;
+            max-width: 160px;
+        }
+
+        .download-win-list {
+            flex: 1 1 auto;
+            min-height: 45vh;
+            max-height: 70vh;
+            overflow: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+        }
+
+        .download-win-list .list-group-item {
+            padding: 4px 8px;
+            border: 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .download-win-list .list-group-item:last-child {
+            border-bottom: 0;
+        }
+
+        .download-win-list .list-group-item.active {
+            background: #e2e8f0;
+            color: var(--text-primary);
+        }
+
+        @media (max-width: 576px) {
+            .download-win-dialog {
+                width: calc(100vw - 16px);
+                max-width: calc(100vw - 16px);
+                margin: 8px auto;
+            }
+
+            .download-win-list {
+                min-height: 40vh;
+                max-height: 70vh;
+            }
+
+            .download-win-drive {
+                max-width: 100%;
+            }
+        }
+
         /* 模态窗口中的日志区域样式 */
         #logModal .modal-dialog {
             max-width: 60vw;
@@ -1635,9 +1728,41 @@
             <i class="bi bi-box-arrow-down text-success"></i>
             <span>解压</span>
         </div>
+        <div class="menu-item" data-action="download-windows">
+            <i class="bi bi-windows text-primary"></i>
+            <span>下载到Windows</span>
+        </div>
     </div>
 
-    <!-- 传输日志模态窗口 -->
+    
+
+    <!-- 下载到Windows：选择目标目录 -->
+    <div class="modal" id="downloadWindowsModal" tabindex="-1" aria-labelledby="downloadWindowsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-scrollable download-win-dialog">
+            <div class="modal-content download-win-modal">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="downloadWindowsModalLabel">
+                        <i class="bi bi-windows text-primary"></i> 下载到Windows
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex align-items-center gap-2 mb-2 download-win-drive-row">
+                        <label class="form-label mb-0" for="downloadWindowsDriveSelect">磁盘</label>
+                        <select id="downloadWindowsDriveSelect" class="form-select form-select-sm download-win-drive"></select>
+                    </div>
+
+                    <div id="downloadWindowsDirList" class="list-group download-win-list"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary btn-sm" onclick="confirmDownloadToWindows()">
+                        <i class="bi bi-download me-1"></i> 下载到此目录
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+<!-- 传输日志模态窗口 -->
     <div class="modal fade" id="logModal" tabindex="-1" aria-labelledby="logModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
@@ -1954,6 +2079,551 @@
         }
 
         setupTransferClipboardHotkeys();
+
+        // 右键：下载到Windows（等价于手动选择 + 传输到Windows）
+        let downloadWindowsContext = null; // { sourcePanel, destPanel, sourceServer, files }
+        const downloadWinPicker = { server: '', path: '', selectedPath: '', drives: [] };
+
+        function _getDownloadWinAnchor() {
+            const anchor = (typeof window !== 'undefined' && window.downloadWinAnchor) ? window.downloadWinAnchor : null;
+            let x = anchor ? Number(anchor.x) : NaN;
+            let y = anchor ? Number(anchor.y) : NaN;
+
+            if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                x = window.innerWidth / 2;
+                y = window.innerHeight / 4;
+            }
+
+            return { x, y };
+        }
+
+        function positionDownloadWindowsModal() {
+            const modalEl = document.getElementById('downloadWindowsModal');
+            const dialog = modalEl ? modalEl.querySelector('.download-win-dialog') : null;
+            if (!dialog) return;
+
+            const anchor = _getDownloadWinAnchor();
+            const rect = dialog.getBoundingClientRect();
+            const menuWidth = rect.width || 420;
+            const menuHeight = rect.height || 520;
+            const padding = 8;
+            let left = anchor.x;
+            let top = anchor.y;
+
+            if (left + menuWidth > window.innerWidth - padding) {
+                left = window.innerWidth - menuWidth - padding;
+            }
+            if (top + menuHeight > window.innerHeight - padding) {
+                top = window.innerHeight - menuHeight - padding;
+            }
+
+            dialog.style.left = `${Math.max(padding, left)}px`;
+            dialog.style.top = `${Math.max(padding, top)}px`;
+        }
+
+        function positionDownloadWindowsModal() {
+            const modalEl = document.getElementById('downloadWindowsModal');
+            const dialog = modalEl ? modalEl.querySelector('.download-win-dialog') : null;
+            if (!dialog) return;
+
+            const anchor = _getDownloadWinAnchor();
+            const rect = dialog.getBoundingClientRect();
+            const width = rect.width || 420;
+            const height = rect.height || 520;
+            const padding = 8;
+            const gap = 10;
+
+            let left = anchor.x;
+            let top = anchor.y;
+
+            if (anchor.rect) {
+                left = anchor.rect.right + gap;
+                top = anchor.rect.top;
+            }
+
+            const maxLeft = window.innerWidth - width - padding;
+            const maxTop = window.innerHeight - height - padding;
+
+            if (left > maxLeft) {
+                const altLeft = anchor.rect ? (anchor.rect.left - width - gap) : maxLeft;
+                left = (Number.isFinite(altLeft) && altLeft >= padding) ? altLeft : maxLeft;
+            }
+
+            if (top > maxTop) {
+                const altTop = anchor.rect ? (anchor.rect.bottom - height) : maxTop;
+                top = Math.max(padding, altTop);
+            }
+
+            if (left < padding) left = padding;
+            if (top < padding) top = padding;
+
+            dialog.style.left = `${left}px`;
+            dialog.style.top = `${top}px`;
+        }
+
+        function positionDownloadWindowsModal() {
+            const modalEl = document.getElementById('downloadWindowsModal');
+            const dialog = modalEl ? modalEl.querySelector('.download-win-dialog') : null;
+            if (!dialog) return;
+
+            const anchor = _getDownloadWinAnchor();
+            const rect = dialog.getBoundingClientRect();
+            const width = rect.width || 420;
+            const height = rect.height || 520;
+            const padding = 8;
+
+            let left = anchor.x;
+            let top = anchor.y;
+
+            if (left + width > window.innerWidth - padding) {
+                left = window.innerWidth - width - padding;
+            }
+            if (top + height > window.innerHeight - padding) {
+                top = window.innerHeight - height - padding;
+            }
+
+            if (left < padding) left = padding;
+            if (top < padding) top = padding;
+
+            dialog.style.left = `${left}px`;
+            dialog.style.top = `${top}px`;
+        }
+
+
+        function _listWindowsServers() {
+            try {
+                return Object.entries(SERVERS_DATA || {})
+                    .filter(([ip, meta]) => meta && meta.os_type === 'windows')
+                    .map(([ip, meta]) => ({ ip, meta }));
+            } catch (_) {
+                return [];
+            }
+        }
+
+        function _suggestWindowsServer(windowsServers) {
+            const list = Array.isArray(windowsServers) ? windowsServers : _listWindowsServers();
+            if (!list.length) return '';
+
+            const clientIp = (typeof window !== 'undefined' && window.CLIENT_IPV4) ? window.CLIENT_IPV4 : null;
+            if (clientIp) {
+                const hit = list.find(s => s.ip === clientIp);
+                if (hit) return hit.ip;
+            }
+
+            const targetServer = (document.getElementById('targetServer') || {}).value || '';
+            if (targetServer && isWindowsServer(targetServer)) return targetServer;
+
+            const sourceServer = (document.getElementById('sourceServer') || {}).value || '';
+            if (sourceServer && isWindowsServer(sourceServer)) return sourceServer;
+
+            return list[0].ip;
+        }
+
+        function _normalizeSlashes(p) {
+            return String(p || '').replace(/\\/g, '/');
+        }
+
+        function _normalizeDriveLetter(letter) {
+            if (!letter) return '';
+            const up = String(letter).trim().toUpperCase();
+            return up.endsWith(':') ? up : `${up}:`;
+        }
+
+        function _driveRoot(letter) {
+            const d = _normalizeDriveLetter(letter);
+            return d ? `${d}/` : '';
+        }
+
+        function _normalizeWinPath(p) {
+            let path0 = _normalizeSlashes(p).trim();
+            if (!path0) return '';
+
+            const m = path0.match(/^([a-zA-Z]:)(?:\/(.*))?$/);
+            if (m) {
+                const drive = String(m[1]).toUpperCase();
+                const rest = m[2] ? String(m[2]) : '';
+                path0 = rest ? `${drive}/${rest}` : `${drive}/`;
+            }
+
+            if (/^[A-Z]:$/.test(path0)) {
+                path0 = `${path0}/`;
+            }
+
+            if (path0.length > 3 && path0.endsWith('/')) {
+                path0 = path0.slice(0, -1);
+            }
+
+            return path0;
+        }
+
+        function _getWinParent(p) {
+            const path0 = _normalizeWinPath(p);
+            if (!path0) return '';
+            if (/^[A-Z]:\/$/.test(path0)) return path0;
+            const idx = path0.lastIndexOf('/');
+            if (idx <= 2) return path0.slice(0, 3);
+            return path0.slice(0, idx);
+        }
+
+        function _renderWindowsServerOptions(selectEl, list) {
+            if (!selectEl) return;
+            selectEl.innerHTML = '';
+            list.forEach(({ ip, meta }) => {
+                const opt = document.createElement('option');
+                opt.value = ip;
+                const name = (meta && meta.name) ? meta.name : ip;
+                opt.textContent = `${name} (${ip})`;
+                selectEl.appendChild(opt);
+            });
+        }
+
+        async function downloadWinPickerLoadDrives(serverIP) {
+            const driveSelect = document.getElementById('downloadWindowsDriveSelect');
+            if (!driveSelect) return;
+
+            driveSelect.innerHTML = '';
+            driveSelect.disabled = true;
+            downloadWinPicker.drives = [];
+
+            if (!serverIP) {
+                driveSelect.innerHTML = '<option value="">(未选择)</option>';
+                return;
+            }
+
+            try {
+                const resp = await fetch(`/api/windows_drives/${serverIP}`, { cache: 'no-cache' });
+                const data = await resp.json();
+
+                if (data.success && Array.isArray(data.drives) && data.drives.length) {
+                    downloadWinPicker.drives = data.drives;
+                    data.drives.forEach(d => {
+                        const root = _driveRoot(d.letter);
+                        if (!root) return;
+                        const opt = document.createElement('option');
+                        opt.value = root;
+                        opt.textContent = root;
+                        driveSelect.appendChild(opt);
+                    });
+                    driveSelect.disabled = false;
+
+                    const cur = _normalizeWinPath(downloadWinPicker.path || '');
+                    const curDrive = _normalizeDriveLetter((cur.split('/')[0] || ''));
+                    const prefer = data.drives.find(dd => _normalizeDriveLetter(dd.letter) === curDrive)
+                        || data.drives.find(dd => _normalizeDriveLetter(dd.letter) === 'C:')
+                        || data.drives[0];
+                    if (prefer) {
+                        driveSelect.value = _driveRoot(prefer.letter);
+                    }
+                } else {
+                    driveSelect.innerHTML = '<option value="">(无磁盘信息)</option>';
+                }
+            } catch (_) {
+                driveSelect.innerHTML = '<option value="">(加载失败)</option>';
+            }
+        }
+
+        function _updateDownloadWinDirActive() {
+            const listEl = document.getElementById('downloadWindowsDirList');
+            if (!listEl) return;
+            const selected = downloadWinPicker.selectedPath || '';
+            Array.from(listEl.querySelectorAll('.list-group-item')).forEach(el => {
+                if (selected && el.dataset.path === selected) {
+                    el.classList.add('active');
+                } else {
+                    el.classList.remove('active');
+                }
+            });
+        }
+
+        function downloadWinPickerSelectPath(p) {
+            const path0 = _normalizeWinPath(p);
+            if (!path0) return;
+            downloadWinPicker.selectedPath = path0;
+            const input = document.getElementById('downloadWindowsPathInput');
+            if (input) input.value = path0;
+            _updateDownloadWinDirActive();
+        }
+
+        async function downloadWinPickerLoadDirs() {
+            const listEl = document.getElementById('downloadWindowsDirList');
+            if (!listEl) return;
+
+            const serverIP = downloadWinPicker.server;
+            const p = downloadWinPicker.path;
+            if (!serverIP) {
+                listEl.innerHTML = '<div class="list-group-item text-muted">未找到Windows服务器</div>';
+                return;
+            }
+            if (!p) {
+                listEl.innerHTML = '<div class="list-group-item text-muted">请选择磁盘</div>';
+                return;
+            }
+
+            listEl.innerHTML = '<div class="list-group-item text-muted">加载中...</div>';
+
+            try {
+                const params = new URLSearchParams({
+                    path: p,
+                    show_hidden: 'false',
+                    offset: '0',
+                    limit: '2000'
+                });
+                const resp = await fetch(`/api/browse/${serverIP}?${params.toString()}`, { cache: 'no-cache' });
+                const data = await resp.json();
+                if (!data.success) {
+                    listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${data.error || '未知错误'}</div>`;
+                    return;
+                }
+
+                const dirs = (data.files || []).filter(f => f && f.is_directory);
+                dirs.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN', { numeric: true, sensitivity: 'base' }));
+
+                listEl.innerHTML = '';
+
+                const current = _normalizeWinPath(p);
+                const parent = _getWinParent(current);
+                if (parent && parent !== current) {
+                    const upBtn = document.createElement('button');
+                    upBtn.type = 'button';
+                    upBtn.className = 'list-group-item list-group-item-action d-flex align-items-center';
+                    upBtn.dataset.path = parent;
+
+                    const icon = document.createElement('i');
+                    icon.className = 'bi bi-arrow-90deg-up text-secondary me-2';
+                    const name = document.createElement('span');
+                    name.textContent = '上一级';
+
+                    upBtn.appendChild(icon);
+                    upBtn.appendChild(name);
+
+                    upBtn.addEventListener('click', () => downloadWinPickerEnterPath(upBtn.dataset.path));
+                    upBtn.addEventListener('dblclick', () => downloadWinPickerEnterPath(upBtn.dataset.path));
+
+                    listEl.appendChild(upBtn);
+                }
+
+                if (!dirs.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'list-group-item text-muted';
+                    empty.textContent = '（此目录下没有文件夹）';
+                    listEl.appendChild(empty);
+                    return;
+                }
+
+                dirs.forEach(d => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'list-group-item list-group-item-action d-flex align-items-center';
+                    btn.dataset.path = d.path || '';
+
+                    const icon = document.createElement('i');
+                    icon.className = 'bi bi-folder-fill text-warning me-2';
+                    const name = document.createElement('span');
+                    name.textContent = d.name || d.path || '';
+
+                    btn.appendChild(icon);
+                    btn.appendChild(name);
+
+                    btn.addEventListener('click', () => downloadWinPickerSelectPath(btn.dataset.path));
+                    btn.addEventListener('dblclick', () => downloadWinPickerEnterPath(btn.dataset.path));
+
+                    listEl.appendChild(btn);
+                });
+
+                _updateDownloadWinDirActive();
+                positionDownloadWindowsModal();
+            } catch (e) {
+                listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${String(e)}</div>`;
+            }
+        }
+
+        async function downloadWinPickerEnterPath(p) {
+            const serverIP = downloadWinPicker.server;
+            if (!serverIP) return;
+
+            const path0 = _normalizeWinPath(p);
+            if (!path0) return;
+
+            downloadWinPicker.path = path0;
+            downloadWinPicker.selectedPath = path0;
+
+            const input = document.getElementById('downloadWindowsPathInput');
+            if (input) input.value = path0;
+
+            const driveSelect = document.getElementById('downloadWindowsDriveSelect');
+            if (driveSelect && !driveSelect.disabled) {
+                const drive = _normalizeDriveLetter((path0.split('/')[0] || ''));
+                const want = drive ? `${drive}/` : '';
+                if (want) driveSelect.value = want;
+            }
+
+            await downloadWinPickerLoadDirs();
+        }
+
+        function downloadWinPickerRefresh() {
+            downloadWinPickerLoadDirs();
+        }
+
+        function downloadWinPickerGoUp() {
+            const parent = _getWinParent(downloadWinPicker.path || '');
+            if (parent) downloadWinPickerEnterPath(parent);
+        }
+
+        function downloadWinPickerNavigateToInput() {
+            const input = document.getElementById('downloadWindowsPathInput');
+            const p = input ? (input.value || '').trim() : '';
+            if (!p) return;
+            downloadWinPickerEnterPath(p);
+        }
+
+        async function downloadWinPickerSetServer(serverIP) {
+            if (!serverIP) return;
+
+            downloadWinPicker.server = serverIP;
+
+            const isDestSource = downloadWindowsContext ? (downloadWindowsContext.destPanel === 'source') : false;
+            const remembered = getDefaultPathWithRemember(serverIP, isDestSource);
+            const fallback = (SERVERS_DATA && SERVERS_DATA[serverIP] && SERVERS_DATA[serverIP].default_path) ? SERVERS_DATA[serverIP].default_path : 'C:/';
+
+            const p = _normalizeWinPath(remembered || fallback);
+            downloadWinPicker.path = p;
+            downloadWinPicker.selectedPath = p;
+
+            const input = document.getElementById('downloadWindowsPathInput');
+            if (input) input.value = p;
+
+            await Promise.all([
+                downloadWinPickerLoadDrives(serverIP),
+                downloadWinPickerLoadDirs()
+            ]);
+        }
+
+        async function openDownloadToWindowsModal() {
+            if (isTransferring) {
+                addLogWarning('⚠️ 已有传输任务在进行中');
+                return;
+            }
+
+            const leftSelected = selectedSourceFiles.length > 0;
+            const rightSelected = selectedTargetFiles.length > 0;
+
+            if (leftSelected && rightSelected) {
+                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择');
+                alert('左右两侧同时选择了项目，请只在一侧选择');
+                return;
+            }
+            if (!leftSelected && !rightSelected) {
+                addLogWarning('⚠️ 请先选择要下载的文件或文件夹');
+                return;
+            }
+
+            const sourcePanel = leftSelected ? 'source' : 'target';
+            const destPanel = leftSelected ? 'target' : 'source';
+            const sourceServer = _getPanelServer(sourcePanel);
+            if (!sourceServer) {
+                addLogWarning('⚠️ 请先选择源服务器');
+                return;
+            }
+
+            const files = _cloneTransferFiles(leftSelected ? selectedSourceFiles : selectedTargetFiles);
+            if (!files.length) {
+                addLogWarning('⚠️ 请选择要下载的文件或文件夹');
+                return;
+            }
+
+            const windowsServers = _listWindowsServers();
+            if (!windowsServers.length) {
+                addLogWarning('⚠️ 未配置Windows服务器，无法下载到Windows');
+                alert('未配置Windows服务器，无法下载到Windows');
+                return;
+            }
+
+            downloadWindowsContext = { sourcePanel, destPanel, sourceServer, files };
+
+            const suggested = _suggestWindowsServer(windowsServers);
+            if (!suggested) {
+                addLogWarning('⚠️ 未找到Windows服务器');
+                alert('未找到Windows服务器');
+                return;
+            }
+
+            const listEl = document.getElementById('downloadWindowsDirList');
+            if (listEl) listEl.innerHTML = '<div class="list-group-item text-muted">加载中...</div>';
+
+            const driveSelect = document.getElementById('downloadWindowsDriveSelect');
+            if (driveSelect) {
+                driveSelect.innerHTML = '<option value="">加载中...</option>';
+                driveSelect.disabled = true;
+                driveSelect.onchange = () => {
+                    const v = driveSelect.value || '';
+                    if (v) downloadWinPickerEnterPath(v);
+                };
+            }
+
+            const modalEl = document.getElementById('downloadWindowsModal');
+            if (modalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                const inst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true });
+                inst.show();
+                requestAnimationFrame(() => positionDownloadWindowsModal());
+            }
+
+            downloadWinPickerSetServer(suggested)
+                .then(() => positionDownloadWindowsModal())
+                .catch(() => {});
+        }
+
+        function confirmDownloadToWindows() {
+            if (!downloadWindowsContext) {
+                addLogWarning('⚠️ 下载上下文丢失，请重新右键选择');
+                return;
+            }
+
+            const winServer = downloadWinPicker.server || '';
+            if (!winServer) {
+                addLogWarning('⚠️ 未找到Windows服务器');
+                return;
+            }
+
+            const targetPathRaw = (downloadWinPicker.selectedPath || downloadWinPicker.path || '').trim();
+            const targetPath = _normalizeWinPath(targetPathRaw);
+            if (!targetPath) {
+                addLogWarning('⚠️ 请选择目标目录');
+                return;
+            }
+
+            // 切换目标侧为 Windows 服务器与目标路径（让效果与手动选择目标侧一致）
+            const destPanel = downloadWindowsContext.destPanel;
+            const isDestSource = destPanel === 'source';
+            updateRememberedCache(destPanel, winServer, targetPath);
+
+            const destSelect = document.getElementById(isDestSource ? 'sourceServer' : 'targetServer');
+            if (destSelect) {
+                destSelect.value = winServer;
+                destSelect.dispatchEvent(new Event('change'));
+            }
+
+            const modeEl = document.getElementById('modeCopy');
+            if (modeEl) modeEl.checked = true;
+
+            const direction = downloadWindowsContext.sourcePanel === 'source' ? 'ltr' : 'rtl';
+            const started = startTransferWithParams(
+                downloadWindowsContext.sourceServer,
+                winServer,
+                targetPath,
+                downloadWindowsContext.files,
+                'copy',
+                direction,
+                null
+            );
+
+            if (started) {
+                const modalEl = document.getElementById('downloadWindowsModal');
+                if (modalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                    const inst = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+                    inst.hide();
+                }
+            }
+        }
 
         // 预置服务器元数据（用于本地判定 Windows/Linux，避免额外网络请求）
         const SERVERS_DATA = JSON.parse('{{ servers|tojson }}');
@@ -5037,6 +5707,24 @@
                     }
                 }
 
+                if (e.key === 'Delete') {
+                    if (_isEditableElement(e.target)) return;
+                    const activePanel = document.activeElement && document.activeElement.closest && document.activeElement.closest('.file-browser');
+                    let isSource = true;
+                    if (activePanel && activePanel.id === 'targetFileBrowser') {
+                        isSource = false;
+                    } else if (activePanel && activePanel.id === 'sourceFileBrowser') {
+                        isSource = true;
+                    } else {
+                        isSource = lastActivePanel !== 'target';
+                    }
+                    const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
+                    if (selected && selected.length) {
+                        e.preventDefault();
+                        deleteSelected(isSource ? 'source' : 'target');
+                    }
+                }
+
                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
                     e.preventDefault();
                     // 根据焦点侧全选，默认左侧
@@ -5069,6 +5757,7 @@
             const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
             const compressAction = contextMenu ? contextMenu.querySelector('[data-action="compress"]') : null;
             const extractAction = contextMenu ? contextMenu.querySelector('[data-action="extract"]') : null;
+            const downloadWindowsAction = contextMenu ? contextMenu.querySelector('[data-action="download-windows"]') : null;
             let contextState = { isSource: true, targetRow: null };
 
             function hideContextMenu() {
@@ -5272,8 +5961,15 @@
                     top = window.innerHeight - menuHeight - padding;
                 }
 
-                contextMenu.style.left = `${Math.max(padding, left)}px`;
-                contextMenu.style.top = `${Math.max(padding, top)}px`;
+                const finalLeft = Math.max(padding, left);
+                const finalTop = Math.max(padding, top);
+
+                contextMenu.style.left = `${finalLeft}px`;
+                contextMenu.style.top = `${finalTop}px`;
+
+                if (typeof window !== 'undefined') {
+                    window.downloadWinAnchor = { x: finalLeft, y: finalTop };
+                }
             }
 
             function showContextMenu(e, isSource) {
@@ -5351,6 +6047,24 @@
                         extractAction.classList.remove('disabled');
                     } else {
                         extractAction.classList.add('disabled');
+                    }
+                }
+
+                if (downloadWindowsAction) {
+                    const leftSelected = selectedSourceFiles.length > 0;
+                    const rightSelected = selectedTargetFiles.length > 0;
+                    const hasWindows = (() => {
+                        try {
+                            return Object.keys(SERVERS_DATA || {}).some(ip => SERVERS_DATA[ip] && SERVERS_DATA[ip].os_type === 'windows');
+                        } catch (_) {
+                            return false;
+                        }
+                    })();
+                    const canDownload = hasWindows && (leftSelected || rightSelected) && !(leftSelected && rightSelected);
+                    if (canDownload) {
+                        downloadWindowsAction.classList.remove('disabled');
+                    } else {
+                        downloadWindowsAction.classList.add('disabled');
                     }
                 }
 
@@ -5468,6 +6182,15 @@
                 });
             }
 
+
+            if (downloadWindowsAction) {
+                downloadWindowsAction.addEventListener('click', () => {
+                    if (downloadWindowsAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    openDownloadToWindowsModal();
+                });
+            }
+
             if (sourceContainer) {
                 sourceContainer.addEventListener('contextmenu', (e) => showContextMenu(e, true));
                 sourceContainer.addEventListener('scroll', hideContextMenu, { passive: true });
@@ -5514,6 +6237,7 @@
                 addLogInfo('🎯 交互优化: 立即视觉反馈，无动画延迟，静态悬停效果');
                 setupImageWheelZoom();
                 const CLIENT_IPV4 = JSON.parse('{{ client_ipv4|tojson|default("null") }}');
+                window.CLIENT_IPV4 = CLIENT_IPV4;
                 if (CLIENT_IPV4) { addLogInfo('🖥️ 访问设备 IPv4: ' + CLIENT_IPV4); }
                 if (CLIENT_IPV4) {
                     socket.emit('register_client', { client_ip: CLIENT_IPV4 });
