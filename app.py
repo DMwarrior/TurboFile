@@ -235,6 +235,32 @@ PERFORMANCE_CONFIG = {
     'optimize_rsync_params': True         # 优化rsync参数
 }
 
+# 已传输字节统计配置（真实值）
+def _load_transfer_bytes_config():
+    config = {
+        'enabled': True,
+        'update_interval': 2.0  # 秒
+    }
+    raw = CONFIG.get('transfer_bytes_config')
+    if not isinstance(raw, dict):
+        return config
+    enabled = raw.get('enabled')
+    if isinstance(enabled, bool):
+        config['enabled'] = enabled
+    elif isinstance(enabled, int):
+        config['enabled'] = bool(enabled)
+    update_interval = raw.get('update_interval')
+    if update_interval is not None:
+        try:
+            update_interval = float(update_interval)
+            if update_interval > 0:
+                config['update_interval'] = update_interval
+        except (TypeError, ValueError):
+            pass
+    return config
+
+TRANSFER_BYTES_CONFIG = _load_transfer_bytes_config()
+
 # 🚀 极限速度优化：rsync SSH 参数
 # - aes128-ctr 是最快且仍被支持的加密算法（CTR模式，可并行，低延迟）
 # - umac-64 是最快的 MAC 算法
@@ -291,6 +317,203 @@ def emit_transfer_log(transfer_id, message):
             'transfer_id': transfer_id,
             'message': message
         })
+
+TRANSFER_BYTES_STATE = {}
+TRANSFER_BYTES_LOCK = threading.Lock()
+RSYNC_PROGRESS_BYTES_RE = re.compile(r'^\s*([0-9][0-9,]*)\s+\d+%')
+
+def init_transfer_bytes(transfer_id):
+    if not transfer_id:
+        return
+    with TRANSFER_BYTES_LOCK:
+        TRANSFER_BYTES_STATE[transfer_id] = {
+            'parts': {},
+            'completed_total': 0
+        }
+
+def cleanup_transfer_bytes(transfer_id):
+    if not transfer_id:
+        return
+    with TRANSFER_BYTES_LOCK:
+        TRANSFER_BYTES_STATE.pop(transfer_id, None)
+
+def update_transfer_bytes_part(transfer_id, part_id, bytes_val):
+    if not transfer_id or not part_id:
+        return
+    try:
+        bytes_val = int(bytes_val)
+    except Exception:
+        return
+    with TRANSFER_BYTES_LOCK:
+        state = TRANSFER_BYTES_STATE.setdefault(transfer_id, {'parts': {}, 'completed_total': 0})
+        current = state['parts'].get(part_id)
+        if current is None or bytes_val > current:
+            state['parts'][part_id] = bytes_val
+
+def finalize_transfer_bytes_part(transfer_id, part_id, final_bytes=None):
+    if not transfer_id or not part_id:
+        return
+    with TRANSFER_BYTES_LOCK:
+        state = TRANSFER_BYTES_STATE.setdefault(transfer_id, {'parts': {}, 'completed_total': 0})
+        part_val = None
+        if part_id in state['parts']:
+            part_val = state['parts'].pop(part_id)
+        if final_bytes is not None:
+            try:
+                final_bytes = int(final_bytes)
+                if part_val is None or final_bytes > part_val:
+                    part_val = final_bytes
+            except Exception:
+                pass
+        if part_val is not None:
+            state['completed_total'] += part_val
+
+def get_transfer_bytes_total(transfer_id):
+    if not transfer_id:
+        return 0
+    with TRANSFER_BYTES_LOCK:
+        state = TRANSFER_BYTES_STATE.get(transfer_id)
+        if not state:
+            return 0
+        return state.get('completed_total', 0) + sum(state.get('parts', {}).values())
+
+def emit_transfer_bytes_snapshot(transfer_id):
+    if not TRANSFER_BYTES_CONFIG.get('enabled', True):
+        return
+    total = get_transfer_bytes_total(transfer_id)
+    socketio.emit('speed_update', {
+        'transfer_id': transfer_id,
+        'transferred_bytes': total,
+        'transferred_human': _human_readable_size(total)
+    })
+
+def _parse_rsync_progress_bytes(text):
+    if not text:
+        return None
+    match = RSYNC_PROGRESS_BYTES_RE.match(text.strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(',', ''))
+    except Exception:
+        return None
+
+def _consume_progress_text(buffer, text, transfer_id, part_id):
+    if not text:
+        return buffer
+    buffer = (buffer or '') + text
+    while True:
+        idx_r = buffer.find('\r')
+        idx_n = buffer.find('\n')
+        idx = idx_r if idx_n == -1 else (idx_n if idx_r == -1 else min(idx_r, idx_n))
+        if idx == -1:
+            break
+        line = buffer[:idx]
+        buffer = buffer[idx + 1:]
+        bytes_val = _parse_rsync_progress_bytes(line)
+        if bytes_val is not None:
+            update_transfer_bytes_part(transfer_id, part_id, bytes_val)
+    if len(buffer) > 8192:
+        buffer = buffer[-8192:]
+    return buffer
+
+def _append_rsync_progress_opts(rsync_opts):
+    if TRANSFER_BYTES_CONFIG.get('enabled', True) and '--info=progress2' not in rsync_opts:
+        rsync_opts.append('--info=progress2')
+
+def _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id):
+    import subprocess
+    import os
+    import signal
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        preexec_fn=os.setsid
+    )
+
+    register_transfer_process(transfer_id, {
+        'type': 'subprocess',
+        'process': process
+    })
+
+    buffer = ''
+    try:
+        stdout = process.stdout
+        while True:
+            if stdout is None:
+                break
+            try:
+                ready, _, _ = select.select([stdout], [], [], 0.2)
+            except Exception:
+                ready = []
+            if ready:
+                try:
+                    chunk = os.read(stdout.fileno(), 4096)
+                except Exception:
+                    chunk = b''
+                if chunk:
+                    buffer = _consume_progress_text(buffer, chunk.decode('utf-8', errors='ignore'), transfer_id, part_id)
+                else:
+                    if process.poll() is not None:
+                        break
+            if process.poll() is not None:
+                # 读完剩余输出
+                try:
+                    while True:
+                        chunk = os.read(stdout.fileno(), 4096)
+                        if not chunk:
+                            break
+                        buffer = _consume_progress_text(buffer, chunk.decode('utf-8', errors='ignore'), transfer_id, part_id)
+                except Exception:
+                    pass
+                break
+        return_code = process.wait()
+    except KeyboardInterrupt:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                process.wait()
+            except Exception:
+                pass
+        raise Exception("传输被用户取消")
+    finally:
+        finalize_transfer_bytes_part(transfer_id, part_id)
+
+    return return_code
+
+def _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id):
+    stdin, stdout, stderr = ssh.exec_command(remote_cmd)
+    register_transfer_process(transfer_id, {'type': 'ssh', 'channel': stdout.channel})
+
+    channel = stdout.channel
+    buffer = ''
+    err_buf = ''
+    max_err = 8192
+
+    while True:
+        if channel.recv_ready():
+            chunk = channel.recv(4096)
+            if chunk:
+                buffer = _consume_progress_text(buffer, chunk.decode('utf-8', errors='ignore'), transfer_id, part_id)
+        if channel.recv_stderr_ready():
+            chunk = channel.recv_stderr(4096)
+            if chunk:
+                err_buf += chunk.decode('utf-8', errors='ignore')
+                if len(err_buf) > max_err:
+                    err_buf = err_buf[-max_err:]
+        if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+            break
+        time.sleep(0.1)
+
+    exit_status = channel.recv_exit_status()
+    finalize_transfer_bytes_part(transfer_id, part_id)
+    return exit_status, err_buf
 
 # ===== 日志精简保存（仅保存关键信息到文件）=====
 LOG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'transfer.log')
@@ -613,8 +836,10 @@ def _cleanup_transfer_state(transfer_id):
         del active_transfers[transfer_id]
     with TRANSFER_PROCESS_LOCK:
         transfer_processes.pop(transfer_id, None)
+    cleanup_transfer_bytes(transfer_id)
     progress_manager.cleanup_transfer(transfer_id)
     speed_simulator.cleanup_transfer(transfer_id)
+    cleanup_transfer_bytes(transfer_id)
 
 
 def start_transfer_watchdog():
@@ -1553,6 +1778,7 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
     def speed_updater():
         last_time_update = time.time()
         last_speed_update = time.time()
+        last_bytes_update = time.time()
 
         while transfer_id in active_transfers:
             try:
@@ -1576,8 +1802,15 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
                     elapsed_time = time_tracker.get_elapsed_time(transfer_id)
                     last_time_update = current_time
 
+                transferred_human = None
+                transferred_bytes = None
+                if TRANSFER_BYTES_CONFIG.get('enabled', True) and current_time - last_bytes_update >= TRANSFER_BYTES_CONFIG.get('update_interval', 2.0):
+                    transferred_bytes = get_transfer_bytes_total(transfer_id)
+                    transferred_human = _human_readable_size(transferred_bytes)
+                    last_bytes_update = current_time
+
                 # 🚀 性能优化：只在有数据更新时才发送WebSocket消息
-                if simulated_speed is not None or elapsed_time is not None:
+                if simulated_speed is not None or elapsed_time is not None or transferred_human is not None:
                     # 判断传输模式（缓存结果避免重复计算）
                     is_local_source = is_local_server(source_server)
                     is_local_target = is_local_server(target_server)
@@ -1602,6 +1835,9 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
                         update_data['speed'] = simulated_speed
                     if elapsed_time is not None:
                         update_data['elapsed_time'] = elapsed_time
+                    if transferred_human is not None:
+                        update_data['transferred_bytes'] = transferred_bytes
+                        update_data['transferred_human'] = transferred_human
 
                     socketio.emit('speed_update', update_data)
 
@@ -1759,6 +1995,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 total_time = time_tracker.end_transfer(transfer_id)
 
                 print(f"[DEBUG] 发送部分成功事件: transfer_id={transfer_id}, status=partial_success")
+                emit_transfer_bytes_snapshot(transfer_id)
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
                     'status': 'partial_success',
@@ -1777,6 +2014,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 print(f"[性能监控] 速度更新间隔: {PERFORMANCE_CONFIG['speed_update_interval']}秒")
 
                 print(f"[DEBUG] 发送成功事件: transfer_id={transfer_id}, status=success")
+                emit_transfer_bytes_snapshot(transfer_id)
                 socketio.emit('transfer_complete', {
                     'transfer_id': transfer_id,
                     'status': 'success',
@@ -1793,6 +2031,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             print(f"[DEBUG] 传输异常: {str(e)}")
             print(f"[DEBUG] 发送错误事件: transfer_id={transfer_id}, status=error")
 
+            emit_transfer_bytes_snapshot(transfer_id)
             socketio.emit('transfer_complete', {
                 'transfer_id': transfer_id,
                 'status': 'error',
@@ -1811,6 +2050,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 transfer_processes.pop(transfer_id, None)
             progress_manager.cleanup_transfer(transfer_id)
             speed_simulator.cleanup_transfer(transfer_id)
+            cleanup_transfer_bytes(transfer_id)
 
     # 启动传输线程
     thread = threading.Thread(target=transfer_worker)
@@ -2033,6 +2273,7 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
     # Windows参与时，强制UTF-8编解码，避免中文路径被转义为\#ooo
     if target_is_windows:
         rsync_opts.append('--iconv=UTF-8,UTF-8')
+    _append_rsync_progress_opts(rsync_opts)
 
     # 🚀 性能优化：移除可能影响速度的选项
     # 移除 --partial（断点续传）- 可能影响性能
@@ -2066,43 +2307,11 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         else:
             cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
 
-    # 执行rsync命令
-    import subprocess
-    import os
-    import signal
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1,
-        preexec_fn=os.setsid  # 创建新的进程组
-    )
-
-    # 存储进程用于取消操作（支持同一传输多个并行子进程）
-    register_transfer_process(transfer_id, {
-        'type': 'subprocess',
-        'process': process
-    })
-
-    # 等待传输完成（无进度读取，提升性能）
-    try:
-        return_code = process.wait()
-        if return_code != 0:
-            raise Exception(f"rsync传输失败，退出码: {return_code}")
-    except KeyboardInterrupt:
-        # 处理取消操作
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            process.wait(timeout=2)
-        except:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                process.wait()
-            except:
-                pass
-        raise Exception("传输被用户取消")
+    # 执行rsync命令并解析真实传输字节
+    part_id = f"rsync_{uuid.uuid4().hex}"
+    return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
+    if return_code != 0:
+        raise Exception(f"rsync传输失败，退出码: {return_code}")
 
     # 传输成功
     return True
@@ -2265,6 +2474,7 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
     ]
     if source_is_windows:
         rsync_opts.append('--iconv=UTF-8,UTF-8')
+    _append_rsync_progress_opts(rsync_opts)
 
     # 处理源路径（如果是Windows，转换为Cygwin格式）
     rsync_source_path = source_path
@@ -2290,46 +2500,14 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         else:
             cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
 
-    # 执行rsync命令
-    import subprocess
-    import os
-    import signal
+    # 执行rsync命令并解析真实传输字节
+    part_id = f"rsync_{uuid.uuid4().hex}"
+    return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
+    if return_code != 0:
+        raise Exception(f"rsync传输失败，退出码: {return_code}")
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1,
-        preexec_fn=os.setsid  # 创建新的进程组
-    )
-
-    # 存储进程用于取消操作（支持同一传输多个并行子进程）
-    register_transfer_process(transfer_id, {
-        'type': 'subprocess',
-        'process': process
-    })
-
-    # 等待传输完成（无进度读取，提升性能）
-    try:
-        return_code = process.wait()
-        if return_code != 0:
-            raise Exception(f"rsync传输失败，退出码: {return_code}")
-
-        # 🔧 BUG修复：添加返回True表示传输成功
-        return True
-    except KeyboardInterrupt:
-        # 处理取消操作
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            process.wait(timeout=2)
-        except:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                process.wait()
-            except:
-                pass
-        raise Exception("传输被用户取消")
+    # 🔧 BUG修复：添加返回True表示传输成功
+    return True
 
 def transfer_file_via_local_to_local_instant(source_path, target_path, file_name, is_directory, transfer_id, mode='copy'):
     """本地到本地传输 - 使用cp命令(复制)或mv命令(剪切)
@@ -2587,6 +2765,7 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     # Windows参与时强制UTF-8，避免中文被\#ooo转义
     if source_is_windows or target_is_windows:
         rsync_base_opts.append("--iconv=UTF-8,UTF-8")
+    _append_rsync_progress_opts(rsync_base_opts)
 
     # 如果是“Windows作为源、Linux作为目标”，改为在目标Linux上发起拉取
     if source_is_windows and not target_is_windows:
@@ -2626,16 +2805,11 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
             raise Exception(f"无法连接到目标服务器 {target_server}")
 
         start_time = time.time()
-        stdin, stdout, stderr = ssh.exec_command(remote_cmd)
-        register_transfer_process(transfer_id, {'type': 'ssh', 'channel': stdout.channel})
-        exit_status = stdout.channel.recv_exit_status()
+        part_id = f"rsync_{uuid.uuid4().hex}"
+        exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
         end_time = time.time()
         transfer_duration = end_time - start_time
-        output = stdout.read().decode('utf-8', errors='ignore')
-        error = stderr.read().decode('utf-8', errors='ignore')
         print(f"📊 拉取完成 - 耗时: {transfer_duration:.2f}秒, 状态: {exit_status}")
-        if output:
-            print(f"📊 输出: {output}")
         if error:
             print(f"⚠️ 错误信息: {error}")
         # 前端日志不再显示单个文件耗时，只提示传输完成
@@ -2687,17 +2861,12 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     ssh = ssh_manager.get_connection(source_server)
     if not ssh:
         raise Exception(f"无法连接到源服务器 {source_server}")
-    stdin, stdout, stderr = ssh.exec_command(remote_cmd)
-    register_transfer_process(transfer_id, {'type': 'ssh', 'channel': stdout.channel})
-    exit_status = stdout.channel.recv_exit_status()
+    part_id = f"rsync_{uuid.uuid4().hex}"
+    exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
     end_time = time.time()
     transfer_duration = end_time - start_time
-    output = stdout.read().decode('utf-8')
-    error = stderr.read().decode('utf-8')
     print(f"📊 传输完成 - 耗时: {transfer_duration:.2f}秒")
     print(f"📊 退出状态: {exit_status}")
-    if output:
-        print(f"📊 输出: {output}")
     if error:
         print(f"⚠️ 错误信息: {error}")
     emit_transfer_log(transfer_id, f'✅ {file_name} 传输完成')
@@ -2763,6 +2932,7 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
     ]
     if source_is_windows or target_is_windows:
         rsync_base_opts.append("--iconv=UTF-8,UTF-8")
+    _append_rsync_progress_opts(rsync_base_opts)
 
     # 🚀 优化：NAS服务器使用自定义sshpass路径（~/bin/sshpass）
     sshpass_cmd = "sshpass"
@@ -2789,22 +2959,9 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
 
     start_time = time.time()
 
-    # 执行rsync并实时读取进度
-    _, stdout, stderr = ssh.exec_command(remote_cmd)
-
-    # 存储SSH通道用于取消操作（支持同一传输多个并行通道）
-    register_transfer_process(transfer_id, {
-        'type': 'ssh',
-        'channel': stdout.channel
-    })
-
-    # 等待传输完成（无进度读取，提升性能）
-    exit_status = stdout.channel.recv_exit_status()
-
-    # 读取输出和错误信息
-    output = stdout.read().decode('utf-8')
-    error = stderr.read().decode('utf-8')
-
+    # 执行rsync并解析真实传输字节
+    part_id = f"rsync_{uuid.uuid4().hex}"
+    exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
     if exit_status != 0:
         raise Exception(f"rsync传输失败 (退出码: {exit_status}): {error}")
 
@@ -2957,6 +3114,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                 target_is_windows = is_windows_server(target_server)
                 if source_is_windows or target_is_windows:
                     rsync_base_opts.append("--iconv=UTF-8,UTF-8")
+                _append_rsync_progress_opts(rsync_base_opts)
 
                 # 情况A：Windows作为源，Linux作为目标 -> 在目标Linux上拉取
                 if source_is_windows and not target_is_windows:
@@ -3023,22 +3181,9 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                 emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
 
-                # 执行rsync
-                _, stdout, stderr = ssh.exec_command(remote_cmd)
-
-                # 存储SSH通道用于取消操作（支持同一传输多个并行通道）
-                register_transfer_process(transfer_id, {
-                    'type': 'ssh',
-                    'channel': stdout.channel
-                })
-
-                # 等待传输完成
-                exit_status = stdout.channel.recv_exit_status()
-
-                # 读取输出和错误信息
-                output = stdout.read().decode('utf-8', errors='ignore')
-                error = stderr.read().decode('utf-8', errors='ignore')
-
+                # 执行rsync并解析真实传输字节
+                part_id = f"rsync_{uuid.uuid4().hex}"
+                exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
                 if exit_status != 0:
                     raise Exception(f"传输 {file_name} 失败: {error}")
 
@@ -3114,6 +3259,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
     print(f"[性能监控] 传输时间: {total_time}")
 
     # 传输完成
+    emit_transfer_bytes_snapshot(transfer_id)
     socketio.emit('transfer_complete', {
         'transfer_id': transfer_id,
         'status': 'success',
@@ -3531,6 +3677,7 @@ def handle_start_transfer(data):
         'start_time': datetime.now(),
         'client_ip': client_ip
     }
+    init_transfer_bytes(transfer_id)
 
     # 启动即时并行传输
     start_instant_parallel_transfer(
@@ -4804,6 +4951,7 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             '--no-group',            # 不保留组，减少开销
             '--omit-dir-times',      # 不同步目录时间戳，减少开销
         ]
+        _append_rsync_progress_opts(rsync_opts)
 
         if target_password:
             # 使用密码认证
@@ -4822,50 +4970,15 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
 
 
 
-        # 使用subprocess执行本地命令，实时获取输出
-        import subprocess
-        import os
-        import signal
-
-        # 创建新的进程组，便于强制终止
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1,
-            preexec_fn=os.setsid  # 创建新的进程组
-        )
-
-        # 存储进程用于取消操作（支持同一传输多个并行子进程）
-        register_transfer_process(transfer_id, {
-            'type': 'subprocess',
-            'process': process
-        })
-
         import time
         start_time = time.time()
 
         emit_transfer_log(transfer_id, f'⚡️ 开始传输 {file_name}...')
 
-        # 实时显示传输进度
-        # 等待传输完成（无进度读取，提升性能）
-        try:
-            return_code = process.wait()
-            if return_code != 0:
-                raise Exception(f"本地rsync传输失败，退出码: {return_code}")
-        except KeyboardInterrupt:
-            # 处理取消操作
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                process.wait(timeout=2)
-            except:
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    process.wait()
-                except:
-                    pass
-            raise Exception("传输被用户取消")
+        part_id = f"rsync_{uuid.uuid4().hex}"
+        return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
+        if return_code != 0:
+            raise Exception(f"本地rsync传输失败，退出码: {return_code}")
 
         # 计算传输耗时
         end_time = time.time()

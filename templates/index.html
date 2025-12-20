@@ -648,6 +648,13 @@
             border-color: var(--border-color) !important;
         }
 
+        /* 路径栏图标按钮点击后不保留焦点阴影 */
+        .path-nav .btn:focus,
+        .path-nav .btn:focus-visible {
+            box-shadow: none !important;
+            outline: none !important;
+        }
+
         /* 刷新按钮颜色交互行为修复与优化（仅限文件浏览器区域） */
         /* 悬停时不变色，仅保留我们已有的轻微浮起与阴影反馈 */
         #sourcePanel .btn-outline-primary,
@@ -1519,7 +1526,7 @@
                         <span id="sourcePathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
                             <button type="button" class="btn btn-sm" title="删除选中项"
-                                    onclick="deleteSelected('source')"
+                                    onclick="deleteSelected('source', event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-trash text-danger" style="font-size: 0.85rem;"></i>
                             </button>
@@ -1569,7 +1576,7 @@
                         <span id="targetPathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
                             <button type="button" class="btn btn-sm" title="删除选中项"
-                                    onclick="deleteSelected('target')"
+                                    onclick="deleteSelected('target', event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-trash text-danger" style="font-size: 0.85rem;"></i>
                             </button>
@@ -1808,6 +1815,7 @@
         // WebSocket连接
         const socket = io();
         let currentTransferId = null;
+        let latestTransferredBytes = 0;
         let selectedSourceFiles = [];
         let selectedTargetFiles = [];
         let currentTransferDirection = 'ltr';
@@ -2808,7 +2816,13 @@
         }
 
         // 删除选中的文件/文件夹
-        async function deleteSelected(type) {
+        async function deleteSelected(type, event) {
+            const blurBtn = () => {
+                if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
+                    event.currentTarget.blur();
+                }
+            };
+            blurBtn();
             const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
             const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
             const currentPath = type === 'source' ? currentSourcePath : currentTargetPath;
@@ -2827,8 +2841,10 @@
             const fileNames = selectedFiles.map(f => f.name).join('\n');
             const confirmMsg = `确定要删除以下 ${selectedFiles.length} 项吗？\n\n${fileNames}\n\n⚠️ 此操作不可恢复！`;
             if (!confirm(confirmMsg)) {
+                blurBtn();
                 return;
             }
+            blurBtn();
 
             try {
                 // 构建完整路径列表
@@ -4386,6 +4402,7 @@
             { const el = document.getElementById('eta'); if (el) el.textContent = '-'; }
 
             transferRefreshOverride = null;
+            latestTransferredBytes = 0;
             currentTransferId = null;
         }
 
@@ -4393,10 +4410,12 @@
         socket.on('transfer_started', function(data) {
             isTransferring = true;
             currentTransferId = data.transfer_id;
+            latestTransferredBytes = 0;
             window.transferModeLogged = false; // 重置传输模式日志标志
             { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输中...'; }
             { const el = document.getElementById('elapsedTime'); if (el) el.textContent = '00:00:00'; }
             { const el = document.getElementById('transferSpeed'); if (el) el.textContent = '0 MB/s'; }
+            { const el = document.getElementById('transferredBytes'); if (el) el.textContent = '0 B'; }
 
         });
 
@@ -4431,6 +4450,21 @@
                 if (data.elapsed_time) {
                     const el = document.getElementById('elapsedTime');
                     if (el) el.textContent = data.elapsed_time;
+                }
+
+                // 更新已传输大小（真实值）
+                if (typeof data.transferred_human === 'string' || typeof data.transferred_bytes === 'number') {
+                    if (typeof data.transferred_bytes === 'number') {
+                        latestTransferredBytes = data.transferred_bytes;
+                    }
+                    const el = document.getElementById('transferredBytes');
+                    if (el) {
+                        if (typeof data.transferred_human === 'string') {
+                            el.textContent = data.transferred_human;
+                        } else if (typeof data.transferred_bytes === 'number') {
+                            el.textContent = data.transferred_bytes === 0 ? '0 B' : formatFileSize(data.transferred_bytes);
+                        }
+                    }
                 }
 
                 // 更新传输路径显示（仅在首次或变化时）
@@ -4483,19 +4517,34 @@
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输完成'; }
                     { const el = document.getElementById('transferRoute'); if (el) el.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>传输完成'; }
 
+                    const transferredEl = document.getElementById('transferredBytes');
+                    const transferredText = transferredEl ? String(transferredEl.textContent || '').trim() : '';
+                    const transferredSuffix = (transferredText && transferredText !== '-') ? transferredText : '';
+
                     // 显示总耗时（单位：时:分:秒），将 HH:MM:SS 转成 00时:00分:00秒 格式
                     if (data.total_time) {
                         let formattedTime = data.total_time;
                         const parts = String(data.total_time).split(':');
+                        let avgSpeedSuffix = '';
                         if (parts.length === 3) {
                             const [h, m, s] = parts;
                             formattedTime = `${h}时:${m}分:${s}秒`;
+                            const totalSeconds = (parseInt(h, 10) || 0) * 3600 + (parseInt(m, 10) || 0) * 60 + (parseInt(s, 10) || 0);
+                            if (totalSeconds > 0 && typeof latestTransferredBytes === 'number' && latestTransferredBytes >= 1) {
+                                const avgBytesPerSec = latestTransferredBytes / totalSeconds;
+                                if (avgBytesPerSec >= 1) {
+                                    const avgSpeedText = formatFileSize(avgBytesPerSec);
+                                    if (avgSpeedText) {
+                                        avgSpeedSuffix = ` 平均传输速度 ${avgSpeedText}/s`;
+                                    }
+                                }
+                            }
                         }
-                        addLogSuccess(`✅ 传输已完成 - 总耗时: ${formattedTime}`);
+                        addLogSuccess(`✅ 传输已完成${transferredSuffix}${avgSpeedSuffix} - 总耗时: ${formattedTime}`);
                         const el = document.getElementById('elapsedTime');
                         if (el) el.textContent = formattedTime;
                     } else {
-                        addLogSuccess('✅ 传输已完成');
+                        addLogSuccess(transferredSuffix ? `✅ 传输已完成${transferredSuffix}` : '✅ 传输已完成');
                     }
 
                     // 根据方向自动刷新对应目录，显示最新传输的文件
@@ -5728,6 +5777,7 @@
                 }
 
                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+                    if (_isEditableElement(e.target)) return;
                     e.preventDefault();
                     // 根据焦点侧全选，默认左侧
                     const activePanel = document.activeElement && document.activeElement.closest && document.activeElement.closest('.file-browser');
