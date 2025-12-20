@@ -4965,6 +4965,21 @@
                 img.style.transform = `translate(${imageOffsetX}px, ${imageOffsetY}px) scale(${imageZoom})`;
             }
 
+            function _getImageSizeText(img) {
+                if (!img) return '';
+                const w = img.naturalWidth || 0;
+                const h = img.naturalHeight || 0;
+                if (!w || !h) return '';
+                return `${w}x${h}`;
+            }
+
+            function _updateImageCaption(item, index, len, sizeText) {
+                const caption = document.getElementById('imagePreviewCaption');
+                if (!caption || !item) return;
+                const base = `${item.name} (${index + 1}/${len})`;
+                caption.textContent = sizeText ? `${base} | ${sizeText}` : base;
+            }
+
             async function showImageAt(index) {
                 if (!ImageViewer.items || ImageViewer.items.length === 0) return;
                 const len = ImageViewer.items.length;
@@ -4981,6 +4996,7 @@
                 if (modal && img) {
                     modal.style.display = 'block';
                     img.style.opacity = '0.3';
+                    img.dataset.imagePath = item.path || '';
                     img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
                     imageZoom = 1;
                     imageOffsetX = 0;
@@ -4993,13 +5009,15 @@
 
                     // 图片加载完成后显示
                     if (img) {
-                        img.onload = () => { img.style.opacity = '1'; };
+                        const expectedPath = item.path || '';
+                        img.onload = () => {
+                            if (img.dataset.imagePath !== expectedPath) return;
+                            img.style.opacity = '1';
+                            _updateImageCaption(item, index, len, _getImageSizeText(img));
+                        };
                         img.src = blobUrl;
                     }
-                    const caption = document.getElementById('imagePreviewCaption');
-                    if (caption) {
-                        caption.textContent = `${item.name} (${index + 1}/${len})`;
-                    }
+                    _updateImageCaption(item, index, len, '');
                 } catch (e) {
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);

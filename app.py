@@ -228,7 +228,7 @@ PARALLEL_TRANSFER_CONFIG = {
 
 # 🚀 传输性能优化配置
 PERFORMANCE_CONFIG = {
-    'speed_update_interval': 0.1,    # 速度更新间隔（秒）- 从0.01优化到0.1
+    'speed_update_interval': 1,    # 速度更新间隔（秒）- 从0.01优化到0.1
     'progress_update_interval': 0.5, # 进度更新间隔（秒）
     'disable_progress_monitoring': True,  # 禁用进度监控以提升传输速度
     'reduce_websocket_traffic': True,     # 减少WebSocket通信量
@@ -1884,10 +1884,9 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         try:
             total_files = len(source_files)
 
-            # 初始化速度模拟器（NAS/Windows特殊波动区间）
-            if is_nas_server(source_server) or is_nas_server(target_server):
-                speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
-            elif is_windows_server(source_server) or is_windows_server(target_server):
+            # 初始化速度模拟器（NAS/Windows同一波动区间）
+            if (is_nas_server(source_server) or is_nas_server(target_server)
+                    or is_windows_server(source_server) or is_windows_server(target_server)):
                 speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
             else:
                 speed_simulator.init_transfer_speed(transfer_id)
@@ -2972,10 +2971,9 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
     # 🎯 注意：计时器已在调用此函数前启动，不需要重复启动
 
-    # 初始化速度模拟器（NAS/Windows特殊波动区间）
-    if is_nas_server(source_server) or is_nas_server(target_server):
-        speed_simulator.init_transfer_speed(transfer_id, 38.0, 40.0)
-    elif is_windows_server(source_server) or is_windows_server(target_server):
+    # 初始化速度模拟器（NAS/Windows同一波动区间）
+    if (is_nas_server(source_server) or is_nas_server(target_server)
+            or is_windows_server(source_server) or is_windows_server(target_server)):
         speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
     else:
         speed_simulator.init_transfer_speed(transfer_id)
