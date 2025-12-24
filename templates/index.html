@@ -184,83 +184,166 @@
 
         /* 文本编辑器（VS Code 风格尺寸与配色） */
         .editor-modal {
+            --editor-font: 'Consolas','Courier New',monospace;
+            --editor-font-size: 13px;
+            --editor-line-height: 1.6;
+            --vs-bg: #1e1e1e;
+            --vs-ui: #2d2d30;
+            --vs-border: #3e3e42;
+            --vs-text: #f2f2f2fd;
+            --vs-muted: #f2f2f2fd;
+            --vs-button: #3e3e42;
+            --vs-button-hover: #4d4d50;
+            --vs-accent: #007acc;
+            --vs-accent-hover: #1f8ad2;
+            --vs-danger: #c74e39;
+            --vs-danger-hover: #d0604a;
             display: none;
             position: fixed;
             inset: 0;
-            background: rgba(0,0,0,0.6);
+            background: var(--vs-bg);
             z-index: 1050;
         }
         .editor-dialog {
             position: absolute;
-            top: 5vh;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 95vw;
-            max-width: 1400px;
-            height: 90vh;
-            background: #272b33;
-            color: #e6e8eb;
-            border-radius: 8px;
-            box-shadow: 0 18px 40px rgba(0,0,0,0.4);
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            background: var(--vs-bg);
+            color: var(--vs-text);
+            border-radius: 0;
+            box-shadow: none;
             display: flex;
             flex-direction: column;
         }
         .editor-header {
-            padding: 10px 14px;
-            border-bottom: 1px solid #323741;
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--vs-border);
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: #2f343d;
+            background: var(--vs-ui);
+            color: var(--vs-text);
+            gap: 10px;
+        }
+        .editor-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--vs-text);
+            white-space: nowrap;
+        }
+        .editor-header .btn {
+            background: var(--vs-button);
+            border: 1px solid var(--vs-border);
+            color: var(--vs-text);
+            padding: 3px 10px;
+            font-size: 12px;
+        }
+        .editor-header .btn:hover {
+            background: var(--vs-button-hover);
+            border-color: var(--vs-border);
+            color: #ffffff;
+        }
+        .editor-header .btn.btn-primary {
+            background: var(--vs-accent);
+            border-color: var(--vs-accent);
+            color: #ffffff;
+        }
+        .editor-header .btn.btn-primary:hover {
+            background: var(--vs-accent-hover);
+            border-color: var(--vs-accent-hover);
+        }
+        .editor-header .btn.btn-danger {
+            background: var(--vs-danger);
+            border-color: var(--vs-danger);
+            color: #ffffff;
+        }
+        .editor-header .btn.btn-danger:hover {
+            background: var(--vs-danger-hover);
+            border-color: var(--vs-danger-hover);
         }
         .editor-body {
             flex: 1;
             overflow: hidden;
             display: flex;
-            background: #23272f;
+            background: var(--vs-bg);
+        }
+        .editor-gutter {
+            width: 56px;
+            flex: 0 0 56px;
+            position: relative;
+            background: var(--vs-bg);
+            border-right: 1px solid var(--vs-border);
+            color: var(--vs-muted);
+            font-family: var(--editor-font);
+            font-size: var(--editor-font-size);
+            line-height: var(--editor-line-height);
+            text-align: right;
+            padding: 12px 10px 12px 0;
+            user-select: none;
+            overflow: hidden;
+            box-sizing: border-box;
+        }
+        .editor-line-numbers {
+            position: relative;
+            left: 0;
+            top: 0;
+            white-space: pre;
+            font-weight: 500;
+            will-change: transform;
         }
         .editor-text-wrapper {
             position: relative;
             flex: 1;
+            overflow: hidden;
         }
         .editor-main {
             flex: 1;
             display: flex;
             flex-direction: column;
             position: relative;
+            min-width: 0;
         }
         .editor-textarea {
             width: 100%;
             height: 100%;
             padding: 12px 14px;
-            background: #23272f;
-            color: #e6e8eb;
+            background: transparent;
+            color: var(--vs-text);
             border: none;
             outline: none;
             resize: none;
-            font-family: 'Consolas','Menlo','Monaco','Courier New',monospace;
-            font-size: 14px;
-            line-height: 1.5;
+            font-family: var(--editor-font);
+            font-size: var(--editor-font-size);
+            line-height: var(--editor-line-height);
+            font-weight: 500;
             white-space: pre;
             overflow: auto;
             tab-size: 4;
-            scrollbar-color: #3a3a3a #1e1e1e;
+            scrollbar-color: var(--vs-border) var(--vs-bg);
             position: relative;
             z-index: 2;
-            background: transparent; /* 下层高亮背景透出 */
+            caret-color: #aeafad;
+        }
+        .editor-textarea::selection {
+            background: #264f78;
         }
         .editor-highlight-layer {
             position: absolute;
             inset: 0;
             margin: 0;
             padding: 12px 14px;
-            background: #23272f;
+            background: var(--vs-bg);
             color: transparent !important; /* 仅保留背景高亮 */
             pointer-events: none;
             white-space: pre;
-            font-family: 'Consolas','Menlo','Monaco','Courier New',monospace;
-            font-size: 14px;
-            line-height: 1.5;
+            font-family: var(--editor-font);
+            font-size: var(--editor-font-size);
+            line-height: var(--editor-line-height);
             overflow: hidden;
             tab-size: 4;
             z-index: 1; /* 位于 textarea 下层 */
@@ -283,8 +366,8 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: #2f343d;
-            border-top: 1px solid #3a404c;
+            background: var(--vs-ui);
+            border-top: 1px solid var(--vs-border);
             padding: 6px 10px;
             display: none;
             gap: 6px;
@@ -292,24 +375,29 @@
             z-index: 10;
         }
         .find-replace-bar input {
-            background: #22262e;
-            border: 1px solid #3a404c;
-            color: #e6e8eb;
+            background: var(--vs-bg);
+            border: 1px solid var(--vs-border);
+            color: var(--vs-text);
             border-radius: 4px;
             padding: 4px 6px;
             font-size: 12px;
+            font-family: var(--editor-font);
             min-width: 200px;
         }
         .find-replace-bar button {
-            border: none;
-            background: #3b82f6;
+            border: 1px solid var(--vs-border);
+            background: var(--vs-button);
             color: #fff;
             padding: 4px 8px;
             border-radius: 4px;
             font-size: 12px;
         }
+        .find-replace-bar button:hover {
+            background: var(--vs-button-hover);
+        }
         .find-replace-bar .secondary {
-            background: #4b5563;
+            background: var(--vs-button);
+            border-color: var(--vs-border);
         }
 
 	        /* 图片网格视图 */
@@ -5062,7 +5150,13 @@
 
                     // 填充内容
                     const ta = document.querySelector('#editorModal textarea');
-                    if (ta) ta.value = content;
+                    if (ta) {
+                        ta.value = content;
+                        updateEditorLineNumbers();
+                        renderFindHighlights();
+                        syncEditorScroll();
+                        startEditorScrollSync();
+                    }
                 } catch (e) {
                     addLogError('打开编辑器失败: ' + (e.message || e));
                     // 失败时关闭编辑器，避免空白状态
@@ -5381,9 +5475,13 @@
                 const countEl = document.getElementById('findCount');
                 if (countEl) countEl.textContent = '';
                 syncMinimap();
+                updateEditorLineNumbers();
                 renderFindHighlights();
+                syncEditorScroll();
                 modal.style.display = 'block';
+                document.body.style.overflow = 'hidden';
                 hideFindReplace();
+                startEditorScrollSync();
                 ta.focus();
             }
 
@@ -5554,7 +5652,10 @@
                 });
             }
             function closeEditorModal() {
-                document.getElementById('editorModal').style.display = 'none';
+                const modal = document.getElementById('editorModal');
+                if (modal) modal.style.display = 'none';
+                document.body.style.overflow = '';
+                stopEditorScrollSync();
             }
             async function saveEditorContent() {
                 const ta = document.querySelector('#editorModal textarea');
@@ -5578,9 +5679,25 @@
 
                 const ta = document.getElementById('editorTextarea');
                 if (ta) {
-                    ta.addEventListener('input', renderFindHighlights);
-                    ta.addEventListener('scroll', renderFindHighlights);
+                    ta.addEventListener('input', () => {
+                        updateEditorLineNumbers();
+                        renderFindHighlights();
+                    });
+                    ta.addEventListener('scroll', syncEditorScroll);
+                    ta.addEventListener('wheel', () => {
+                        requestAnimationFrame(syncEditorScroll);
+                    }, { passive: true });
+                    const gutter = document.getElementById('editorGutter');
+                    if (gutter) {
+                        gutter.addEventListener('wheel', (e) => {
+                            ta.scrollTop += e.deltaY;
+                            syncEditorScroll();
+                            e.preventDefault();
+                        }, { passive: false });
+                    }
+                    updateEditorLineNumbers();
                     renderFindHighlights();
+                    syncEditorScroll();
                 }
 
         document.addEventListener('keydown', (e) => {
@@ -5619,6 +5736,55 @@
                 // minimap 已移除，留空函数防止引用错误
             }
 
+            let editorScrollRaf = null;
+
+            function startEditorScrollSync() {
+                if (editorScrollRaf) return;
+                const tick = () => {
+                    const modal = document.getElementById('editorModal');
+                    if (!modal || modal.style.display === 'none') {
+                        editorScrollRaf = null;
+                        return;
+                    }
+                    syncEditorScroll();
+                    editorScrollRaf = requestAnimationFrame(tick);
+                };
+                editorScrollRaf = requestAnimationFrame(tick);
+            }
+
+            function stopEditorScrollSync() {
+                if (!editorScrollRaf) return;
+                cancelAnimationFrame(editorScrollRaf);
+                editorScrollRaf = null;
+            }
+
+            function updateEditorLineNumbers() {
+                const ta = document.getElementById('editorTextarea');
+                const lineBox = document.getElementById('editorLineNumbers');
+                if (!ta || !lineBox) return;
+                const text = ta.value || '';
+                const lines = text.split('\n');
+                const count = Math.max(1, lines.length);
+                let nums = '';
+                for (let i = 1; i <= count; i++) {
+                    nums += i + (i === count ? '' : '\n');
+                }
+                lineBox.textContent = nums;
+            }
+
+            function syncEditorScroll() {
+                const ta = document.getElementById('editorTextarea');
+                const layer = document.getElementById('editorHighlightLayer');
+                const lineBox = document.getElementById('editorLineNumbers');
+                if (!ta) return;
+                if (layer) {
+                    layer.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
+                }
+                if (lineBox) {
+                    lineBox.style.marginTop = `${-ta.scrollTop}px`;
+                }
+            }
+
             function renderFindHighlights() {
                 const layer = document.getElementById('editorHighlightLayer');
                 const ta = document.getElementById('editorTextarea');
@@ -5630,6 +5796,7 @@
                 if (!query) {
                     layer.innerHTML = escapeHtml(text);
                     if (countEl) countEl.textContent = '';
+                    syncEditorScroll();
                     return;
                 }
                 const safeQuery = query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
@@ -5640,6 +5807,7 @@
                 if (countEl) {
                     countEl.textContent = matchCount > 0 ? `${matchCount} 条` : '0 条';
                 }
+                syncEditorScroll();
             }
 
             // 查找/替换
@@ -5742,6 +5910,7 @@
                     const pos = before.length + replacement.length;
                     ta.value = before + replacement + after;
                     ta.setSelectionRange(pos - replacement.length, pos);
+                    updateEditorLineNumbers();
                     syncMinimap();
                 }
                 findNext();
@@ -5754,6 +5923,7 @@
                 const replacement = document.getElementById('replaceInput').value;
                 if (!ta || !query) return;
                 ta.value = ta.value.split(query).join(replacement);
+                updateEditorLineNumbers();
                 syncMinimap();
                 renderFindHighlights();
             }
@@ -6455,26 +6625,31 @@
     </div>
 
     <!-- 轻量级在线编辑器模态框 -->
-<div id="editorModal" class="editor-modal">
+    <div id="editorModal" class="editor-modal">
         <div class="editor-dialog">
             <div class="editor-header">
-                <strong class="modal-title" style="font-size: 0.95rem;">在线编辑</strong>
-                <div>
+                <div class="editor-title">
+                    <span class="modal-title">在线编辑</span>
+                </div>
+                <div class="editor-actions">
                     <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(false)" style="margin-right:6px;">查找</button>
                     <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(true)" style="margin-right:10px;">替换</button>
                     <button class="btn btn-sm btn-primary" onclick="saveEditorContent()" style="margin-right:6px;">保存</button>
                     <button class="btn btn-sm btn-danger" onclick="closeEditorModal()">关闭</button>
                 </div>
             </div>
-                <div class="editor-body">
-                <div class="editor-main" style="position: relative;">
+            <div class="editor-body">
+                <div class="editor-gutter" id="editorGutter">
+                    <div id="editorLineNumbers" class="editor-line-numbers"></div>
+                </div>
+                <div class="editor-main">
                     <div class="editor-text-wrapper">
                         <pre id="editorHighlightLayer" class="editor-highlight-layer"></pre>
                         <textarea class="editor-textarea" wrap="off" id="editorTextarea"></textarea>
                     </div>
                     <div id="findReplaceBar" class="find-replace-bar">
                         <input id="findInput" type="text" placeholder="查找 (Ctrl+F)" style="min-width: 260px;" />
-                        <span id="findCount" style="color:#9ca3af; font-size:12px; min-width:60px; display:inline-block;"></span>
+                        <span id="findCount" style="color:#858585; font-size:12px; min-width:60px; display:inline-block;"></span>
                         <input id="replaceInput" type="text" placeholder="替换 (Ctrl+H)" style="display:none; min-width: 260px;" />
                         <button class="secondary" onclick="findPrev()">上一个</button>
                         <button class="secondary" onclick="findNext()">下一个</button>

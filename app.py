@@ -60,7 +60,7 @@ ADMIN_CLIENT_IPS = set(CONFIG.get('admin_client_ips') or [])
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = secret_key
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 def extract_client_ipv4_from_request(req) -> str:
     """
