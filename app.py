@@ -3386,11 +3386,15 @@ def index():
 def api_image_stream():
     server_ip = request.args.get('server')
     path = request.args.get('path')
-    try:
-        new_w = int(request.args.get('width', 0) or 0)
-        new_h = int(request.args.get('height', 0) or 0)
-    except ValueError:
-        new_w = new_h = 0
+    def _safe_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    new_w = _safe_int(request.args.get('width', 0))
+    new_h = _safe_int(request.args.get('height', 0))
+    quality = _safe_int(request.args.get('quality', 0))
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
 
@@ -3406,15 +3410,26 @@ def api_image_stream():
             if img is None:
                 return img_bytes, None
             h, w = img.shape[:2]
-            target_w, target_h = new_w, new_h
-            if target_w <= 0 and target_h > 0:
-                target_w = int(w * (target_h / h))
-            elif target_h <= 0 and target_w > 0:
-                target_h = int(h * (target_w / w))
-            if target_w <= 0 or target_h <= 0:
+            if w <= 0 or h <= 0:
                 return img_bytes, None
-            resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
-            ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+            target_w, target_h = new_w, new_h
+            if target_w <= 0 and target_h <= 0:
+                return img_bytes, None
+            if target_w > 0 and target_h > 0:
+                ratio = min(target_w / w, target_h / h)
+            elif target_w > 0:
+                ratio = target_w / w
+            else:
+                ratio = target_h / h
+            if ratio <= 0 or ratio >= 1:
+                return img_bytes, None
+
+            target_w = max(1, int(w * ratio))
+            target_h = max(1, int(h * ratio))
+            resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            q = quality if 1 <= quality <= 95 else 82
+            ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
             if not ok:
                 return img_bytes, None
             return enc.tobytes(), 'image/jpeg'
@@ -3653,6 +3668,56 @@ def browse_directory(server_ip):
             'error': str(e),
             'response_time': round(response_time, 2)
         })
+
+@app.route('/api/quick_search/<server_ip>')
+def quick_search(server_ip):
+    path = request.args.get('path', '')
+    keyword = request.args.get('keyword', '').strip()
+    show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
+
+    if not server_ip or server_ip not in SERVERS:
+        return jsonify({'success': False, 'error': '无效的服务器'}), 400
+    if not path or not keyword:
+        return jsonify({'success': False, 'error': '缺少路径或关键字'}), 400
+
+    try:
+        files = get_cached_listing(server_ip, path, show_hidden)
+        if files is None:
+            files = get_directory_listing_optimized(server_ip, path, show_hidden)
+        if not files:
+            return jsonify({
+                'success': True,
+                'path': path,
+                'keyword': keyword,
+                'total_count': 0,
+                'match': None,
+                'index': None
+            })
+
+        keyword_lower = keyword.lower()
+        first_match = None
+        first_index = None
+        for idx, item in enumerate(files):
+            name = str(item.get('name', ''))
+            if keyword_lower in name.lower():
+                first_match = {
+                    'name': item.get('name', ''),
+                    'path': item.get('path', ''),
+                    'is_directory': bool(item.get('is_directory'))
+                }
+                first_index = idx
+                break
+
+        return jsonify({
+            'success': True,
+            'path': path,
+            'keyword': keyword,
+            'total_count': len(files),
+            'match': first_match,
+            'index': first_index
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @socketio.on('start_transfer')
 def handle_start_transfer(data):

@@ -204,6 +204,25 @@
             background: var(--vs-bg);
             z-index: 1050;
         }
+        .editor-modal.editor-theme-light {
+            --vs-bg: #ffffff;
+            --vs-ui: #f3f4f6;
+            --vs-border: #e5e7eb;
+            --vs-text: #111827;
+            --vs-muted: #6b7280;
+            --vs-button: #e5e7eb;
+            --vs-button-hover: #d1d5db;
+            --vs-accent: #2563eb;
+            --vs-accent-hover: #1d4ed8;
+            --vs-danger: #dc2626;
+            --vs-danger-hover: #b91c1c;
+        }
+        .editor-modal.editor-theme-light .editor-textarea {
+            caret-color: #111827;
+        }
+        .editor-modal.editor-theme-light .editor-textarea::selection {
+            background: #cfe3ff;
+        }
         .editor-dialog {
             position: absolute;
             inset: 0;
@@ -1613,6 +1632,11 @@
                         <i class="bi bi-geo-alt-fill text-primary me-1"></i>
                         <span id="sourcePathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                            <button type="button" class="btn btn-sm" title="查找文件/文件夹"
+                                    onclick="quickLocateInPanel(true, event)"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-search text-primary" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="删除选中项"
                                     onclick="deleteSelected('source', event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -1663,6 +1687,11 @@
                         <i class="bi bi-geo-alt-fill text-success me-1"></i>
                         <span id="targetPathDisplay">/</span>
                         <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                            <button type="button" class="btn btn-sm" title="查找文件/文件夹"
+                                    onclick="quickLocateInPanel(false, event)"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-search text-success" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="删除选中项"
                                     onclick="deleteSelected('target', event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -4224,6 +4253,150 @@
             updateFileCountDisplay(isSource, state.loadedCount, total);
         }
 
+        async function quickLocateInPanel(isSource, event) {
+            if (event && typeof event.stopPropagation === 'function') {
+                event.stopPropagation();
+            }
+            const state = isSource ? browseState.source : browseState.target;
+            const { serverSelect, showHiddenCheckbox, containerId } = getPanelConfig(isSource);
+            const server = document.getElementById(serverSelect).value;
+            if (!server || !state.path) {
+                addLogWarning('⚠️ 请先选择服务器并进入目录');
+                return;
+            }
+
+            const input = prompt('输入要查找的文件/文件夹名称关键字');
+            if (input === null) return;
+            const rawKeyword = String(input || '').trim();
+            const keyword = rawKeyword.toLowerCase();
+            if (!keyword) {
+                addLogWarning('⚠️ 请输入有效的关键字');
+                return;
+            }
+
+            const locateRow = (row, match) => {
+                if (!row) return false;
+                const fakeEvent = {
+                    stopPropagation() {},
+                    shiftKey: false,
+                    ctrlKey: false,
+                    metaKey: false
+                };
+                selectFileImmediate(fakeEvent, match.path, match.name, match.is_directory, row.id, isSource);
+                const container = document.getElementById(containerId);
+                if (container) {
+                    const prevBehavior = container.style.scrollBehavior;
+                    container.style.scrollBehavior = 'auto';
+                    const targetTop = row.offsetTop - (container.clientHeight / 2) + (row.offsetHeight / 2);
+                    container.scrollTop = Math.max(0, targetTop);
+                    requestAnimationFrame(() => {
+                        container.style.scrollBehavior = prevBehavior || '';
+                    });
+                }
+                return true;
+            };
+
+            // 优先在已加载列表中查找，避免任何额外请求
+            const localNodes = getFileNodes(isSource);
+            const localRow = localNodes.find(node => {
+                const name = String(node.dataset.name || '').toLowerCase();
+                return name.includes(keyword);
+            });
+            if (localRow) {
+                const localMatch = {
+                    name: localRow.dataset.name || '',
+                    path: localRow.dataset.path || '',
+                    is_directory: String(localRow.dataset.isDirectory).toLowerCase() === 'true'
+                };
+                if (locateRow(localRow, localMatch)) {
+                    addLogInfo(`✅ 已定位到: ${localMatch.name}`);
+                    return;
+                }
+            }
+
+            addLogInfo('🔎 正在快速查找，请稍候...');
+            const showHidden = document.getElementById(showHiddenCheckbox).checked;
+            const params = new URLSearchParams({
+                path: state.path,
+                keyword: rawKeyword,
+                show_hidden: showHidden
+            });
+
+            let data;
+            try {
+                const resp = await fetch(`/api/quick_search/${server}?${params.toString()}`, { cache: 'no-cache' });
+                data = await resp.json();
+            } catch (err) {
+                addLogError('❌ 查找失败: ' + (err.message || err));
+                return;
+            }
+
+            if (!data || !data.success) {
+                addLogError(`❌ 查找失败: ${data && data.error ? data.error : '未知错误'}`);
+                return;
+            }
+
+            const match = data.match;
+            if (!match || !match.path) {
+                addLogWarning(`⚠️ 未找到包含 “${rawKeyword}” 的文件或文件夹`);
+                return;
+            }
+
+            const rowInView = getFileNodes(isSource).find(node => node.dataset.path === match.path);
+            if (rowInView && locateRow(rowInView, match)) {
+                addLogInfo(`✅ 已定位到: ${match.name}`);
+                return;
+            }
+
+            const index = typeof data.index === 'number' ? data.index : -1;
+            if (index < 0) {
+                addLogWarning('⚠️ 已找到目标，但无法定位到界面项');
+                return;
+            }
+
+            const pageStart = Math.floor(index / BROWSE_PAGE_SIZE) * BROWSE_PAGE_SIZE;
+            const pageParams = new URLSearchParams({
+                path: state.path,
+                show_hidden: showHidden,
+                offset: pageStart,
+                limit: BROWSE_PAGE_SIZE
+            });
+
+            try {
+                const resp = await fetch(`/api/browse/${server}?${pageParams.toString()}`, { cache: 'no-cache' });
+                const pageData = await resp.json();
+                if (!pageData.success) {
+                    addLogError(`❌ 定位失败: ${pageData.error || '未知错误'}`);
+                    return;
+                }
+
+                state.path = pageData.path || state.path;
+                state.offset = pageData.next_offset ?? (pageStart + (pageData.files || []).length);
+                state.loadedCount = pageData.loaded_count ?? state.offset;
+                state.total = pageData.total_count || pageData.file_count || 0;
+                state.hasMore = pageData.has_more;
+                state.fullItems = pageData.files || [];
+                state.fullOffset = state.offset;
+                state.fullHasMore = pageData.has_more;
+
+                displayFiles(containerId, pageData.files || [], state.path, isSource, {
+                    append: false,
+                    totalCount: state.total,
+                    loadedCount: state.loadedCount,
+                    startIndex: pageStart
+                });
+
+                const rowAfter = getFileNodes(isSource).find(node => node.dataset.path === match.path);
+                if (rowAfter && locateRow(rowAfter, match)) {
+                    addLogInfo(`✅ 已定位到: ${match.name}`);
+                } else {
+                    addLogWarning('⚠️ 已找到目标，但未能定位到界面项');
+                }
+            } catch (err) {
+                addLogError('❌ 定位失败: ' + (err.message || err));
+            }
+        }
+
         // 清除所有选择
         function clearAllSelections() {
             selectedSourceFiles = [];
@@ -4939,8 +5112,9 @@
                 return String(path || '').replace(/\\/g, '/');
             }
 
-            function getPreviewKey(server, path) {
-                return `${server}|${normalizePreviewPath(path)}`;
+            function getPreviewKey(server, path, variant = '') {
+                const base = `${server}|${normalizePreviewPath(path)}`;
+                return variant ? `${base}|${variant}` : base;
             }
 
             function revokePreviewEntry(entry) {
@@ -4950,16 +5124,16 @@
                 }
             }
 
-            function previewCacheGet(server, path, type) {
-                const key = getPreviewKey(server, path);
+            function previewCacheGet(server, path, type, variant = '') {
+                const key = getPreviewKey(server, path, variant);
                 const entry = PreviewCache.get(key);
                 if (!entry) return null;
                 if (type && entry.type !== type) return null;
                 return entry;
             }
 
-            function previewCacheSet(server, path, type, value) {
-                const key = getPreviewKey(server, path);
+            function previewCacheSet(server, path, type, value, variant = '') {
+                const key = getPreviewKey(server, path, variant);
                 const prev = PreviewCache.get(key);
                 if (prev && prev.type === 'blob' && prev.value !== value) {
                     revokePreviewEntry(prev);
@@ -4979,7 +5153,7 @@
                 const keysToDelete = [];
                 for (const key of PreviewCache.keys()) {
                     if (!key.startsWith(serverPrefix)) continue;
-                    const cachedPath = key.slice(serverPrefix.length);
+                    const cachedPath = key.slice(serverPrefix.length).split('|')[0];
                     if (exact.has(cachedPath) || prefixes.some(prefix => cachedPath.startsWith(prefix))) {
                         keysToDelete.push(key);
                     }
@@ -5002,12 +5176,43 @@
                 isSource: true
             };
 
-        async function getImageBlobUrl(server, path) {
-            const cached = previewCacheGet(server, path, 'blob');
+        const IMAGE_DPR_CAP = 2;
+        const IMAGE_PREVIEW_MAX_DIM = 2200;
+        const IMAGE_PREVIEW_MIN_DIM = 320;
+        const IMAGE_PREVIEW_QUALITY = 82;
+        const IMAGE_GRID_THUMB_MAX = 520;
+        const IMAGE_GRID_THUMB_MIN = 120;
+        const IMAGE_GRID_THUMB_QUALITY = 70;
+
+        function clampNumber(value, min, max) {
+            if (!Number.isFinite(value)) return min;
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
+        }
+
+        function getImagePreviewRequestSize() {
+            const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
+            const width = clampNumber(Math.round(window.innerWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const height = clampNumber(Math.round(window.innerHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            return { width, height, quality: IMAGE_PREVIEW_QUALITY };
+        }
+
+        async function getImageBlobUrl(server, path, options = {}) {
+            const width = Math.max(0, Number.parseInt(options.width, 10) || 0);
+            const height = Math.max(0, Number.parseInt(options.height, 10) || 0);
+            const quality = Math.max(0, Number.parseInt(options.quality, 10) || 0);
+            const variant = (width || height || quality) ? `${width}x${height}q${quality}` : '';
+            const cached = previewCacheGet(server, path, 'blob', variant);
             if (cached) return cached.value;
 
-            const url = `/api/image/stream?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
-            const resp = await fetch(url, { cache: 'no-store' });
+            const params = new URLSearchParams();
+            params.set('server', server);
+            params.set('path', path);
+            if (width > 0) params.set('width', String(width));
+            if (height > 0) params.set('height', String(height));
+            if (quality > 0) params.set('quality', String(quality));
+            const resp = await fetch(`/api/image/stream?${params.toString()}`, { cache: 'no-store' });
             if (!resp.ok) {
                 let msg = '';
                 try { msg = await resp.text(); } catch (_) {}
@@ -5015,7 +5220,7 @@
             }
             const blob = await resp.blob();
             const blobUrl = URL.createObjectURL(blob);
-            previewCacheSet(server, path, 'blob', blobUrl);
+            previewCacheSet(server, path, 'blob', blobUrl, variant);
             return blobUrl;
         }
 
@@ -5084,6 +5289,7 @@
                 if (modal && img) {
                     modal.style.display = 'block';
                     img.style.opacity = '0.3';
+                    img.decoding = 'async';
                     img.dataset.imagePath = item.path || '';
                     img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
                     imageZoom = 1;
@@ -5213,9 +5419,44 @@
 		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
 		            let imageGridColsControlsBound = false;
 		            let imageGridColsRaf = 0;
-		            const IMAGE_GRID_MAX_PARALLEL = 4;
+		            const IMAGE_GRID_MAX_PARALLEL = 8;
+		            const IMAGE_GRID_MAX_PARALLEL_EAGER = 12;
+		            const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
 		            const imageGridLoadQueue = [];
 		            let imageGridLoadingCount = 0;
+		            let imageGridThumbWidth = 0;
+		            let imageGridResizeRaf = 0;
+		            let imageGridEagerMode = false;
+		            let imageGridEagerQueued = false;
+		            let imageGridScrollBound = false;
+
+		            function computeImageGridThumbWidth() {
+		                const container = document.getElementById('imageGridContainer');
+		                if (!container) return IMAGE_GRID_THUMB_MIN;
+		                const cols = imageGridCols || IMAGE_GRID_COLS_DEFAULT;
+		                const style = getComputedStyle(container);
+		                const paddingLeft = parseFloat(style.paddingLeft) || 0;
+		                const paddingRight = parseFloat(style.paddingRight) || 0;
+		                const gap = parseFloat(style.columnGap || style.gap || 0) || 0;
+		                const available = container.clientWidth - paddingLeft - paddingRight - gap * Math.max(cols - 1, 0);
+		                if (!Number.isFinite(available) || available <= 0) return IMAGE_GRID_THUMB_MIN;
+		                const colWidth = available / cols;
+		                const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
+		                const scaled = Math.round(colWidth * dpr);
+		                return clampNumber(scaled, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
+		            }
+
+		            function scheduleImageGridThumbUpdate() {
+		                if (imageGridResizeRaf) return;
+		                imageGridResizeRaf = requestAnimationFrame(() => {
+		                    imageGridThumbWidth = computeImageGridThumbWidth();
+		                    imageGridResizeRaf = 0;
+		                });
+		            }
+
+		            function getImageGridParallelLimit() {
+		                return imageGridEagerMode ? IMAGE_GRID_MAX_PARALLEL_EAGER : IMAGE_GRID_MAX_PARALLEL;
+		            }
 
 		            function normalizeImageGridCols(value) {
 		                const n = Number.parseInt(value, 10);
@@ -5242,6 +5483,7 @@
 		                }
 		                imageGridColsRaf = requestAnimationFrame(() => {
 		                    container.style.setProperty('--image-grid-cols', String(normalized));
+		                    imageGridThumbWidth = computeImageGridThumbWidth();
 		                    imageGridColsRaf = 0;
 		                });
 		            }
@@ -5264,11 +5506,12 @@
 		            }
 
 		            function processImageGridQueue() {
-		                if (imageGridLoadingCount >= IMAGE_GRID_MAX_PARALLEL) return;
+		                if (imageGridLoadingCount >= getImageGridParallelLimit()) return;
 		                const task = imageGridLoadQueue.shift();
 		                if (!task) return;
 		                imageGridLoadingCount++;
-		                getImageBlobUrl(task.server, task.path)
+		                const thumbWidth = task.width || imageGridThumbWidth || computeImageGridThumbWidth();
+		                getImageBlobUrl(task.server, task.path, { width: thumbWidth, quality: IMAGE_GRID_THUMB_QUALITY })
 		                    .then(url => {
 		                        if (task.imgEl && task.imgEl.dataset.loaded !== '1') {
 		                            task.imgEl.src = url;
@@ -5292,12 +5535,45 @@
 		                const imgEl = card.querySelector('img');
 		                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
 		                imgEl.dataset.loading = '1';
+		                const thumbWidth = imageGridThumbWidth || computeImageGridThumbWidth();
 		                imageGridLoadQueue.push({
 		                    server: card.dataset.server,
 		                    path: card.dataset.path,
-		                    imgEl
+		                    imgEl,
+		                    width: thumbWidth
 		                });
 		                processImageGridQueue();
+		            }
+
+		            function queueAllImageGridLoads(batchSize = 160) {
+		                const container = document.getElementById('imageGridContainer');
+		                if (!container) return;
+		                const cards = Array.from(container.querySelectorAll('.image-grid-card'));
+		                if (!cards.length) return;
+		                let idx = 0;
+		                const step = () => {
+		                    const end = Math.min(cards.length, idx + batchSize);
+		                    for (; idx < end; idx++) {
+		                        scheduleImageGridLoad(cards[idx]);
+		                    }
+		                    if (idx < cards.length) {
+		                        requestAnimationFrame(step);
+		                    }
+		                };
+		                step();
+		            }
+
+		            function activateImageGridEagerLoad() {
+		                if (imageGridEagerMode) return;
+		                imageGridEagerMode = true;
+		                if (imageGridObserver) imageGridObserver.disconnect();
+		                if (!imageGridEagerQueued) {
+		                    imageGridEagerQueued = true;
+		                    queueAllImageGridLoads();
+		                    for (let i = 0; i < getImageGridParallelLimit(); i++) {
+		                        processImageGridQueue();
+		                    }
+		                }
 		            }
 
 	            function initImageGridObserver(rootEl) {
@@ -5324,6 +5600,27 @@
 	                scheduleImageGridLoad(card);
 	            }
 
+	            function ensureImageGridScrollWatcher(modal) {
+	                if (imageGridScrollBound || !modal) return;
+	                modal.addEventListener('scroll', () => {
+	                    if (modal.style.display === 'none') return;
+	                    if (imageGridEagerMode) return;
+	                    const maxScroll = modal.scrollHeight - modal.clientHeight;
+	                    if (maxScroll <= 0) return;
+	                    const ratio = modal.scrollTop / maxScroll;
+	                    if (ratio >= IMAGE_GRID_EAGER_SCROLL_RATIO) {
+	                        activateImageGridEagerLoad();
+	                    }
+	                }, { passive: true });
+	                imageGridScrollBound = true;
+	            }
+
+	            window.addEventListener('resize', () => {
+	                const modal = document.getElementById('imageGridModal');
+	                if (!modal || modal.style.display === 'none') return;
+	                scheduleImageGridThumbUpdate();
+	            });
+
             async function openImageGrid(isSource) {
                 const serverSelectId = isSource ? 'sourceServer' : 'targetServer';
                 const server = document.getElementById(serverSelectId)?.value;
@@ -5340,10 +5637,14 @@
 	                const modal = document.getElementById('imageGridModal');
 	                const container = document.getElementById('imageGridContainer');
 	                if (!modal || !container) return;
+	                imageGridEagerMode = false;
+	                imageGridEagerQueued = false;
 	                ensureImageGridColsControls();
-	                applyImageGridColumns(imageGridCols);
 	                modal.style.display = 'block';
 	                document.body.style.overflow = 'hidden';
+	                ensureImageGridScrollWatcher(modal);
+	                applyImageGridColumns(imageGridCols);
+	                scheduleImageGridThumbUpdate();
 	                container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
 	                initImageGridObserver(modal);
 
@@ -5358,6 +5659,7 @@
                         const imgEl = document.createElement('img');
                         imgEl.alt = item.name;
                         imgEl.loading = 'lazy';
+                        imgEl.decoding = 'async';
                         imgEl.dataset.loaded = '0';
 
                         const nameEl = document.createElement('div');
@@ -5371,7 +5673,9 @@
                         });
 
                         frag.appendChild(card);
-                        if (imageGridObserver) {
+                        if (imageGridEagerMode) {
+                            loadImageCardImmediately(card);
+                        } else if (imageGridObserver) {
                             imageGridObserver.observe(card);
                         } else {
                             loadImageCardImmediately(card);
@@ -5448,21 +5752,45 @@
                 ensureAndRender();
             }
 
-            function closeImageGrid() {
+	            function closeImageGrid() {
 	                const modal = document.getElementById('imageGridModal');
 	                const container = document.getElementById('imageGridContainer');
 	                if (modal) modal.style.display = 'none';
 	                if (container) container.innerHTML = '';
 	                document.body.style.overflow = '';
 	                if (imageGridObserver) {
-	                    imageGridObserver.disconnect();
+	                imageGridObserver.disconnect();
 	                }
+	                if (imageGridResizeRaf) {
+	                    try { cancelAnimationFrame(imageGridResizeRaf); } catch (_) {}
+	                    imageGridResizeRaf = 0;
+	                }
+	                imageGridThumbWidth = 0;
+	                imageGridEagerMode = false;
+	                imageGridEagerQueued = false;
 	                imageGridLoadQueue.length = 0;
 	                imageGridLoadingCount = 0;
 	            }
 
+            const EDITOR_THEME_KEY = 'turbofile_editor_theme';
+
+            function applyEditorTheme(mode) {
+                const modal = document.getElementById('editorModal');
+                if (!modal) return;
+                modal.classList.toggle('editor-theme-light', mode === 'light');
+            }
+
+            function toggleEditorTheme() {
+                const current = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                const next = current === 'light' ? 'dark' : 'light';
+                localStorage.setItem(EDITOR_THEME_KEY, next);
+                applyEditorTheme(next);
+            }
+
             function openEditorModal(server, path, title, content) {
                 const modal = document.getElementById('editorModal');
+                const savedTheme = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                applyEditorTheme(savedTheme);
                 modal.querySelector('.modal-title').textContent = title;
                 const ta = modal.querySelector('#editorTextarea');
                 ta.value = content;
@@ -6632,6 +6960,7 @@
                     <span class="modal-title">在线编辑</span>
                 </div>
                 <div class="editor-actions">
+                    <button class="btn btn-sm btn-outline-light" onclick="toggleEditorTheme()" style="margin-right:6px;">切换背景</button>
                     <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(false)" style="margin-right:6px;">查找</button>
                     <button class="btn btn-sm btn-outline-light" onclick="showFindReplace(true)" style="margin-right:10px;">替换</button>
                     <button class="btn btn-sm btn-primary" onclick="saveEditorContent()" style="margin-right:6px;">保存</button>

@@ -10,7 +10,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 SERVICE_NAME="turbofile"
-SERVICE_URL="http://192.168.9.62:5000"
+SERVICE_URL="http://192.168.9.64:5000"
 
 show_status() {
     echo -e "${BLUE}📊 TurboFile服务状态${NC}"

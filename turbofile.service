@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/th/Work/fankun/code/TurboFile
-ExecStart=/usr/bin/env python3 /home/th/Work/fankun/code/TurboFile/app.py --production
+WorkingDirectory=/home/ubuntu/work/fankun/code/TurboFile
+ExecStart=/usr/bin/env python3 /home/ubuntu/work/fankun/code/TurboFile/app.py --production
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
