@@ -5063,7 +5063,6 @@ def transfer_directory_from_remote(sftp, remote_dir, local_dir, transfer_id):
 if __name__ == '__main__':
     # 确保模板目录存在
     os.makedirs('templates', exist_ok=True)
-    os.makedirs('static', exist_ok=True)
 
     # 检查是否在生产环境中运行
     import sys
