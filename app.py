@@ -223,7 +223,9 @@ PARALLEL_TRANSFER_CONFIG = {
     'enable_parallel': True,  # 是否启用并行传输
     'instant_start': True,  # 立即开始传输，跳过所有预分析
     'enable_folder_parallel': False,  # 是否启用目录内部并行（实验性功能）
-    'folder_parallel_threshold': 1000  # 启用目录内部并行的文件数阈值
+    'folder_parallel_threshold': 1000,  # 启用目录内部并行的文件数阈值
+    'enable_batch_transfer': True,  # 同目录批量rsync，减少握手/命令开销
+    'batch_max_files': 200  # 单次批量传输最大文件数
 }
 
 # 🚀 传输性能优化配置
@@ -1850,6 +1852,366 @@ def start_speed_update_timer(transfer_id, source_server, target_server):
     speed_thread.daemon = True
     speed_thread.start()
 
+def _normalize_batch_path(path: str) -> str:
+    if not path:
+        return ''
+    return path.replace('\\', '/')
+
+def _get_batch_parent(source_files, source_is_windows):
+    parents = set()
+    for file_info in source_files or []:
+        path = _normalize_batch_path(file_info.get('path', ''))
+        if not path:
+            continue
+        if source_is_windows:
+            import ntpath
+            parent = ntpath.dirname(path)
+            if parent and parent.endswith(':'):
+                parent += '/'
+        else:
+            parent = os.path.dirname(path) or '/'
+        parents.add(_normalize_batch_path(parent))
+    if len(parents) == 1:
+        return parents.pop()
+    return None
+
+def _can_batch_transfer(transfer_mode, source_files, source_is_windows, source_server, target_server):
+    if transfer_mode not in ('local_to_remote', 'remote_to_local', 'remote_to_remote'):
+        return False
+    if source_server == target_server:
+        return False
+    if not source_files or len(source_files) < 2:
+        return False
+    return bool(_get_batch_parent(source_files, source_is_windows))
+
+def _build_batch_rsync_opts(source_is_windows=False, target_is_windows=False):
+    rsync_opts = [
+        '-a',
+        '--inplace',
+        '--whole-file',
+        '--no-compress',
+        '--numeric-ids',
+        '--timeout=600',
+        '-s',
+        '--no-perms',
+        '--no-owner',
+        '--no-group',
+        '--omit-dir-times',
+    ]
+    if source_is_windows or target_is_windows:
+        rsync_opts.append('--iconv=UTF-8,UTF-8')
+    _append_rsync_progress_opts(rsync_opts)
+    return rsync_opts
+
+def _delete_source_paths_batch(source_server, paths):
+    if not paths:
+        return True
+
+    is_local = is_local_server(source_server)
+    is_windows = is_windows_server(source_server)
+
+    try:
+        if is_local:
+            try:
+                subprocess.run(['rm', '-rf', '--', *paths], check=True)
+                return True
+            except Exception:
+                ok = True
+                for p in paths:
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p)
+                        else:
+                            os.remove(p)
+                    except Exception:
+                        ok = False
+                return ok
+
+        if is_windows:
+            try:
+                path_pairs = []
+                for p in paths:
+                    win_p = normalize_windows_path_for_cmd(p)
+                    path_pairs.append(win_p)
+                ps_items = ",".join([f"'{_escape_pwsh_literal(win_p)}'" for win_p in path_pairs])
+                ps_script = (
+                    "$failed=@();"
+                    f"$paths=@({ps_items});"
+                    "foreach($p in $paths){"
+                    "  if(Test-Path -LiteralPath $p){"
+                    "    $err='';"
+                    "    try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                    "    if(Test-Path -LiteralPath $p){"
+                    "      if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                    "      $failed += [pscustomobject]@{path=$p; error=$err}"
+                    "    }"
+                    "  }"
+                    "}"
+                    "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                    "exit 0"
+                )
+                delete_cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                _, _, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                if exit_code == 0:
+                    return True
+            except Exception:
+                pass
+
+            ok = True
+            for p in paths:
+                try:
+                    win_path = normalize_windows_path_for_cmd(p)
+                    ps_path = win_path.replace("'", "''")
+                    delete_cmd = (
+                        "powershell -NoProfile -Command "
+                        f"\"Remove-Item -LiteralPath '{ps_path}' -Force -Recurse -ErrorAction SilentlyContinue; "
+                        f"if (Test-Path -LiteralPath '{ps_path}') {{ exit 1 }}\""
+                    )
+                    _, _, exit_code = ssh_manager.execute_command(source_server, delete_cmd)
+                    if exit_code != 0:
+                        ok = False
+                except Exception:
+                    ok = False
+            return ok
+
+        quoted_paths = " ".join([shlex.quote(p) for p in paths if p])
+        if quoted_paths:
+            rm_cmd_sudo = f"sudo -n rm -rf -- {quoted_paths}"
+            _, _, exit_code = ssh_manager.execute_command(source_server, rm_cmd_sudo)
+            if exit_code != 0:
+                rm_cmd = f"rm -rf -- {quoted_paths}"
+                _, _, exit_code = ssh_manager.execute_command(source_server, rm_cmd)
+            if exit_code == 0:
+                return True
+
+        ok = True
+        for p in paths:
+            try:
+                rm_cmd_sudo = f"sudo -n rm -rf {shlex.quote(p)}"
+                _, _, exit_code = ssh_manager.execute_command(source_server, rm_cmd_sudo)
+                if exit_code != 0:
+                    rm_cmd = f"rm -rf {shlex.quote(p)}"
+                    _, _, exit_code = ssh_manager.execute_command(source_server, rm_cmd)
+                if exit_code != 0:
+                    ok = False
+            except Exception:
+                ok = False
+        return ok
+    except Exception:
+        return False
+
+def _clear_transfer_listing_cache(source_server, target_server, source_files, target_path, mode):
+    try:
+        if target_server and target_path:
+            clear_cached_listing(target_server, target_path)
+    except Exception:
+        pass
+
+    if mode != 'move':
+        return
+
+    try:
+        source_is_windows = is_windows_server(source_server)
+        parent = _get_batch_parent(source_files, source_is_windows)
+        if parent:
+            clear_cached_listing(source_server, parent)
+            return
+        parents = set()
+        for info in source_files or []:
+            p = _normalize_batch_path(info.get('path', ''))
+            if not p:
+                continue
+            if source_is_windows:
+                import ntpath
+                pp = ntpath.dirname(p)
+                if pp and pp.endswith(':'):
+                    pp += '/'
+            else:
+                pp = os.path.dirname(p) or '/'
+            parents.add(_normalize_batch_path(pp))
+        for pp in parents:
+            clear_cached_listing(source_server, pp)
+    except Exception:
+        pass
+
+def transfer_batch_instant(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True):
+    """批量传输：同目录多文件合并为一次rsync，减少握手与命令开销。"""
+    transfer_mode = determine_transfer_mode(source_server, target_server)
+    source_is_windows = is_windows_server(source_server)
+    target_is_windows = is_windows_server(target_server)
+
+    if not _can_batch_transfer(transfer_mode, source_files, source_is_windows, source_server, target_server):
+        return {'success': False, 'message': 'batch not applicable'}
+
+    if transfer_mode == 'remote_to_remote' and source_server == target_server:
+        return {'success': False, 'message': 'same server no rsync'}
+
+    max_files = PARALLEL_TRANSFER_CONFIG.get('batch_max_files', 200)
+    if max_files and len(source_files) > max_files:
+        return {'success': False, 'message': 'batch size too large'}
+
+    rsync_opts = _build_batch_rsync_opts(source_is_windows, target_is_windows)
+    rsync_opts_str = ' '.join(rsync_opts)
+
+    try:
+        if transfer_mode == 'local_to_remote':
+            target_user = SERVERS[target_server]['user']
+            target_password = SERVERS[target_server].get('password')
+            rsync_target_path = target_path
+            if target_is_windows:
+                normalized_target = normalize_windows_path_for_transfer(target_path)
+                rsync_target_path = convert_windows_path_to_cygwin(normalized_target)
+
+            ssh_cmd = RSYNC_SSH_CMD
+            target_port = SERVERS[target_server].get('port', 22)
+            if target_port != 22:
+                ssh_cmd = f"{ssh_cmd} -p {target_port}"
+
+            sources = [_normalize_batch_path(f.get('path', '')) for f in source_files]
+            sources = [s for s in sources if s]
+            if not sources:
+                return {'success': False, 'message': 'empty sources'}
+
+            if target_password:
+                cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+            else:
+                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+
+            part_id = f"rsync_{uuid.uuid4().hex}"
+            return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
+            if return_code != 0:
+                return {'success': False, 'message': f'rsync exit {return_code}'}
+
+        elif transfer_mode == 'remote_to_local':
+            source_user = SERVERS[source_server]['user']
+            source_password = SERVERS[source_server].get('password')
+
+            ssh_cmd = RSYNC_SSH_CMD
+            source_port = SERVERS[source_server].get('port', 22)
+            if source_port != 22:
+                ssh_cmd = f"{ssh_cmd} -p {source_port}"
+
+            sources = []
+            for f in source_files:
+                src_path = _normalize_batch_path(f.get('path', ''))
+                if not src_path:
+                    continue
+                if source_is_windows:
+                    src_path = convert_windows_path_to_cygwin(src_path)
+                sources.append(f'{source_user}@{source_server}:{src_path}')
+
+            if not sources:
+                return {'success': False, 'message': 'empty sources'}
+
+            if source_password:
+                cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_path}/']
+            else:
+                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_path}/']
+
+            part_id = f"rsync_{uuid.uuid4().hex}"
+            return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
+            if return_code != 0:
+                return {'success': False, 'message': f'rsync exit {return_code}'}
+
+        elif transfer_mode == 'remote_to_remote':
+            target_user = SERVERS[target_server]['user']
+            target_password = SERVERS[target_server].get('password')
+            source_user = SERVERS[source_server]['user']
+            source_password = SERVERS[source_server].get('password')
+
+            if source_is_windows and not target_is_windows:
+                exec_server = target_server
+                sshpass_cmd = "sshpass"
+                if is_nas_server(exec_server):
+                    sshpass_cmd = "~/bin/sshpass"
+
+                ssh_to_source = RSYNC_SSH_CMD
+                source_port = SERVERS[source_server].get('port', 22)
+                if source_port != 22:
+                    ssh_to_source = f"{ssh_to_source} -p {source_port}"
+
+                sources = []
+                for f in source_files:
+                    src_path = _normalize_batch_path(f.get('path', ''))
+                    if not src_path:
+                        continue
+                    src_path = convert_windows_path_to_cygwin(src_path)
+                    sources.append(f'{source_user}@{source_server}:{src_path}')
+
+                if not sources:
+                    return {'success': False, 'message': 'empty sources'}
+
+                sources_arg = ' '.join([shlex.quote(s) for s in sources])
+                target_dest = shlex.quote(f'{target_path}/')
+                if source_password:
+                    remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} {sources_arg} {target_dest}"
+                else:
+                    remote_cmd = f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} {sources_arg} {target_dest}"
+
+                ssh = ssh_manager.get_connection(exec_server)
+                if not ssh:
+                    raise Exception(f"无法连接到目标服务器 {exec_server}")
+                part_id = f"rsync_{uuid.uuid4().hex}"
+                exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
+                if exit_status != 0:
+                    return {'success': False, 'message': f'rsync exit {exit_status}: {error}'}
+            else:
+                exec_server = source_server
+                sshpass_cmd = "sshpass"
+                if is_nas_server(exec_server):
+                    sshpass_cmd = "~/bin/sshpass"
+
+                rsync_target_path = target_path
+                if target_is_windows:
+                    normalized_target = normalize_windows_path_for_transfer(target_path)
+                    rsync_target_path = convert_windows_path_to_cygwin(normalized_target)
+
+                ssh_to_target = RSYNC_SSH_CMD
+                target_port = SERVERS[target_server].get('port', 22)
+                if target_port != 22:
+                    ssh_to_target = f"{ssh_to_target} -p {target_port}"
+
+                sources = []
+                for f in source_files:
+                    src_path = _normalize_batch_path(f.get('path', ''))
+                    if not src_path:
+                        continue
+                    if source_is_windows:
+                        src_path = convert_windows_path_to_cygwin(src_path)
+                    sources.append(src_path)
+
+                if not sources:
+                    return {'success': False, 'message': 'empty sources'}
+
+                sources_arg = ' '.join([shlex.quote(s) for s in sources])
+                dest = shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')
+                if target_password:
+                    remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} {sources_arg} {dest}"
+                else:
+                    remote_cmd = f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} {sources_arg} {dest}"
+
+                ssh = ssh_manager.get_connection(exec_server)
+                if not ssh:
+                    raise Exception(f"无法连接到源服务器 {exec_server}")
+                part_id = f"rsync_{uuid.uuid4().hex}"
+                exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
+                if exit_status != 0:
+                    return {'success': False, 'message': f'rsync exit {exit_status}: {error}'}
+        else:
+            return {'success': False, 'message': 'unsupported mode'}
+
+        if mode == 'move':
+            paths = [_normalize_batch_path(f.get('path', '')) for f in source_files]
+            paths = [p for p in paths if p]
+            deleted_ok = _delete_source_paths_batch(source_server, paths)
+            if not deleted_ok:
+                emit_transfer_log(transfer_id, '⚠️ 剪切模式：源文件删除存在失败项')
+
+        return {'success': True, 'completed': len(source_files), 'failed': 0}
+
+    except Exception as e:
+        return {'success': False, 'message': str(e)}
+
 def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True):
     """启动即时并行传输任务 - 无预分析，立即开始"""
     def _log_transfer_summary(status: str, total_time: str = "", error: str = ""):
@@ -1908,13 +2270,36 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 # 单文件或禁用并行时使用顺序传输
                 return start_sequential_transfer(transfer_id, source_server, source_files, target_server, target_path, mode, fast_ssh)
 
+            # 🎯 关键修复：在并行/批量传输前启动计时器
+            time_tracker.start_transfer(transfer_id)
+
+            # 🚀 批量传输优化：同目录多文件合并为一次rsync
+            if PARALLEL_TRANSFER_CONFIG.get('enable_batch_transfer', True):
+                batch_result = transfer_batch_instant(
+                    transfer_id, source_server, source_files, target_server, target_path, mode, fast_ssh
+                )
+                if batch_result and batch_result.get('success'):
+                    total_time = time_tracker.end_transfer(transfer_id)
+                    completed_count = batch_result.get('completed', total_files)
+
+                    _clear_transfer_listing_cache(source_server, target_server, source_files, target_path, mode)
+
+                    emit_transfer_bytes_snapshot(transfer_id)
+                    socketio.emit('transfer_complete', {
+                        'transfer_id': transfer_id,
+                        'status': 'success',
+                        'message': f'成功传输 {completed_count} 个文件/文件夹',
+                        'total_time': total_time
+                    })
+                    _log_transfer_summary('success', total_time)
+                    return
+                elif batch_result and batch_result.get('message'):
+                    print(f"[INFO] 批量传输未启用或失败，回退并行模式: {batch_result.get('message')}")
+
             # 创建线程池
             max_workers = min(PARALLEL_TRANSFER_CONFIG['max_workers'], total_files)
 
             emit_transfer_log(transfer_id, f'⚡ 启动 {max_workers} 个并行传输线程...')
-
-            # 🎯 关键修复：在提交传输任务前启动计时器，确保只计算实际传输时间
-            time_tracker.start_transfer(transfer_id)
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
@@ -1993,6 +2378,8 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
                 # 部分成功情况下也要显示总耗时
                 total_time = time_tracker.end_transfer(transfer_id)
 
+                _clear_transfer_listing_cache(source_server, target_server, source_files, target_path, mode)
+
                 print(f"[DEBUG] 发送部分成功事件: transfer_id={transfer_id}, status=partial_success")
                 emit_transfer_bytes_snapshot(transfer_id)
                 socketio.emit('transfer_complete', {
@@ -2004,6 +2391,8 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             else:
                 # 结束传输计时
                 total_time = time_tracker.end_transfer(transfer_id)
+
+                _clear_transfer_listing_cache(source_server, target_server, source_files, target_path, mode)
 
                 # 🚀 性能监控：记录传输性能数据
                 print(f"[性能监控] 传输ID: {transfer_id}")
@@ -3250,6 +3639,8 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
     # 结束传输计时
     total_time = time_tracker.end_transfer(transfer_id)
+
+    _clear_transfer_listing_cache(source_server, target_server, source_files, target_path, mode)
 
     # 🚀 性能监控：记录传输性能数据
     print(f"[性能监控] 传输ID: {transfer_id}")

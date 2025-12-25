@@ -1277,6 +1277,77 @@
             }
         }
 
+        /* 通用对话框（替代浏览器 alert/confirm/prompt） */
+        .ui-dialog .modal-content {
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .ui-dialog .modal-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border-color);
+            background: #f8fafc;
+        }
+
+        .ui-dialog .modal-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .ui-dialog .modal-body {
+            padding: 12px 14px;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+
+        .ui-dialog-message {
+            white-space: pre-line;
+        }
+
+        .ui-dialog-list {
+            margin: 8px 0 0;
+            padding: 6px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            max-height: 220px;
+            overflow: auto;
+            background: #f8fafc;
+        }
+
+        .ui-dialog-list li {
+            font-size: 0.8rem;
+            padding: 2px 0;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+
+        .ui-dialog-list li:last-child {
+            border-bottom: 0;
+        }
+
+        .ui-dialog-warning {
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: #b45309;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .ui-dialog-input-row {
+            margin-top: 10px;
+        }
+
+        .ui-dialog .modal-footer {
+            padding: 8px 14px 12px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .ui-dialog .btn {
+            font-size: 0.8rem;
+            min-width: 72px;
+        }
+
         /* 模态窗口中的日志区域样式 */
         #logModal .modal-dialog {
             max-width: 60vw;
@@ -1926,6 +1997,33 @@
         </div>
     </div>
 
+    <!-- 通用提示/确认/输入对话框 -->
+    <div class="modal fade" id="uiDialogModal" tabindex="-1" aria-labelledby="uiDialogTitle" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered ui-dialog">
+            <div class="modal-content ui-dialog-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uiDialogTitle">提示</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="uiDialogMessage" class="ui-dialog-message"></div>
+                    <ul id="uiDialogList" class="ui-dialog-list list-unstyled" style="display: none;"></ul>
+                    <div id="uiDialogWarning" class="ui-dialog-warning" style="display: none;">
+                        <i class="bi bi-exclamation-triangle-fill"></i>
+                        <span></span>
+                    </div>
+                    <div id="uiDialogInputRow" class="ui-dialog-input-row" style="display: none;">
+                        <input id="uiDialogInput" type="text" class="form-control form-control-sm" />
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light btn-sm" id="uiDialogCancel">取消</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="uiDialogConfirm">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
     <script>
@@ -1939,6 +2037,7 @@
         let currentTransferMode = 'copy'; // 'copy' 或 'move'
         let currentSourcePath = '';
         let currentTargetPath = '';
+        let transferContext = null;
 
         // Windows 磁盘缓存（分别用于源/目标），供路径导航下拉使用
         let windowsDrivesSource = [];
@@ -1962,12 +2061,433 @@
         let transferClipboard = null; // { mode: 'copy'|'move', sourcePanel: 'source'|'target', sourceServer: string, files: Array<{path,name,is_directory}>, ts: number }
         let transferRefreshOverride = null; // { refreshSource: boolean, refreshTarget: boolean } | null
 
+        // 通用对话框（替代浏览器 alert/confirm/prompt）
+        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false };
+
+        function _getUiDialogElements() {
+            return {
+                modal: document.getElementById('uiDialogModal'),
+                title: document.getElementById('uiDialogTitle'),
+                message: document.getElementById('uiDialogMessage'),
+                list: document.getElementById('uiDialogList'),
+                warning: document.getElementById('uiDialogWarning'),
+                warningText: document.querySelector('#uiDialogWarning span'),
+                inputRow: document.getElementById('uiDialogInputRow'),
+                input: document.getElementById('uiDialogInput'),
+                confirmBtn: document.getElementById('uiDialogConfirm'),
+                cancelBtn: document.getElementById('uiDialogCancel')
+            };
+        }
+
+        function _resolveUiDialog(result) {
+            if (!uiDialogState.resolve) return;
+            const resolve = uiDialogState.resolve;
+            uiDialogState.resolve = null;
+            resolve(result);
+        }
+
+        function _ensureUiDialog() {
+            if (uiDialogState.instance) return uiDialogState.instance;
+            const els = _getUiDialogElements();
+            if (!els.modal || typeof bootstrap === 'undefined' || !bootstrap.Modal) return null;
+
+            uiDialogState.instance = bootstrap.Modal.getInstance(els.modal) || new bootstrap.Modal(els.modal, {
+                backdrop: true,
+                keyboard: true,
+                focus: true
+            });
+
+            if (!uiDialogState.bound) {
+                uiDialogState.bound = true;
+
+                if (els.confirmBtn) {
+                    els.confirmBtn.addEventListener('click', () => {
+                        if (uiDialogState.type === 'prompt') {
+                            _resolveUiDialog(els.input ? els.input.value : '');
+                        } else if (uiDialogState.type === 'confirm') {
+                            _resolveUiDialog(true);
+                        } else {
+                            _resolveUiDialog(undefined);
+                        }
+                        uiDialogState.instance.hide();
+                    });
+                }
+
+                if (els.cancelBtn) {
+                    els.cancelBtn.addEventListener('click', () => {
+                        if (uiDialogState.type === 'prompt') {
+                            _resolveUiDialog(null);
+                        } else if (uiDialogState.type === 'confirm') {
+                            _resolveUiDialog(false);
+                        } else {
+                            _resolveUiDialog(undefined);
+                        }
+                        uiDialogState.instance.hide();
+                    });
+                }
+
+                if (els.input) {
+                    els.input.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter') {
+                            event.preventDefault();
+                            _resolveUiDialog(els.input.value);
+                            uiDialogState.instance.hide();
+                        }
+                    });
+                }
+
+                els.modal.addEventListener('hidden.bs.modal', () => {
+                    if (!uiDialogState.resolve) return;
+                    if (uiDialogState.type === 'prompt') {
+                        _resolveUiDialog(null);
+                    } else if (uiDialogState.type === 'confirm') {
+                        _resolveUiDialog(false);
+                    } else {
+                        _resolveUiDialog(undefined);
+                    }
+                });
+
+                els.modal.addEventListener('shown.bs.modal', () => {
+                    if (uiDialogState.type === 'prompt' && els.input) {
+                        els.input.focus();
+                        els.input.select();
+                    } else if (els.confirmBtn) {
+                        els.confirmBtn.focus();
+                    }
+                });
+            }
+
+            return uiDialogState.instance;
+        }
+
+        function showUiDialog(options = {}) {
+            const modal = _ensureUiDialog();
+            if (!modal) {
+                if (options.type === 'confirm') {
+                    return Promise.resolve(window.confirm(options.message || ''));
+                }
+                if (options.type === 'prompt') {
+                    return Promise.resolve(window.prompt(options.message || '', options.defaultValue || ''));
+                }
+                window.alert(options.message || '');
+                return Promise.resolve(undefined);
+            }
+
+            const els = _getUiDialogElements();
+            uiDialogState.type = options.type || 'alert';
+
+            if (els.title) {
+                els.title.textContent = options.title || '提示';
+            }
+            if (els.message) {
+                const msg = options.message || '';
+                els.message.textContent = msg;
+                els.message.style.display = msg ? 'block' : 'none';
+            }
+
+            if (els.list) {
+                const items = Array.isArray(options.items) ? options.items.filter(Boolean) : [];
+                els.list.innerHTML = '';
+                if (items.length > 0) {
+                    items.forEach((item) => {
+                        const li = document.createElement('li');
+                        li.textContent = String(item);
+                        els.list.appendChild(li);
+                    });
+                    els.list.style.display = 'block';
+                } else {
+                    els.list.style.display = 'none';
+                }
+            }
+
+            if (els.warning && els.warningText) {
+                const warning = options.warning || '';
+                els.warningText.textContent = warning;
+                els.warning.style.display = warning ? 'flex' : 'none';
+            }
+
+            if (els.inputRow && els.input) {
+                if (uiDialogState.type === 'prompt') {
+                    els.inputRow.style.display = 'block';
+                    els.input.value = options.defaultValue || '';
+                    els.input.placeholder = options.placeholder || '';
+                } else {
+                    els.inputRow.style.display = 'none';
+                    els.input.value = '';
+                    els.input.placeholder = '';
+                }
+            }
+
+            if (els.confirmBtn) {
+                els.confirmBtn.textContent = options.confirmText || '确定';
+                els.confirmBtn.classList.remove('btn-danger', 'btn-primary');
+                els.confirmBtn.classList.add(options.danger ? 'btn-danger' : 'btn-primary');
+            }
+            if (els.cancelBtn) {
+                els.cancelBtn.textContent = options.cancelText || '取消';
+                els.cancelBtn.style.display = uiDialogState.type === 'alert' ? 'none' : 'inline-block';
+            }
+
+            return new Promise((resolve) => {
+                uiDialogState.resolve = resolve;
+                modal.show();
+            });
+        }
+
+        function showAlertDialog(message, options = {}) {
+            return showUiDialog({ ...options, type: 'alert', message });
+        }
+
+        function showConfirmDialog(message, options = {}) {
+            return showUiDialog({ ...options, type: 'confirm', message });
+        }
+
+        function showPromptDialog(message, options = {}) {
+            return showUiDialog({ ...options, type: 'prompt', message });
+        }
+
         function _cloneTransferFiles(files) {
             return (files || []).map(f => ({
                 path: f.path,
                 name: f.name,
                 is_directory: !!f.is_directory
             }));
+        }
+
+        function _getCommonParentPathFromFiles(files) {
+            const parents = new Set();
+            (files || []).forEach(f => {
+                if (!f || !f.path) return;
+                try {
+                    parents.add(getParentPath(f.path));
+                } catch (_) {}
+            });
+            if (parents.size === 1) {
+                return Array.from(parents)[0];
+            }
+            return '';
+        }
+
+        function _joinPath(basePath, name) {
+            if (!basePath) return name || '';
+            const safeBase = String(basePath).replace(/\\/g, '/').replace(/\/+$/, '');
+            const safeName = String(name || '').replace(/^\/+/, '');
+            return safeBase ? `${safeBase}/${safeName}` : safeName;
+        }
+
+        function _getBaseName(path) {
+            const normalized = String(path || '').replace(/\\/g, '/');
+            const parts = normalized.split('/');
+            return parts.length ? parts[parts.length - 1] : '';
+        }
+
+        function cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, files, mode) {
+            transferContext = {
+                sourceServer: sourceServer || '',
+                targetServer: targetServer || '',
+                sourcePath: sourcePath || _getCommonParentPathFromFiles(files),
+                targetPath: targetPath || '',
+                files: _cloneTransferFiles(files || []),
+                mode: mode || 'copy'
+            };
+        }
+
+        function clearTransferContext() {
+            transferContext = null;
+        }
+
+        function _buildOptimisticItems(targetPath, files) {
+            const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            return (files || []).map(f => ({
+                name: f.name,
+                path: _joinPath(targetPath, f.name),
+                is_directory: !!f.is_directory,
+                size: 0,
+                modified: ts
+            }));
+        }
+
+        function _insertOptimisticRows(isSource, items) {
+            const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            const nodes = Array.from(container.children);
+            const parentRow = nodes.find(node => node.classList && node.classList.contains('file-item') && !node.classList.contains('selectable'));
+            const anchor = parentRow ? parentRow.nextSibling : (nodes[0] || null);
+
+            const state = isSource ? browseState.source : browseState.target;
+            const baseIndex = state.loadedCount || 0;
+            const sorted = sortFilesWinSCPStyle([...items]);
+
+            sorted.forEach((file, idx) => {
+                const icon = file.is_directory ? 'bi-folder-fill text-warning' : 'bi-file-earmark text-info';
+                const size = file.is_directory ? '' : formatFileSize(file.size || 0);
+                const fileId = `file_${containerId}_optimistic_${baseIndex + idx}`;
+                const fileIdx = baseIndex + idx;
+
+                const row = document.createElement('div');
+                row.className = 'file-item selectable';
+                row.id = fileId;
+                row.dataset.path = file.path;
+                row.dataset.name = file.name;
+                row.dataset.isDirectory = file.is_directory;
+                row.dataset.idx = fileIdx;
+                row.onmousedown = (event) => handleFileMouseDown(event, file.path, file.name, file.is_directory, fileId, isSource);
+                row.ondblclick = function() { handleFileItemDblClick(row, isSource); };
+                row.innerHTML = `
+                    <i class="bi ${icon}"></i>
+                    <div class="file-info">
+                        <span class="file-name">${file.name}</span>
+                        <span class="file-details">${size} ${file.modified || ''}</span>
+                    </div>
+                `;
+
+                container.insertBefore(row, anchor);
+            });
+        }
+
+        function addOptimisticItemsToState(isSource, targetPath, files) {
+            const state = isSource ? browseState.source : browseState.target;
+            if (!state || state.path !== targetPath) return false;
+
+            const existing = new Set((state.fullItems || []).map(it => it.path));
+            const items = _buildOptimisticItems(targetPath, files);
+            const added = items.filter(it => it.path && !existing.has(it.path));
+            if (!added.length) return false;
+
+            state.fullItems = (state.fullItems || []).concat(added);
+            state.total = (state.total || 0) + added.length;
+            state.loadedCount = (state.loadedCount || 0) + added.length;
+
+            _insertOptimisticRows(isSource, added);
+            updateFileCountDisplay(isSource, state.loadedCount, state.total);
+            return true;
+        }
+
+        function removeOptimisticItemsFromState(isSource, sourcePath, files) {
+            const state = isSource ? browseState.source : browseState.target;
+            if (!state || state.path !== sourcePath) return false;
+
+            const removePaths = new Set((files || []).map(f => f && f.path).filter(Boolean));
+            if (!removePaths.size) return false;
+
+            const beforeCount = state.fullItems ? state.fullItems.length : 0;
+            if (state.fullItems && state.fullItems.length) {
+                state.fullItems = state.fullItems.filter(it => !removePaths.has(it.path));
+            }
+            const removedCount = Math.max(0, beforeCount - (state.fullItems ? state.fullItems.length : 0));
+            if (removedCount) {
+                state.total = Math.max(0, (state.total || 0) - removedCount);
+                state.loadedCount = Math.max(0, (state.loadedCount || 0) - removedCount);
+            }
+
+            const nodes = getFileNodes(isSource);
+            nodes.forEach(node => {
+                if (removePaths.has(node.dataset.path)) {
+                    node.remove();
+                }
+            });
+
+            if (isSource) {
+                selectedSourceFiles = (selectedSourceFiles || []).filter(f => !removePaths.has(f.path));
+            } else {
+                selectedTargetFiles = (selectedTargetFiles || []).filter(f => !removePaths.has(f.path));
+            }
+
+            updateFileCountDisplay(isSource, state.loadedCount, state.total);
+            return removedCount > 0;
+        }
+
+        function applyTransferOptimisticUpdate() {
+            if (!transferContext || !transferContext.files || transferContext.files.length === 0) {
+                return { targetUpdated: false, sourceUpdated: false };
+            }
+
+            const sourcePanel = currentTransferDirection === 'rtl' ? 'target' : 'source';
+            const targetPanel = currentTransferDirection === 'rtl' ? 'source' : 'target';
+
+            let targetUpdated = false;
+            let sourceUpdated = false;
+
+            const targetPanelServer = document.getElementById(targetPanel === 'source' ? 'sourceServer' : 'targetServer').value;
+            if (targetPanelServer === transferContext.targetServer) {
+                targetUpdated = addOptimisticItemsToState(targetPanel === 'source', transferContext.targetPath, transferContext.files);
+            }
+
+            if ((transferContext.mode || currentTransferMode) === 'move') {
+                const sourcePanelServer = document.getElementById(sourcePanel === 'source' ? 'sourceServer' : 'targetServer').value;
+                if (sourcePanelServer === transferContext.sourceServer) {
+                    sourceUpdated = removeOptimisticItemsFromState(sourcePanel === 'source', transferContext.sourcePath, transferContext.files);
+                }
+            }
+
+            return { targetUpdated, sourceUpdated };
+        }
+
+        function applyDeleteOptimistic(type, files) {
+            const isSource = type === 'source';
+            const currentPath = isSource ? currentSourcePath : currentTargetPath;
+            return removeOptimisticItemsFromState(isSource, currentPath, files);
+        }
+
+        function applyRenameOptimistic(type, oldPath, newName) {
+            const isSource = type === 'source';
+            const state = isSource ? browseState.source : browseState.target;
+            const currentPath = isSource ? currentSourcePath : currentTargetPath;
+            if (!state || state.path !== currentPath) return null;
+
+            const parent = getParentPath(oldPath);
+            const newPath = _joinPath(parent, newName);
+            if (!newPath) return null;
+
+            let updated = false;
+            if (state.fullItems && state.fullItems.length) {
+                state.fullItems = state.fullItems.map(item => {
+                    if (item && item.path === oldPath) {
+                        updated = true;
+                        return {
+                            ...item,
+                            name: newName,
+                            path: newPath
+                        };
+                    }
+                    return item;
+                });
+            }
+
+            const nodes = getFileNodes(isSource);
+            nodes.forEach(node => {
+                if (node.dataset.path === oldPath) {
+                    node.dataset.path = newPath;
+                    node.dataset.name = newName;
+                    const nameEl = node.querySelector('.file-name');
+                    if (nameEl) nameEl.textContent = newName;
+                    updated = true;
+                }
+            });
+
+            if (isSource) {
+                selectedSourceFiles = (selectedSourceFiles || []).map(f => {
+                    if (f && f.path === oldPath) {
+                        return { ...f, path: newPath, name: newName };
+                    }
+                    return f;
+                });
+            } else {
+                selectedTargetFiles = (selectedTargetFiles || []).map(f => {
+                    if (f && f.path === oldPath) {
+                        return { ...f, path: newPath, name: newName };
+                    }
+                    return f;
+                });
+            }
+
+            if (updated) {
+                updateFileCountDisplay(isSource, state.loadedCount, state.total);
+            }
+
+            return { oldPath, newPath, updated };
         }
 
         function _isEditableElement(el) {
@@ -1996,7 +2516,7 @@
             return panel === 'target' ? currentTargetPath : currentSourcePath;
         }
 
-        function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null) {
+        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null) {
             if (isTransferring) {
                 addLogWarning('⚠️ 已有传输任务在进行中');
                 return false;
@@ -2017,7 +2537,10 @@
 
             // 剪切模式弹窗提醒（与 startTransfer 保持一致）
             if (finalMode === 'move') {
-                const ok = confirm('当前选择的是「剪切」模式，源文件将被删除。是否继续？');
+                const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
+                    title: '剪切确认',
+                    danger: true
+                });
                 if (!ok) {
                     return false;
                 }
@@ -2026,7 +2549,7 @@
             // 服务器与路径校验
             if (!sourceServer || !targetServer || !targetPath) {
                 addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
-                alert('请选择源服务器、目标服务器和目标路径');
+                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
                 return false;
             }
 
@@ -2037,10 +2560,12 @@
                 );
                 if (hasConflict) {
                     addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    alert('源路径和目标路径不能相同或存在包含关系');
+                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
                     return false;
                 }
             }
+
+            cacheTransferContext(sourceServer, targetServer, '', targetPath, files, finalMode);
 
             // 同侧粘贴时，仅刷新当前侧，避免刷新另一侧造成干扰
             transferRefreshOverride = refreshOverride;
@@ -2085,7 +2610,7 @@
             // 与 startTransfer 一致：只允许一侧选中以确定源
             if (leftSelected && rightSelected) {
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择');
-                alert('左右两侧同时选择了项目，请只在一侧选择');
+                showAlertDialog('左右两侧同时选择了项目，请只在一侧选择');
                 return;
             }
             if (!leftSelected && !rightSelected) {
@@ -2113,7 +2638,7 @@
             addLogSuccess(`📋 已${opText} ${sourceFiles.length} 项（Ctrl+V 粘贴到当前激活侧）`);
         }
 
-        function pasteTransferClipboard() {
+        async function pasteTransferClipboard() {
             if (!transferClipboard || !transferClipboard.files || transferClipboard.files.length === 0) {
                 addLogWarning('⚠️ 剪贴板为空：请先 Ctrl+C 或 Ctrl+X 选择文件');
                 return;
@@ -2161,7 +2686,7 @@
                 };
             }
 
-            const started = startTransferWithParams(
+            const started = await startTransferWithParams(
                 transferClipboard.sourceServer,
                 targetServer,
                 targetPath,
@@ -2634,7 +3159,7 @@
 
             if (leftSelected && rightSelected) {
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择');
-                alert('左右两侧同时选择了项目，请只在一侧选择');
+                await showAlertDialog('左右两侧同时选择了项目，请只在一侧选择');
                 return;
             }
             if (!leftSelected && !rightSelected) {
@@ -2659,7 +3184,7 @@
             const windowsServers = _listWindowsServers();
             if (!windowsServers.length) {
                 addLogWarning('⚠️ 未配置Windows服务器，无法下载到Windows');
-                alert('未配置Windows服务器，无法下载到Windows');
+                await showAlertDialog('未配置Windows服务器，无法下载到Windows');
                 return;
             }
 
@@ -2668,7 +3193,7 @@
             const suggested = _suggestWindowsServer(windowsServers);
             if (!suggested) {
                 addLogWarning('⚠️ 未找到Windows服务器');
-                alert('未找到Windows服务器');
+                await showAlertDialog('未找到Windows服务器');
                 return;
             }
 
@@ -2697,7 +3222,7 @@
                 .catch(() => {});
         }
 
-        function confirmDownloadToWindows() {
+        async function confirmDownloadToWindows() {
             if (!downloadWindowsContext) {
                 addLogWarning('⚠️ 下载上下文丢失，请重新右键选择');
                 return;
@@ -2731,7 +3256,7 @@
             if (modeEl) modeEl.checked = true;
 
             const direction = downloadWindowsContext.sourcePanel === 'source' ? 'ltr' : 'rtl';
-            const started = startTransferWithParams(
+            const started = await startTransferWithParams(
                 downloadWindowsContext.sourceServer,
                 winServer,
                 targetPath,
@@ -2942,7 +3467,6 @@
             blurBtn();
             const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
             const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
-            const currentPath = type === 'source' ? currentSourcePath : currentTargetPath;
 
             if (!server) {
                 addLogWarning('⚠️ 请先选择服务器');
@@ -2955,9 +3479,14 @@
             }
 
             // 确认删除
-            const fileNames = selectedFiles.map(f => f.name).join('\n');
-            const confirmMsg = `确定要删除以下 ${selectedFiles.length} 项吗？\n\n${fileNames}\n\n⚠️ 此操作不可恢复！`;
-            if (!confirm(confirmMsg)) {
+            const ok = await showConfirmDialog(`确定要删除以下 ${selectedFiles.length} 项吗？`, {
+                title: '删除确认',
+                items: selectedFiles.map(f => f.name),
+                warning: '此操作不可恢复！',
+                danger: true,
+                confirmText: '删除'
+            });
+            if (!ok) {
                 blurBtn();
                 return;
             }
@@ -2978,23 +3507,20 @@
 
                 const result = await response.json();
 
-                // 只要有成功删除的数量，就刷新浏览区；失败项单独提示
+                const silentRefresh = () => {
+                    if (type === 'source') {
+                        refreshSourceAsync({ silent: true });
+                    } else {
+                        refreshTargetAsync({ silent: true });
+                    }
+                };
+
                 if (result.success || (result.deleted_count && result.deleted_count > 0)) {
-                    // 清空选中状态
                     if (type === 'source') {
                         selectedSourceFiles = [];
                     } else {
                         selectedTargetFiles = [];
                     }
-
-                    // 刷新目录（强制刷新，后端已清理缓存）
-                    if (type === 'source') {
-                        await refreshSourceAsync();
-                    } else {
-                        await refreshTargetAsync();
-                    }
-
-                    // 若存在失败项，继续提示但不阻止刷新
                     if (!result.success && result.failed_items && result.failed_items.length > 0) {
                         addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
                         result.failed_items.forEach(item => {
@@ -3009,13 +3535,19 @@
                         });
                     }
                 }
+                silentRefresh();
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
+                if (type === 'source') {
+                    refreshSourceAsync({ silent: true });
+                } else {
+                    refreshTargetAsync({ silent: true });
+                }
             }
         }
 
         // 显示创建文件夹对话框
-        function showCreateFolderDialog(type) {
+        async function showCreateFolderDialog(type) {
             const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
             const currentPath = type === 'source' ? currentSourcePath : currentTargetPath;
 
@@ -3029,7 +3561,11 @@
                 return;
             }
 
-            const folderName = prompt('请输入新文件夹名称:', '新建文件夹');
+            const folderName = await showPromptDialog('请输入新文件夹名称', {
+                title: '新建文件夹',
+                defaultValue: '新建文件夹',
+                placeholder: '新建文件夹'
+            });
             if (!folderName || folderName.trim() === '') {
                 return;
             }
@@ -3041,6 +3577,8 @@
         async function createFolder(type, server, parentPath, folderName) {
             try {
                 addLogInfo(`📁 正在创建文件夹: ${folderName}...`);
+                const optimisticItem = { name: folderName, path: _joinPath(parentPath, folderName), is_directory: true };
+                const optimisticAdded = addOptimisticItemsToState(type === 'source', parentPath, [optimisticItem]);
 
                 const response = await fetch('/api/create_folder', {
                     method: 'POST',
@@ -3057,17 +3595,26 @@
                 if (result.success) {
                     addLogSuccess(`✅ ${result.message}`);
 
-                    // 刷新目录
-                    if (type === 'source') {
-                        await refreshSourceAsync();
-                    } else {
-                        await refreshTargetAsync();
+                    if (!optimisticAdded) {
+                        if (type === 'source') {
+                            refreshSourceAsync({ silent: true });
+                        } else {
+                            refreshTargetAsync({ silent: true });
+                        }
                     }
                 } else {
                     addLogError(`❌ 创建文件夹失败: ${result.error}`);
+                    if (optimisticAdded) {
+                        removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
+                    }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件夹异常: ${error.message}`);
+                if (type === 'source') {
+                    refreshSourceAsync({ silent: true });
+                } else {
+                    refreshTargetAsync({ silent: true });
+                }
             }
         }
 
@@ -3075,6 +3622,8 @@
         async function createFile(type, server, parentPath, fileName) {
             try {
                 addLogInfo(`📄 正在创建文件: ${fileName}...`);
+                const optimisticItem = { name: fileName, path: _joinPath(parentPath, fileName), is_directory: false };
+                const optimisticAdded = addOptimisticItemsToState(type === 'source', parentPath, [optimisticItem]);
                 const response = await fetch('/api/create_file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3087,21 +3636,31 @@
                 const result = await response.json();
                 if (result.success) {
                     addLogSuccess(`✅ ${result.message || '创建文件成功'}`);
-                    if (type === 'source') {
-                        await refreshSourceAsync();
-                    } else {
-                        await refreshTargetAsync();
+                    if (!optimisticAdded) {
+                        if (type === 'source') {
+                            refreshSourceAsync({ silent: true });
+                        } else {
+                            refreshTargetAsync({ silent: true });
+                        }
                     }
                 } else {
                     addLogError(`❌ 创建文件失败: ${result.error || '未知错误'}`);
+                    if (optimisticAdded) {
+                        removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
+                    }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件异常: ${error.message}`);
+                if (type === 'source') {
+                    refreshSourceAsync({ silent: true });
+                } else {
+                    refreshTargetAsync({ silent: true });
+                }
             }
         }
 
         // 显示重命名对话框
-        function showRenameDialog(type) {
+        async function showRenameDialog(type) {
             const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
             const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
 
@@ -3122,7 +3681,11 @@
 
             const file = selectedFiles[0];
             const oldName = file.name;
-            const newName = prompt(`请输入新名称:\n\n原名称: ${oldName}`, oldName);
+            const newName = await showPromptDialog(`请输入新名称\n原名称: ${oldName}`, {
+                title: '重命名',
+                defaultValue: oldName,
+                placeholder: oldName
+            });
 
             if (!newName || newName.trim() === '') {
                 return;
@@ -3140,6 +3703,8 @@
         async function renameFile(type, server, oldPath, newName) {
             try {
                 addLogInfo(`✏️ 正在重命名为: ${newName}...`);
+                const oldName = _getBaseName(oldPath);
+                const optimistic = applyRenameOptimistic(type, oldPath, newName);
 
                 const response = await fetch('/api/rename', {
                     method: 'POST',
@@ -3163,17 +3728,30 @@
                         selectedTargetFiles = [];
                     }
 
-                    // 刷新目录
-                    if (type === 'source') {
-                        await refreshSourceAsync();
-                    } else {
-                        await refreshTargetAsync();
+                    if (!optimistic || !optimistic.updated) {
+                        if (type === 'source') {
+                            refreshSourceAsync({ silent: true });
+                        } else {
+                            refreshTargetAsync({ silent: true });
+                        }
                     }
                 } else {
                     addLogError(`❌ 重命名失败: ${result.error}`);
+                    if (optimistic && oldName) {
+                        applyRenameOptimistic(type, optimistic.newPath, oldName);
+                    } else if (type === 'source') {
+                        refreshSourceAsync({ silent: true });
+                    } else {
+                        refreshTargetAsync({ silent: true });
+                    }
                 }
             } catch (error) {
                 addLogError(`❌ 重命名异常: ${error.message}`);
+                if (type === 'source') {
+                    refreshSourceAsync({ silent: true });
+                } else {
+                    refreshTargetAsync({ silent: true });
+                }
             }
         }
 
@@ -3496,22 +4074,25 @@
             const server = document.getElementById(serverSelect).value;
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
             const forceRefresh = options.forceRefresh === true;
+            const silent = options.silent === true;
             const isReset = options.reset === true || state.path !== targetPath || state.loadedCount === 0;
 
             if (!server) {
-                alert(isSource ? '请先选择源服务器' : '请先选择目标服务器');
+                await showAlertDialog(isSource ? '请先选择源服务器' : '请先选择目标服务器');
                 return;
             }
 
-        if (isReset) {
-            resetBrowseState(isSource, targetPath);
-            clearSelectionsForPanel(isSource);
-            showLoading(containerId);
-        } else {
-            if (state.loading || !state.hasMore) {
-                return;
+            if (isReset) {
+                resetBrowseState(isSource, targetPath);
+                clearSelectionsForPanel(isSource);
+                if (!silent) {
+                    showLoading(containerId);
+                }
+            } else {
+                if (state.loading || !state.hasMore) {
+                    return;
+                }
             }
-        }
 
             const controller = new AbortController();
             if (state.controller) {
@@ -3619,8 +4200,12 @@
             return loadDirectory('source', targetPath, { reset: true });
         }
 
-        async function refreshSourceAsync() {
-            return loadDirectory('source', currentSourcePath, { reset: true, forceRefresh: true });
+        async function refreshSourceAsync(options = {}) {
+            return loadDirectory('source', currentSourcePath, {
+                reset: true,
+                forceRefresh: true,
+                ...options
+            });
         }
 
         function browseTarget() {
@@ -3654,8 +4239,12 @@
             }
         }
 
-        async function refreshTargetAsync() {
-            return loadDirectory('target', currentTargetPath, { reset: true, forceRefresh: true });
+        async function refreshTargetAsync(options = {}) {
+            return loadDirectory('target', currentTargetPath, {
+                reset: true,
+                forceRefresh: true,
+                ...options
+            });
         }
 
         // 滚动到底部自动加载更多
@@ -4265,7 +4854,10 @@
                 return;
             }
 
-            const input = prompt('输入要查找的文件/文件夹名称关键字');
+            const input = await showPromptDialog('输入要查找的文件/文件夹名称关键字', {
+                title: '快速查找',
+                placeholder: '文件/文件夹关键字'
+            });
             if (input === null) return;
             const rawKeyword = String(input || '').trim();
             const keyword = rawKeyword.toLowerCase();
@@ -4485,7 +5077,7 @@
         }
 
         // 开始传输（单按钮：自动判断方向）
-        function startTransfer() {
+        async function startTransfer() {
             const sourceServerLeft = document.getElementById('sourceServer').value;
             const targetServerRight = document.getElementById('targetServer').value;
             const leftSelected = selectedSourceFiles.length > 0;
@@ -4501,7 +5093,10 @@
 
             // 剪切模式弹窗提醒
             if (currentTransferMode === 'move') {
-                const ok = confirm('当前选择的是「剪切」模式，源文件将被删除。是否继续？');
+                const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
+                    title: '剪切确认',
+                    danger: true
+                });
                 if (!ok) {
                     return;
                 }
@@ -4510,12 +5105,12 @@
             // 选择校验
             if (leftSelected && rightSelected) {
                 addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
-                alert('左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
+                await showAlertDialog('左右两侧同时选择了项目，请只在一侧选择以确定传输方向');
                 return;
             }
             if (!leftSelected && !rightSelected) {
                 addLogWarning('⚠️ 请选择要传输的文件或文件夹');
-                alert('请选择要传输的文件或文件夹');
+                await showAlertDialog('请选择要传输的文件或文件夹');
                 return;
             }
 
@@ -4540,7 +5135,7 @@
             // 服务器与路径校验
             if (!sourceServer || !targetServer || !targetPath) {
                 addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
-                alert('请选择源服务器、目标服务器和目标路径');
+                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
                 return;
             }
 
@@ -4551,10 +5146,13 @@
                 );
                 if (hasConflict) {
                     addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    alert('源路径和目标路径不能相同或存在包含关系');
+                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
                     return;
                 }
             }
+
+            const sourcePath = leftSelected ? currentSourcePath : currentTargetPath;
+            cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, sourceFiles, mode);
 
             // 设置传输状态
             isTransferring = true;
@@ -4665,6 +5263,7 @@
             transferRefreshOverride = null;
             latestTransferredBytes = 0;
             currentTransferId = null;
+            clearTransferContext();
         }
 
         // WebSocket事件处理
@@ -4808,21 +5407,29 @@
                         addLogSuccess(transferredSuffix ? `✅ 传输已完成${transferredSuffix}` : '✅ 传输已完成');
                     }
 
+                    const optimistic = applyTransferOptimisticUpdate();
+
                     // 根据方向自动刷新对应目录，显示最新传输的文件
                     setTimeout(() => {
                         const isMoveMode = (currentTransferMode === 'move');
+                        const skipSource = optimistic && optimistic.sourceUpdated;
+                        const skipTarget = optimistic && optimistic.targetUpdated;
 
                         if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
                             if (refreshOverride.refreshSource) {
                                 const sourceServer = document.getElementById('sourceServer').value;
                                 if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync();
+                                    if (!skipSource) {
+                                        refreshSourceAsync({ silent: true });
+                                    }
                                 }
                             }
                             if (refreshOverride.refreshTarget) {
                                 const targetServer = document.getElementById('targetServer').value;
                                 if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync();
+                                    if (!skipTarget) {
+                                        refreshTargetAsync({ silent: true });
+                                    }
                                 }
                             }
                             return;
@@ -4831,25 +5438,33 @@
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-                                refreshTargetAsync();
+                                if (!skipTarget) {
+                                    refreshTargetAsync({ silent: true });
+                                }
                             }
                             // 剪切模式下，源侧文件被删除，也需要立刻刷新源目录
                             if (isMoveMode) {
                                 const sourceServer = document.getElementById('sourceServer').value;
                                 if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync();
+                                    if (!skipSource) {
+                                        refreshSourceAsync({ silent: true });
+                                    }
                                 }
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-                                refreshSourceAsync();
+                                if (!skipSource) {
+                                    refreshSourceAsync({ silent: true });
+                                }
                             }
                             // 剪切模式下，目标侧新增文件，也需要刷新目标目录
                             if (isMoveMode) {
                                 const targetServer = document.getElementById('targetServer').value;
                                 if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync();
+                                    if (!skipTarget) {
+                                        refreshTargetAsync({ silent: true });
+                                    }
                                 }
                             }
                         }
@@ -4884,13 +5499,13 @@
                             if (refreshOverride.refreshSource) {
                                 const sourceServer = document.getElementById('sourceServer').value;
                                 if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync();
+                                    refreshSourceAsync({ silent: true });
                                 }
                             }
                             if (refreshOverride.refreshTarget) {
                                 const targetServer = document.getElementById('targetServer').value;
                                 if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync();
+                                    refreshTargetAsync({ silent: true });
                                 }
                             }
                             return;
@@ -4899,23 +5514,23 @@
                         if (currentTransferDirection === 'ltr') {
                             const targetServer = document.getElementById('targetServer').value;
                             if (targetServer && currentTargetPath) {
-                                refreshTargetAsync();
+                                refreshTargetAsync({ silent: true });
                             }
                             if (isMoveMode) {
                                 const sourceServer = document.getElementById('sourceServer').value;
                                 if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync();
+                                    refreshSourceAsync({ silent: true });
                                 }
                             }
                         } else {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-                                refreshSourceAsync();
+                                refreshSourceAsync({ silent: true });
                             }
                             if (isMoveMode) {
                                 const targetServer = document.getElementById('targetServer').value;
                                 if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync();
+                                    refreshTargetAsync({ silent: true });
                                 }
                             }
                         }
@@ -4938,6 +5553,7 @@
                 // 传输取消，恢复日志记录
                 isTransferring = false;
                 transferRefreshOverride = null;
+                clearTransferContext();
 
                 if (data.status === 'success') {
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输已取消'; }
