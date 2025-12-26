@@ -507,8 +507,8 @@
 	            box-sizing: border-box;
 	            will-change: grid-template-columns;
 	        }
-	        .image-grid-card {
-	            background: #1b2230;
+        .image-grid-card {
+            background: #1b2230;
             border: 1px solid #222b3a;
             border-radius: 10px;
             padding: 10px;
@@ -517,20 +517,31 @@
             gap: 8px;
             cursor: pointer;
             transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+            content-visibility: auto;
+            contain: layout paint style;
+            contain-intrinsic-size: 220px 240px;
+        }
+        #imageGridContainer.image-grid-relayout {
+            pointer-events: none;
         }
         .image-grid-card:hover {
             transform: translateY(-2px);
             border-color: #3b82f6;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
 	        }
-	        .image-grid-card img {
-	            width: 100%;
-	            height: auto;
-	            aspect-ratio: 220 / 150;
-	            object-fit: contain;
-	            background: #0f172a;
-	            border-radius: 8px;
-	        }
+        .image-grid-card img {
+            width: 100%;
+            height: auto;
+            aspect-ratio: 220 / 150;
+            object-fit: contain;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        .image-grid-spacer {
+            grid-column: 1 / -1;
+            height: 0;
+            pointer-events: none;
+        }
         .image-grid-name {
             font-size: 12px;
             color: #e5e7eb;
@@ -5796,9 +5807,9 @@
         const IMAGE_PREVIEW_MAX_DIM = 2200;
         const IMAGE_PREVIEW_MIN_DIM = 320;
         const IMAGE_PREVIEW_QUALITY = 82;
-        const IMAGE_GRID_THUMB_MAX = 520;
+        const IMAGE_GRID_THUMB_MAX = 1024;
         const IMAGE_GRID_THUMB_MIN = 120;
-        const IMAGE_GRID_THUMB_QUALITY = 70;
+        const IMAGE_GRID_THUMB_QUALITY = 82;
 
         function clampNumber(value, min, max) {
             if (!Number.isFinite(value)) return min;
@@ -5818,7 +5829,11 @@
             const width = Math.max(0, Number.parseInt(options.width, 10) || 0);
             const height = Math.max(0, Number.parseInt(options.height, 10) || 0);
             const quality = Math.max(0, Number.parseInt(options.quality, 10) || 0);
-            const variant = (width || height || quality) ? `${width}x${height}q${quality}` : '';
+            const interp = options.interp ? String(options.interp) : '';
+            const interpKey = interp ? `i${interp}` : '';
+            const variant = (width || height || quality || interpKey)
+                ? `${width}x${height}q${quality}${interpKey ? '-' + interpKey : ''}`
+                : '';
             const cached = previewCacheGet(server, path, 'blob', variant);
             if (cached) return cached.value;
 
@@ -5828,6 +5843,7 @@
             if (width > 0) params.set('width', String(width));
             if (height > 0) params.set('height', String(height));
             if (quality > 0) params.set('quality', String(quality));
+            if (interp) params.set('interp', interp);
             const resp = await fetch(`/api/image/stream?${params.toString()}`, { cache: 'no-store' });
             if (!resp.ok) {
                 let msg = '';
@@ -6035,21 +6051,38 @@
 		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
 		            let imageGridColsControlsBound = false;
 		            let imageGridColsRaf = 0;
-		            const IMAGE_GRID_MAX_PARALLEL = 8;
-		            const IMAGE_GRID_MAX_PARALLEL_EAGER = 12;
-		            const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
-		            const imageGridLoadQueue = [];
-		            let imageGridLoadingCount = 0;
-		            let imageGridThumbWidth = 0;
-		            let imageGridResizeRaf = 0;
-		            let imageGridEagerMode = false;
-		            let imageGridEagerQueued = false;
-		            let imageGridScrollBound = false;
+            const IMAGE_GRID_MAX_PARALLEL = 8;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER = 12;
+            const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
+            const imageGridLoadQueue = [];
+            let imageGridLoadingCount = 0;
+            let imageGridThumbWidth = 0;
+            let imageGridResizeRaf = 0;
+            let imageGridColsApplyRaf = 0;
+            let imageGridResumeTimer = 0;
+            let imageGridPendingCols = null;
+            let imageGridSwitching = false;
+            let imageGridEagerMode = false;
+            let imageGridEagerQueued = false;
+            let imageGridScrollBound = false;
+            const IMAGE_GRID_VIRTUAL_THRESHOLD = 320;
+            const IMAGE_GRID_VIRTUAL_OVERSCAN = 3;
+            let imageGridItems = [];
+            let imageGridVirtualEnabled = false;
+            let imageGridRowHeight = 0;
+            let imageGridRowGap = 0;
+            let imageGridRowMeasured = false;
+            let imageGridRenderRaf = 0;
+            let imageGridScrollRaf = 0;
+            let imageGridVirtualForce = false;
+            let imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
+            let imageGridActiveServer = '';
+            let imageGridActiveIsSource = true;
 
-		            function computeImageGridThumbWidth() {
+		            function computeImageGridThumbWidth(colsOverride) {
 		                const container = document.getElementById('imageGridContainer');
 		                if (!container) return IMAGE_GRID_THUMB_MIN;
-		                const cols = imageGridCols || IMAGE_GRID_COLS_DEFAULT;
+		                const cols = colsOverride || imageGridCols || IMAGE_GRID_COLS_DEFAULT;
 		                const style = getComputedStyle(container);
 		                const paddingLeft = parseFloat(style.paddingLeft) || 0;
 		                const paddingRight = parseFloat(style.paddingRight) || 0;
@@ -6062,13 +6095,13 @@
 		                return clampNumber(scaled, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 		            }
 
-		            function scheduleImageGridThumbUpdate() {
-		                if (imageGridResizeRaf) return;
-		                imageGridResizeRaf = requestAnimationFrame(() => {
-		                    imageGridThumbWidth = computeImageGridThumbWidth();
-		                    imageGridResizeRaf = 0;
-		                });
-		            }
+            function scheduleImageGridThumbUpdate() {
+                if (imageGridResizeRaf) return;
+                imageGridResizeRaf = requestAnimationFrame(() => {
+                    imageGridThumbWidth = computeImageGridThumbWidth();
+                    imageGridResizeRaf = 0;
+                });
+            }
 
 		            function getImageGridParallelLimit() {
 		                return imageGridEagerMode ? IMAGE_GRID_MAX_PARALLEL_EAGER : IMAGE_GRID_MAX_PARALLEL;
@@ -6080,29 +6113,253 @@
 		                return IMAGE_GRID_COLS_OPTIONS.includes(n) ? n : IMAGE_GRID_COLS_DEFAULT;
 	            }
 
-		            function applyImageGridColumns(cols) {
-		                const normalized = normalizeImageGridCols(cols);
-		                imageGridCols = normalized;
+            function observePendingImageGridCards() {
+                if (imageGridVirtualEnabled) return;
+                if (!imageGridObserver) return;
+                const container = document.getElementById('imageGridContainer');
+                if (!container) return;
+                container.querySelectorAll('.image-grid-card').forEach(card => {
+                    const imgEl = card.querySelector('img');
+                    if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
+                    imageGridObserver.observe(card);
+                });
+            }
 
-		                const btnWrap = document.getElementById('imageGridColsButtons');
-		                if (btnWrap) {
-		                    btnWrap.querySelectorAll('.image-grid-cols-btn').forEach(btn => {
-		                        const btnCols = normalizeImageGridCols(btn.dataset.cols);
-		                        btn.classList.toggle('active', btnCols === normalized);
-		                    });
-		                }
+            function shouldUseImageGridVirtual(count) {
+                return count >= IMAGE_GRID_VIRTUAL_THRESHOLD;
+            }
 
-		                const container = document.getElementById('imageGridContainer');
-		                if (!container) return;
-		                if (imageGridColsRaf) {
-		                    try { cancelAnimationFrame(imageGridColsRaf); } catch (_) {}
-		                }
-		                imageGridColsRaf = requestAnimationFrame(() => {
-		                    container.style.setProperty('--image-grid-cols', String(normalized));
-		                    imageGridThumbWidth = computeImageGridThumbWidth();
-		                    imageGridColsRaf = 0;
-		                });
-		            }
+            function setImageGridVirtualEnabled(enabled) {
+                const next = Boolean(enabled);
+                if (next === imageGridVirtualEnabled) return false;
+                imageGridVirtualEnabled = next;
+                imageGridRowHeight = 0;
+                imageGridRowGap = 0;
+                imageGridRowMeasured = false;
+                imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
+                if (imageGridObserver) {
+                    try { imageGridObserver.disconnect(); } catch (_) {}
+                    imageGridObserver = null;
+                }
+                return true;
+            }
+
+            function scheduleImageGridVirtualRender(force = false) {
+                if (!imageGridVirtualEnabled) return;
+                imageGridVirtualForce = imageGridVirtualForce || force;
+                if (imageGridRenderRaf) return;
+                imageGridRenderRaf = requestAnimationFrame(() => {
+                    const forceNow = imageGridVirtualForce;
+                    imageGridVirtualForce = false;
+                    imageGridRenderRaf = 0;
+                    renderImageGridVirtual(forceNow);
+                });
+            }
+
+            function computeImageGridRowMetrics() {
+                const container = document.getElementById('imageGridContainer');
+                if (!container) return;
+                const style = getComputedStyle(container);
+                imageGridRowGap = parseFloat(style.rowGap || style.gap || 0) || 0;
+                const sample = container.querySelector('.image-grid-card');
+                if (sample) {
+                    const rect = sample.getBoundingClientRect();
+                    if (rect && rect.height) {
+                        imageGridRowHeight = rect.height;
+                    }
+                    return;
+                }
+                const cols = imageGridCols || IMAGE_GRID_COLS_DEFAULT;
+                const paddingLeft = parseFloat(style.paddingLeft) || 0;
+                const paddingRight = parseFloat(style.paddingRight) || 0;
+                const gap = imageGridRowGap || 0;
+                const available = container.clientWidth - paddingLeft - paddingRight - gap * Math.max(cols - 1, 0);
+                if (available <= 0) return;
+                const colWidth = available / cols;
+                const imgHeight = colWidth * 150 / 220;
+                imageGridRowHeight = Math.max(1, Math.round(imgHeight + 48));
+            }
+
+            function createImageGridCard(item, server, isSource) {
+                const card = document.createElement('div');
+                card.className = 'image-grid-card';
+                card.dataset.server = server;
+                card.dataset.path = item.path;
+
+                const imgEl = document.createElement('img');
+                imgEl.alt = item.name;
+                imgEl.loading = 'lazy';
+                imgEl.decoding = 'async';
+                imgEl.dataset.loaded = '0';
+
+                const nameEl = document.createElement('div');
+                nameEl.className = 'image-grid-name';
+                nameEl.textContent = item.name;
+
+                card.appendChild(imgEl);
+                card.appendChild(nameEl);
+                card.addEventListener('click', () => {
+                    previewImage(server, item.path, item.name, isSource);
+                });
+
+                if (!imageGridVirtualEnabled && !imageGridEagerMode && imageGridObserver) {
+                    imageGridObserver.observe(card);
+                } else {
+                    loadImageCardImmediately(card);
+                }
+
+                return card;
+            }
+
+            function renderImageGridVirtual(force = false) {
+                if (!imageGridVirtualEnabled) return;
+                const container = document.getElementById('imageGridContainer');
+                const modal = document.getElementById('imageGridModal');
+                if (!container || !modal) return;
+
+                if (!imageGridItems || imageGridItems.length === 0) {
+                    container.innerHTML = '<div class="image-grid-empty">当前目录没有图片</div>';
+                    return;
+                }
+
+                if (!imageGridRowHeight) {
+                    computeImageGridRowMetrics();
+                }
+
+                const cols = imageGridCols || IMAGE_GRID_COLS_DEFAULT;
+                const rowGap = imageGridRowGap || 0;
+                const rowHeight = imageGridRowHeight || 220;
+                const rowStep = rowHeight + rowGap;
+                const totalRows = Math.ceil(imageGridItems.length / cols);
+                const scrollTop = modal.scrollTop || 0;
+                const containerTop = container.offsetTop || 0;
+                const viewportTop = Math.max(0, scrollTop - containerTop);
+                const viewportHeight = modal.clientHeight || 0;
+                const startRow = Math.max(0, Math.floor(viewportTop / rowStep) - IMAGE_GRID_VIRTUAL_OVERSCAN);
+                const endRow = Math.min(totalRows, Math.ceil((viewportTop + viewportHeight) / rowStep) + IMAGE_GRID_VIRTUAL_OVERSCAN);
+                const startIndex = startRow * cols;
+                const endIndex = Math.min(imageGridItems.length, endRow * cols);
+
+                if (!force &&
+                    imageGridLastRender.startIndex === startIndex &&
+                    imageGridLastRender.endIndex === endIndex &&
+                    imageGridLastRender.cols === cols &&
+                    imageGridLastRender.total === imageGridItems.length) {
+                    return;
+                }
+
+                imageGridLastRender = { startIndex, endIndex, cols, total: imageGridItems.length };
+                if (force) {
+                    imageGridLoadQueue.length = 0;
+                    imageGridLoadingCount = 0;
+                }
+
+                const frag = document.createDocumentFragment();
+                const topSpacer = document.createElement('div');
+                topSpacer.className = 'image-grid-spacer';
+                topSpacer.style.height = `${startRow * rowStep}px`;
+                frag.appendChild(topSpacer);
+
+                const slice = imageGridItems.slice(startIndex, endIndex);
+                slice.forEach((item) => {
+                    frag.appendChild(createImageGridCard(item, imageGridActiveServer, imageGridActiveIsSource));
+                });
+
+                const visibleRows = Math.max(0, endRow - startRow);
+                const totalHeight = totalRows > 0 ? (totalRows * rowStep - rowGap) : 0;
+                const visibleHeight = visibleRows > 0 ? (visibleRows * rowStep - rowGap) : 0;
+                const topHeight = startRow * rowStep;
+                const bottomHeight = Math.max(0, totalHeight - topHeight - visibleHeight);
+                const bottomSpacer = document.createElement('div');
+                bottomSpacer.className = 'image-grid-spacer';
+                bottomSpacer.style.height = `${bottomHeight}px`;
+                frag.appendChild(bottomSpacer);
+
+                container.innerHTML = '';
+                container.appendChild(frag);
+
+                if (!imageGridRowMeasured) {
+                    imageGridRowMeasured = true;
+                    requestAnimationFrame(() => {
+                        const sample = container.querySelector('.image-grid-card');
+                        if (!sample) return;
+                        const rect = sample.getBoundingClientRect();
+                        if (rect && rect.height) {
+                            if (Math.abs(rect.height - imageGridRowHeight) > 2) {
+                                imageGridRowHeight = rect.height;
+                                scheduleImageGridVirtualRender(true);
+                            }
+                        }
+                    });
+                }
+            }
+
+            function pauseImageGridLoading() {
+                imageGridSwitching = true;
+                if (imageGridObserver) {
+                    try { imageGridObserver.disconnect(); } catch (_) {}
+                }
+            }
+
+            function resumeImageGridLoading(modal) {
+                imageGridSwitching = false;
+                if (modal && modal.style.display !== 'none') {
+                    initImageGridObserver(modal);
+                    observePendingImageGridCards();
+                }
+                processImageGridQueue();
+            }
+
+            function applyImageGridColumns(cols) {
+                const normalized = normalizeImageGridCols(cols);
+                if (normalized === imageGridCols && !imageGridSwitching) return;
+                imageGridPendingCols = normalized;
+
+                if (imageGridColsApplyRaf) {
+                    try { cancelAnimationFrame(imageGridColsApplyRaf); } catch (_) {}
+                }
+                imageGridColsApplyRaf = requestAnimationFrame(() => {
+                    const nextCols = imageGridPendingCols;
+                    imageGridPendingCols = null;
+                    if (!nextCols) return;
+                    imageGridCols = nextCols;
+
+                    const btnWrap = document.getElementById('imageGridColsButtons');
+                    if (btnWrap) {
+                        btnWrap.querySelectorAll('.image-grid-cols-btn').forEach(btn => {
+                            const btnCols = normalizeImageGridCols(btn.dataset.cols);
+                            btn.classList.toggle('active', btnCols === nextCols);
+                        });
+                    }
+
+                    const container = document.getElementById('imageGridContainer');
+                    const modal = document.getElementById('imageGridModal');
+                    if (!container) return;
+                    if (imageGridColsRaf) {
+                        try { cancelAnimationFrame(imageGridColsRaf); } catch (_) {}
+                    }
+                    pauseImageGridLoading();
+                    container.classList.add('image-grid-relayout');
+                    imageGridColsRaf = requestAnimationFrame(() => {
+                        const nextThumb = computeImageGridThumbWidth(nextCols);
+                        container.style.setProperty('--image-grid-cols', String(nextCols));
+                        imageGridThumbWidth = nextThumb;
+                        if (imageGridVirtualEnabled) {
+                            imageGridRowHeight = 0;
+                            imageGridRowMeasured = false;
+                            scheduleImageGridVirtualRender(true);
+                        }
+                        imageGridColsRaf = 0;
+                        if (imageGridResumeTimer) {
+                            clearTimeout(imageGridResumeTimer);
+                        }
+                        imageGridResumeTimer = setTimeout(() => {
+                            container.classList.remove('image-grid-relayout');
+                            resumeImageGridLoading(modal);
+                        }, 80);
+                    });
+                });
+            }
 
 	            function ensureImageGridColsControls() {
 	                if (imageGridColsControlsBound) return;
@@ -6121,13 +6378,14 @@
 		                applyImageGridColumns(initialCols);
 		            }
 
-		            function processImageGridQueue() {
-		                if (imageGridLoadingCount >= getImageGridParallelLimit()) return;
-		                const task = imageGridLoadQueue.shift();
-		                if (!task) return;
+            function processImageGridQueue() {
+                if (imageGridSwitching) return;
+                if (imageGridLoadingCount >= getImageGridParallelLimit()) return;
+                const task = imageGridLoadQueue.shift();
+                if (!task) return;
 		                imageGridLoadingCount++;
 		                const thumbWidth = task.width || imageGridThumbWidth || computeImageGridThumbWidth();
-		                getImageBlobUrl(task.server, task.path, { width: thumbWidth, quality: IMAGE_GRID_THUMB_QUALITY })
+                getImageBlobUrl(task.server, task.path, { width: thumbWidth, quality: IMAGE_GRID_THUMB_QUALITY, interp: 'lanczos' })
 		                    .then(url => {
 		                        if (task.imgEl && task.imgEl.dataset.loaded !== '1') {
 		                            task.imgEl.src = url;
@@ -6147,9 +6405,10 @@
 		                    });
 		            }
 
-		            function scheduleImageGridLoad(card) {
-		                const imgEl = card.querySelector('img');
-		                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
+            function scheduleImageGridLoad(card) {
+                if (imageGridSwitching) return;
+                const imgEl = card.querySelector('img');
+                if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
 		                imgEl.dataset.loading = '1';
 		                const thumbWidth = imageGridThumbWidth || computeImageGridThumbWidth();
 		                imageGridLoadQueue.push({
@@ -6193,6 +6452,10 @@
 		            }
 
 	            function initImageGridObserver(rootEl) {
+	                if (imageGridVirtualEnabled) {
+	                    imageGridObserver = null;
+	                    return;
+	                }
 	                if (imageGridObserver) imageGridObserver.disconnect();
 	                if (!('IntersectionObserver' in window)) {
 	                    imageGridObserver = null;
@@ -6220,6 +6483,15 @@
 	                if (imageGridScrollBound || !modal) return;
 	                modal.addEventListener('scroll', () => {
 	                    if (modal.style.display === 'none') return;
+	                    if (imageGridVirtualEnabled) {
+	                        if (!imageGridScrollRaf) {
+	                            imageGridScrollRaf = requestAnimationFrame(() => {
+	                                imageGridScrollRaf = 0;
+	                                scheduleImageGridVirtualRender();
+	                            });
+	                        }
+	                        return;
+	                    }
 	                    if (imageGridEagerMode) return;
 	                    const maxScroll = modal.scrollHeight - modal.clientHeight;
 	                    if (maxScroll <= 0) return;
@@ -6231,11 +6503,16 @@
 	                imageGridScrollBound = true;
 	            }
 
-	            window.addEventListener('resize', () => {
-	                const modal = document.getElementById('imageGridModal');
-	                if (!modal || modal.style.display === 'none') return;
-	                scheduleImageGridThumbUpdate();
-	            });
+            window.addEventListener('resize', () => {
+                const modal = document.getElementById('imageGridModal');
+                if (!modal || modal.style.display === 'none') return;
+                scheduleImageGridThumbUpdate();
+                if (imageGridVirtualEnabled) {
+                    imageGridRowHeight = 0;
+                    imageGridRowMeasured = false;
+                    scheduleImageGridVirtualRender(true);
+                }
+            });
 
             async function openImageGrid(isSource) {
                 const serverSelectId = isSource ? 'sourceServer' : 'targetServer';
@@ -6250,13 +6527,30 @@
                     return;
                 }
 
-	                const modal = document.getElementById('imageGridModal');
-	                const container = document.getElementById('imageGridContainer');
-	                if (!modal || !container) return;
-	                imageGridEagerMode = false;
-	                imageGridEagerQueued = false;
-	                ensureImageGridColsControls();
-	                modal.style.display = 'block';
+                const modal = document.getElementById('imageGridModal');
+                const container = document.getElementById('imageGridContainer');
+                if (!modal || !container) return;
+                imageGridSwitching = false;
+                imageGridPendingCols = null;
+                imageGridVirtualForce = false;
+                if (imageGridResumeTimer) {
+                    clearTimeout(imageGridResumeTimer);
+                    imageGridResumeTimer = 0;
+                }
+                imageGridEagerMode = false;
+                imageGridEagerQueued = false;
+                imageGridItems = [];
+                imageGridVirtualEnabled = false;
+                imageGridRowHeight = 0;
+                imageGridRowGap = 0;
+                imageGridRowMeasured = false;
+                imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
+                imageGridActiveServer = server;
+                imageGridActiveIsSource = isSource;
+                imageGridLoadQueue.length = 0;
+                imageGridLoadingCount = 0;
+                ensureImageGridColsControls();
+                modal.style.display = 'block';
 	                document.body.style.overflow = 'hidden';
 	                ensureImageGridScrollWatcher(modal);
 	                applyImageGridColumns(imageGridCols);
@@ -6267,40 +6561,13 @@
                 const renderBatch = (items, server) => {
                     const frag = document.createDocumentFragment();
                     for (const item of items) {
-                        const card = document.createElement('div');
-                        card.className = 'image-grid-card';
-                        card.dataset.server = server;
-                        card.dataset.path = item.path;
-
-                        const imgEl = document.createElement('img');
-                        imgEl.alt = item.name;
-                        imgEl.loading = 'lazy';
-                        imgEl.decoding = 'async';
-                        imgEl.dataset.loaded = '0';
-
-                        const nameEl = document.createElement('div');
-                        nameEl.className = 'image-grid-name';
-                        nameEl.textContent = item.name;
-
-                        card.appendChild(imgEl);
-                        card.appendChild(nameEl);
-                        card.addEventListener('click', () => {
-                            previewImage(server, item.path, item.name, isSource);
-                        });
-
-                        frag.appendChild(card);
-                        if (imageGridEagerMode) {
-                            loadImageCardImmediately(card);
-                        } else if (imageGridObserver) {
-                            imageGridObserver.observe(card);
-                        } else {
-                            loadImageCardImmediately(card);
-                        }
+                        frag.appendChild(createImageGridCard(item, server, isSource));
                     }
                     container.appendChild(frag);
                 };
 
                 const appendImagesChunked = (images, server, chunkSize = 60) => {
+                    if (imageGridVirtualEnabled) return;
                     container.innerHTML = '';
                     let idx = 0;
                     const step = () => {
@@ -6317,8 +6584,15 @@
                 const ensureAndRender = async () => {
                     try {
                         const initial = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
-                        if (initial.length) {
-                            appendImagesChunked(initial, server);
+                        imageGridItems = initial.slice();
+                        const switchedInitial = setImageGridVirtualEnabled(shouldUseImageGridVirtual(imageGridItems.length));
+                        if (imageGridVirtualEnabled) {
+                            if (switchedInitial) {
+                                container.innerHTML = '';
+                            }
+                            scheduleImageGridVirtualRender(true);
+                        } else if (imageGridItems.length) {
+                            appendImagesChunked(imageGridItems, server);
                         } else {
                             container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
                         }
@@ -6338,10 +6612,19 @@
                                 if (!data.success) break;
                                 const pageFiles = (data.files || []).filter(it => it && !it.is_directory && isImageFile(it.name));
                                 if (pageFiles.length) {
-                                    if (!container.innerHTML || container.innerHTML.includes('加载中')) {
-                                        container.innerHTML = '';
+                                    imageGridItems.push(...pageFiles);
+                                    const switched = setImageGridVirtualEnabled(shouldUseImageGridVirtual(imageGridItems.length));
+                                    if (imageGridVirtualEnabled) {
+                                        if (switched) {
+                                            container.innerHTML = '';
+                                        }
+                                        scheduleImageGridVirtualRender(switched);
+                                    } else {
+                                        if (!container.innerHTML || container.innerHTML.includes('加载中')) {
+                                            container.innerHTML = '';
+                                        }
+                                        renderBatch(pageFiles, server);
                                     }
-                                    renderBatch(pageFiles, server);
                                 }
                                 state.fullItems = (state.fullItems || []).concat(data.files || []);
                                 state.total = data.total_count || data.file_count || state.total || 0;
@@ -6353,11 +6636,11 @@
                             }
                         }
 
-                        const imgs = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
-                        if (!imgs.length) {
+                        const imgsCount = imageGridItems.length;
+                        if (!imgsCount) {
                             container.innerHTML = '<div class="image-grid-empty">当前目录没有图片</div>';
                         } else {
-                            addLogInfo(`🖼️ 已展开 ${imgs.length} 张图片`);
+                            addLogInfo(`🖼️ 已展开 ${imgsCount} 张图片`);
                         }
                     } catch (e) {
                         container.innerHTML = `<div class="image-grid-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
@@ -6368,25 +6651,55 @@
                 ensureAndRender();
             }
 
-	            function closeImageGrid() {
-	                const modal = document.getElementById('imageGridModal');
-	                const container = document.getElementById('imageGridContainer');
-	                if (modal) modal.style.display = 'none';
-	                if (container) container.innerHTML = '';
-	                document.body.style.overflow = '';
-	                if (imageGridObserver) {
-	                imageGridObserver.disconnect();
-	                }
-	                if (imageGridResizeRaf) {
-	                    try { cancelAnimationFrame(imageGridResizeRaf); } catch (_) {}
-	                    imageGridResizeRaf = 0;
-	                }
-	                imageGridThumbWidth = 0;
-	                imageGridEagerMode = false;
-	                imageGridEagerQueued = false;
-	                imageGridLoadQueue.length = 0;
-	                imageGridLoadingCount = 0;
-	            }
+            function closeImageGrid() {
+                const modal = document.getElementById('imageGridModal');
+                const container = document.getElementById('imageGridContainer');
+                if (modal) modal.style.display = 'none';
+                if (container) container.innerHTML = '';
+                document.body.style.overflow = '';
+                imageGridSwitching = false;
+                if (imageGridResumeTimer) {
+                    clearTimeout(imageGridResumeTimer);
+                    imageGridResumeTimer = 0;
+                }
+                if (imageGridObserver) {
+                    imageGridObserver.disconnect();
+                    imageGridObserver = null;
+                }
+                if (imageGridColsApplyRaf) {
+                    try { cancelAnimationFrame(imageGridColsApplyRaf); } catch (_) {}
+                    imageGridColsApplyRaf = 0;
+                }
+                if (imageGridColsRaf) {
+                    try { cancelAnimationFrame(imageGridColsRaf); } catch (_) {}
+                    imageGridColsRaf = 0;
+                }
+                if (imageGridResizeRaf) {
+                    try { cancelAnimationFrame(imageGridResizeRaf); } catch (_) {}
+                    imageGridResizeRaf = 0;
+                }
+                if (imageGridRenderRaf) {
+                    try { cancelAnimationFrame(imageGridRenderRaf); } catch (_) {}
+                    imageGridRenderRaf = 0;
+                }
+                if (imageGridScrollRaf) {
+                    try { cancelAnimationFrame(imageGridScrollRaf); } catch (_) {}
+                    imageGridScrollRaf = 0;
+                }
+                imageGridThumbWidth = 0;
+                imageGridEagerMode = false;
+                imageGridEagerQueued = false;
+                imageGridLoadQueue.length = 0;
+                imageGridLoadingCount = 0;
+                imageGridItems = [];
+                imageGridVirtualEnabled = false;
+                imageGridRowHeight = 0;
+                imageGridRowGap = 0;
+                imageGridRowMeasured = false;
+                imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
+                imageGridActiveServer = '';
+                imageGridActiveIsSource = true;
+            }
 
             const EDITOR_THEME_KEY = 'turbofile_editor_theme';
 

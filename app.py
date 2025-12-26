@@ -3786,6 +3786,7 @@ def api_image_stream():
     new_w = _safe_int(request.args.get('width', 0))
     new_h = _safe_int(request.args.get('height', 0))
     quality = _safe_int(request.args.get('quality', 0))
+    interp = (request.args.get('interp') or '').strip().lower()
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
 
@@ -3818,7 +3819,10 @@ def api_image_stream():
 
             target_w = max(1, int(w * ratio))
             target_h = max(1, int(h * ratio))
-            resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            interp_method = cv2.INTER_AREA
+            if interp in {'lanczos', 'lanczos4', 'sharp'}:
+                interp_method = cv2.INTER_LANCZOS4
+            resized = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
             q = quality if 1 <= quality <= 95 else 82
             ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
             if not ok:
