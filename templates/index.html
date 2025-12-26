@@ -494,10 +494,54 @@
 	            background: rgba(59,130,246,0.14);
 	            color: #93c5fd;
 	        }
-	        /* 预览层在网格之上，确保ESC只关闭预览，不影响网格 */
-	        #imagePreviewModal {
-	            z-index: 1100 !important;
-	        }
+        /* 预览层在网格之上，确保ESC只关闭预览，不影响网格 */
+        #imagePreviewModal {
+            z-index: 1100 !important;
+        }
+        .image-preview-nav {
+            position: absolute;
+            left: 50%;
+            bottom: 18px;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 100px;
+            z-index: 1201;
+            pointer-events: auto;
+        }
+        .image-preview-nav-btn {
+            width: 52px;
+            height: 52px;
+            border: none;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.18);
+            color: #fff;
+            font-size: 26px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+            transition: background 120ms ease, transform 120ms ease;
+        }
+        .image-preview-nav-btn:hover {
+            background: rgba(255, 255, 255, 0.28);
+            transform: translateY(-1px);
+        }
+        .image-preview-nav-btn:active {
+            transform: translateY(0);
+        }
+        #imagePreviewCaption {
+            position: absolute;
+            bottom: 78px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-size: 14px;
+            background: rgba(0,0,0,0.35);
+            padding: 6px 10px;
+            border-radius: 10px;
+        }
 	        #imageGridContainer {
 	            display: grid;
 	            --image-grid-cols: 8;
@@ -1469,6 +1513,102 @@
             font-size: 0.75rem;
             font-family: 'JetBrains Mono', monospace;
             box-shadow: var(--shadow-sm);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            flex-wrap: nowrap;
+        }
+        .path-left {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .path-display {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+        .path-display.dropdown-open {
+            overflow: visible;
+        }
+        .path-display[data-collapsed="true"] {
+            display: flex;
+            align-items: center;
+            white-space: normal;
+        }
+        .path-display[data-editing="true"] {
+            display: block;
+            overflow: visible;
+            white-space: normal;
+        }
+        .path-display-leading {
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .path-display.dropdown-open .path-display-leading,
+        .path-display.dropdown-open .path-display-tail {
+            overflow: visible;
+        }
+        .path-display-tail {
+            flex: 0 1 auto;
+            min-width: 0;
+            max-width: 60%;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .path-ellipsis {
+            color: var(--text-secondary);
+            padding: 0 2px;
+        }
+        .path-actions {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            flex-shrink: 0;
+        }
+        .path-nav .drive-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 1px 6px;
+            border-radius: 6px;
+            background: rgba(59, 130, 246, 0.08);
+            border: 1px solid transparent;
+        }
+        .path-nav .drive-toggle::after {
+            display: none;
+        }
+        .path-nav .drive-toggle:hover {
+            background: rgba(59, 130, 246, 0.16);
+        }
+        .path-nav .drive-pill {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 3px;
+            font-weight: 600;
+        }
+        .path-nav .drive-icon {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+        }
+        .path-nav .drive-letter {
+            font-size: 0.86rem;
+            letter-spacing: 0.02em;
+        }
+        .path-nav .drive-suffix {
+            font-size: 0.70rem;
+            color: var(--text-secondary);
+        }
+        .path-nav .drive-caret {
+            font-size: 0.6rem;
+            color: var(--text-secondary);
         }
 
         /* Windows 磁盘下拉视觉优化：更小字体，风格与整体融合 */
@@ -1623,28 +1763,8 @@
         <div class="row flex-shrink-0" style="margin-bottom: 2px;">
             <div class="col-12">
                 <div class="d-flex align-items-center justify-content-center">
-                    <!-- TAIHO公司整体 (LOGO + TAIHO + 泰禾) -->
-                    <div class="company-brand d-flex align-items-center" style="margin-right: 40px;">
-                        <svg width="160" height="32" viewBox="0 0 160 36" xmlns="http://www.w3.org/2000/svg">
-                            <!-- TAIHO标志性几何图形 -->
-                            <g>
-                                <!-- 左侧图标 - 现代化几何设计 -->
-                                <rect x="2" y="6" width="10" height="24" fill="#14b8a6" rx="2"/>
-                                <rect x="16" y="6" width="10" height="24" fill="#0891b2" rx="2"/>
-                                <!-- 连接元素 -->
-                                <circle cx="7" cy="9" r="2" fill="#06b6d4"/>
-                                <circle cx="21" cy="9" r="2" fill="#0284c7"/>
-
-                                <!-- TAIHO文字 - 与LOGO保持相同距离，使用与泰禾相同的颜色 -->
-                                <text x="32" y="26" font-family="'Segoe UI', Arial, sans-serif" font-size="18" font-weight="700" fill="#14b8a6">TAIHO</text>
-                                <!-- 泰禾文字 - 与TAIHO保持与LOGO到TAIHO相同的距离 -->
-                                <text x="102" y="26" font-family="'Microsoft YaHei', sans-serif" font-size="18" font-weight="700" fill="#14b8a6">泰禾</text>
-                            </g>
-                        </svg>
-                    </div>
-
-                    <!-- 极速传标题整体 - 与目标服务器左边对齐 -->
-                    <div class="product-brand d-flex align-items-center" style="margin-left: 15px;">
+                    <!-- 极速传标题整体 -->
+                    <div class="product-brand d-flex align-items-center">
                         <h4 class="main-title d-flex align-items-center" style="margin: 0; line-height: 1;">
                             <i class="bi bi-lightning-charge-fill" style="color: #ffc107; font-size: 1.0em; margin-right: 6px;"></i>
                             <span>极速传</span>
@@ -1710,10 +1830,12 @@
                             </div>
                         </div>
                     </div>
-                    <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;" onclick="maybeStartPathInlineEdit(event, true)">
-                        <i class="bi bi-geo-alt-fill text-primary me-1"></i>
-                        <span id="sourcePathDisplay">/</span>
-                        <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                    <div id="sourcePathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;" onclick="maybeStartPathInlineEdit(event, true)">
+                        <div class="path-left">
+                            <i class="bi bi-geo-alt-fill text-primary me-1"></i>
+                            <span id="sourcePathDisplay" class="path-display">/</span>
+                        </div>
+                        <div class="path-actions">
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(true, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -1765,10 +1887,12 @@
                             </div>
                         </div>
                     </div>
-                    <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem; position: relative;" onclick="maybeStartPathInlineEdit(event, false)">
-                        <i class="bi bi-geo-alt-fill text-success me-1"></i>
-                        <span id="targetPathDisplay">/</span>
-                        <div style="position:absolute; right:6px; top:50%; transform: translateY(-50%); display: flex; gap: 2px;">
+                    <div id="targetPathNav" class="path-nav" style="display: none; padding: 3px 8px; font-size: 0.8rem;" onclick="maybeStartPathInlineEdit(event, false)">
+                        <div class="path-left">
+                            <i class="bi bi-geo-alt-fill text-success me-1"></i>
+                            <span id="targetPathDisplay" class="path-display">/</span>
+                        </div>
+                        <div class="path-actions">
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(false, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -4554,18 +4678,70 @@
 
             const isWindows = currentPath && currentPath.includes(':');
 
+            function buildSegmentLink(label, path) {
+                return `<a href="#" class="path-segment" onclick="navigateToPath('${path}', ${isSource})">${label}</a>`;
+            }
+
+            function renderSegmentsHtml(segments, leadingSeparator = false) {
+                return segments.map((seg, idx) => {
+                    const sep = (idx === 0 ? (leadingSeparator ? '<span class="path-separator">/</span>' : '') : '<span class="path-separator">/</span>');
+                    const content = seg.html || buildSegmentLink(seg.label, seg.path);
+                    return `${sep}${content}`;
+                }).join('');
+            }
+
+            function schedulePathCollapse(segments, pathValue) {
+                if (!display) return;
+                if (display._pathCollapseRaf) {
+                    cancelAnimationFrame(display._pathCollapseRaf);
+                }
+                display._pathCollapseRaf = requestAnimationFrame(() => {
+                    display._pathCollapseRaf = null;
+                    if (!display.isConnected) return;
+                    if (display.dataset && (display.dataset.editing === 'true' || display.dataset.editing === 'committing')) return;
+                    if ((display.dataset.currentPath || '/') !== pathValue) return;
+                    if (display.scrollWidth <= display.clientWidth + 1) {
+                        display.dataset.collapsed = '';
+                        return;
+                    }
+
+                    const tailCount = Math.min(2, Math.max(1, segments.length - 2));
+                    const headCount = Math.min(2, segments.length - tailCount);
+                    const headSegments = segments.slice(0, headCount);
+                    const tailSegments = segments.slice(-tailCount);
+                    const leadingHtml = renderSegmentsHtml(headSegments);
+                    const tailHtml = renderSegmentsHtml(tailSegments, true);
+                    display.innerHTML = `
+                        <span class="path-display-leading">${leadingHtml}<span class="path-separator">/</span><span class="path-ellipsis">…</span></span>
+                        <span class="path-display-tail">${tailHtml}</span>
+                    `;
+                    display.dataset.collapsed = 'true';
+                });
+            }
+
             if (currentPath && currentPath !== '/') {
-                nav.style.display = 'block';
+                nav.style.display = 'flex';
                 const parts = currentPath.split('/').filter(part => part);
+                const segments = [];
                 let html = '';
 
                 if (isWindows) {
                     // Windows路径导航：以驱动器为根，例如 C:/，并在驱动器处提供下拉磁盘切换
                     const drive = parts[0]; // 例如 C:
+                    const driveLetter = (drive || '').replace(':', '').toUpperCase();
+                    const driveLabel = driveLetter ? `${driveLetter}盘` : drive;
 
                     // 动态构建磁盘下拉（仅当已拿到磁盘列表时才展示下拉；否则保持普通链接，不显示任何占位文案）
                     const drives = (isSource ? windowsDrivesSource : windowsDrivesTarget) || [];
                     if (drives.length > 0) {
+                        const currentDriveMeta = drives.find(d => {
+                            const letterRaw = (d.letter || '').toUpperCase();
+                            const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
+                            return letter === drive.toUpperCase();
+                        });
+                        const driveIcon = currentDriveMeta && currentDriveMeta.type === 'network'
+                            ? 'bi-globe2'
+                            : 'bi-hdd-fill';
                         const driveMenuItems = drives.map(d => {
                             const letterRaw = (d.letter || '').toUpperCase();
                             const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
@@ -4575,44 +4751,63 @@
                             const active = letter === drive.toUpperCase() ? ' active' : '';
                             return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive('${letter}', ${isSource}); return false;">${iconHtml}${d.name}</a></li>`;
                         }).join('');
-                        html += `
-                            <div class="dropdown d-inline-block">
-                                <a href="#" class="path-segment dropdown-toggle" data-bs-toggle="dropdown" onclick="event.preventDefault();">${drive}/</a>
-                                <ul class="dropdown-menu">${driveMenuItems}</ul>
-                            </div>
-                        `;
+                        segments.push({
+                            html: `
+                                <div class="dropdown d-inline-block">
+                                    <a href="#" class="path-segment dropdown-toggle drive-toggle" data-bs-toggle="dropdown" onclick="event.preventDefault();">
+                                        <span class="drive-pill">
+                                            <i class="bi ${driveIcon} drive-icon"></i>
+                                            <span class="drive-letter">${driveLetter || drive}</span>
+                                            <span class="drive-suffix">盘</span>
+                                        </span>
+                                        <i class="bi bi-chevron-down drive-caret"></i>
+                                    </a>
+                                    <ul class="dropdown-menu">${driveMenuItems}</ul>
+                                </div>
+                            `
+                        });
                     } else {
                         // 未加载磁盘列表：显示为普通可点击路径段，不展示任何“加载中”字样
-                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${drive}/', ${isSource})">${drive}/</a>`;
+                        segments.push({ label: driveLabel, path: `${drive}/` });
                     }
 
                     let buildPath = drive;
                     // 其他子路径
                     parts.slice(1).forEach(part => {
                         buildPath += '/' + part;
-                        html += '<span class="path-separator">/</span>';
-                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
+                        segments.push({ label: part, path: buildPath });
                     });
-                    display.innerHTML = html;
                 } else {
                     // Linux路径导航：以/为根
                     let buildPath = '';
-                    html = '<a href="#" class="path-segment" onclick="navigateToPath(\'/\', ' + isSource + ')">根目录</a>';
+                    segments.push({ label: '根目录', path: '/' });
                     parts.forEach(part => {
                         buildPath += '/' + part;
-                        html += '<span class="path-separator">/</span>';
-                        html += `<a href="#" class="path-segment" onclick="navigateToPath('${buildPath}', ${isSource})">${part}</a>`;
+                        segments.push({ label: part, path: buildPath });
                     });
-                    display.innerHTML = html;
                 }
+
+                display.innerHTML = `<span class="path-display-leading">${renderSegmentsHtml(segments)}</span>`;
+                display.dataset.collapsed = '';
+                const pathValue = currentPath || '/';
+                display.dataset.currentPath = pathValue;
+                display.title = pathValue;
+                schedulePathCollapse(segments, pathValue);
             } else {
-                nav.style.display = 'block';
-                display.innerHTML = '<span class="path-segment">根目录</span>';
+                nav.style.display = 'flex';
+                display.innerHTML = '<span class="path-display-leading"><span class="path-segment">根目录</span></span>';
+                const pathValue = currentPath || '/';
+                if (display) {
+                    display.dataset.currentPath = pathValue;
+                    display.title = pathValue;
+                    display.dataset.collapsed = '';
+                }
             }
 
             // 同步当前路径文本（用于内联编辑初始内容）
             if (display) {
                 display.dataset.currentPath = currentPath || '/';
+                display.title = currentPath || '/';
             }
         }
 
@@ -4682,6 +4877,16 @@
             if (display) display.dataset.editing = '';
             updatePathNavigation(isSource ? currentSourcePath : currentTargetPath, isSource);
         }
+
+        // Windows盘符下拉展开时允许菜单溢出显示，避免被路径省略裁剪
+        document.addEventListener('show.bs.dropdown', (event) => {
+            const display = event.target.closest('.path-display');
+            if (display) display.classList.add('dropdown-open');
+        });
+        document.addEventListener('hidden.bs.dropdown', (event) => {
+            const display = event.target.closest('.path-display');
+            if (display) display.classList.remove('dropdown-open');
+        });
 
             // Windows路径检测
             function isWindowsPath(p) {
@@ -6880,7 +7085,11 @@
 
                 modal.addEventListener('mousedown', (e) => {
                     if (modal.style.display === 'none') return;
-                    if (e.target.closest('#imagePreviewCloseBtn')) return;
+                    if (e.target.closest('#imagePreviewCloseBtn') ||
+                        e.target.closest('#imagePrevBtn') ||
+                        e.target.closest('#imageNextBtn')) {
+                        return;
+                    }
                     dragging = true;
                     startX = e.clientX - imageOffsetX;
                     startY = e.clientY - imageOffsetY;
@@ -7829,11 +8038,13 @@
         <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
             <img src="" alt="预览" style="max-width: 98vw; max-height: 95vh; object-fit: contain; display:block; transition: transform 120ms ease; transform-origin: center center;" />
         </div>
-        <button id="imagePrevBtn" aria-label="上一张" title="上一张"
-                style="position:absolute; left:20px; top:50%; transform: translateY(-50%); width:48px; height:48px; border:none; border-radius:50%; background:rgba(255,255,255,0.2); color:#fff; font-size:24px; cursor:pointer;">‹</button>
-        <button id="imageNextBtn" aria-label="下一张" title="下一张"
-                style="position:absolute; right:20px; top:50%; transform: translateY(-50%); width:48px; height:48px; border:none; border-radius:50%; background:rgba(255,255,255,0.2); color:#fff; font-size:24px; cursor:pointer;">›</button>
-        <div id="imagePreviewCaption" style="position:absolute; bottom:18px; left:50%; transform: translateX(-50%); color:#fff; font-size:14px; background:rgba(0,0,0,0.35); padding:6px 10px; border-radius:10px;"></div>
+        <div class="image-preview-nav" aria-label="图片切换">
+            <button id="imagePrevBtn" class="image-preview-nav-btn" aria-label="上一张" title="上一张"
+                    onclick="event.stopImmediatePropagation(); showImageAt(ImageViewer.index - 1);">‹</button>
+            <button id="imageNextBtn" class="image-preview-nav-btn" aria-label="下一张" title="下一张"
+                    onclick="event.stopImmediatePropagation(); showImageAt(ImageViewer.index + 1);">›</button>
+        </div>
+        <div id="imagePreviewCaption"></div>
     </div>
 
 	    <!-- 图片网格视图 -->
