@@ -888,19 +888,6 @@
             cursor: pointer !important;
         }
 
-        .drag-preview {
-            position: fixed;
-            pointer-events: none;
-            z-index: 1000;
-            background: var(--gradient-primary);
-            color: white;
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-size: 0.875rem;
-            font-weight: 500;
-            box-shadow: var(--shadow-lg);
-            backdrop-filter: blur(10px);
-        }
 
         /* Windows 风格右键菜单 */
         .file-context-menu {
@@ -2208,6 +2195,19 @@
         // 通用对话框（替代浏览器 alert/confirm/prompt）
         const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false };
 
+        const DRAG_TRANSFER_TYPE = 'application/x-turbofile-transfer';
+        let dragTransferPayload = null;
+        const DRAG_GHOST_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+        let dragGhostImage = null;
+
+        function getDragGhostImage() {
+            if (!dragGhostImage) {
+                dragGhostImage = new Image();
+                dragGhostImage.src = DRAG_GHOST_PIXEL;
+            }
+            return dragGhostImage;
+        }
+
         function _getUiDialogElements() {
             return {
                 modal: document.getElementById('uiDialogModal'),
@@ -2479,6 +2479,7 @@
                 row.dataset.idx = fileIdx;
                 row.onmousedown = (event) => handleFileMouseDown(event, file.path, file.name, file.is_directory, fileId, isSource);
                 row.ondblclick = function() { handleFileItemDblClick(row, isSource); };
+                attachRowDragHandlers(row, isSource);
                 row.innerHTML = `
                     <i class="bi ${icon}"></i>
                     <div class="file-info">
@@ -4493,6 +4494,7 @@
                 row.dataset.idx = fileIdx;
                 row.onmousedown = (event) => handleFileMouseDown(event, file.path, file.name, file.is_directory, fileId, isSource);
                 row.ondblclick = function() { handleFileItemDblClick(row, isSource); };
+                attachRowDragHandlers(row, isSource);
                 row.innerHTML = `
                     <i class="bi ${icon}"></i>
                     <div class="file-info">
@@ -4558,7 +4560,6 @@
 
         function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
             if (event.button !== 0) return; // 仅左键
-            event.preventDefault();
 
             lastActivePanel = isSource ? 'source' : 'target';
 
@@ -4956,6 +4957,12 @@
 
             const idx = Number(fileElement.dataset.idx || -1);
 
+            if (!event.shiftKey && !event.ctrlKey && !event.metaKey && fileElement.classList.contains('selected')) {
+                lastSelectedIndex[isSource ? 'source' : 'target'] = idx;
+                updateSelectionInfo();
+                return;
+            }
+
             if (event.shiftKey && (lastSelectedIndex[isSource ? 'source' : 'target'] !== null)) {
                 const anchor = lastSelectedIndex[isSource ? 'source' : 'target'];
                 selectRange(isSource, anchor, idx);
@@ -5217,6 +5224,124 @@
             });
             lastSelectedIndex.source = null;
             lastSelectedIndex.target = null;
+        }
+
+        function getCurrentTransferMode() {
+            const modeRadio = document.querySelector('input[name="transferMode"]:checked');
+            return modeRadio ? modeRadio.value : (currentTransferMode || 'copy');
+        }
+
+        function ensureDragSelection(row, isSource) {
+            if (!row || row.classList.contains('selected')) return;
+            clearAllSelections();
+            row.classList.add('selected');
+            const item = {
+                path: row.dataset.path,
+                name: row.dataset.name,
+                is_directory: String(row.dataset.isDirectory).toLowerCase() === 'true'
+            };
+            if (isSource) {
+                selectedSourceFiles = [item];
+                lastSelectedIndex.source = Number(row.dataset.idx || 0);
+            } else {
+                selectedTargetFiles = [item];
+                lastSelectedIndex.target = Number(row.dataset.idx || 0);
+            }
+            updateSelectionInfo();
+        }
+
+        function attachRowDragHandlers(row, isSource) {
+            if (!row || row.dataset.dragBound === 'true') return;
+            if (row.classList.contains('temp-new') || row.classList.contains('temp-new-file')) return;
+            row.draggable = true;
+            row.dataset.dragBound = 'true';
+            row.addEventListener('dragstart', (event) => handleRowDragStart(event, isSource));
+            row.addEventListener('dragend', handleRowDragEnd);
+        }
+
+        function buildDragPayload(isSource) {
+            const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
+            return { panel: isSource ? 'source' : 'target', files, mode: getCurrentTransferMode() };
+        }
+
+        function handleRowDragStart(event, isSource) {
+            const row = event.currentTarget;
+            if (!row || row.dataset.editing === 'true') {
+                event.preventDefault();
+                return;
+            }
+            ensureDragSelection(row, isSource);
+            const payload = buildDragPayload(isSource);
+            if (!payload.files || payload.files.length === 0) {
+                event.preventDefault();
+                return;
+            }
+
+            event.dataTransfer.effectAllowed = 'copyMove';
+            event.dataTransfer.setData(DRAG_TRANSFER_TYPE, JSON.stringify(payload));
+            const mode = payload.mode === 'move' ? 'move' : 'copy';
+            event.dataTransfer.setData('text/plain', `${payload.files.length}项${mode === 'move' ? '剪切' : '复制'}`);
+            dragTransferPayload = payload;
+            const ghost = getDragGhostImage();
+            if (ghost && event.dataTransfer.setDragImage) {
+                event.dataTransfer.setDragImage(ghost, 0, 0);
+            }
+        }
+
+        function handleRowDragEnd() {
+            dragTransferPayload = null;
+            document.querySelectorAll('.file-browser.drag-target').forEach(el => el.classList.remove('drag-target'));
+        }
+
+        function setupDragAndDrop() {
+            const source = document.getElementById('sourceFileBrowser');
+            const target = document.getElementById('targetFileBrowser');
+            const bind = (container, isSourcePanel) => {
+                if (!container) return;
+                const canHandle = (e) => {
+                    const types = e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+                    return dragTransferPayload !== null || types.includes(DRAG_TRANSFER_TYPE);
+                };
+                container.addEventListener('dragenter', (e) => {
+                    if (!canHandle(e)) return;
+                    e.preventDefault();
+                });
+                container.addEventListener('dragover', (e) => {
+                    if (!canHandle(e)) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = getCurrentTransferMode() === 'move' ? 'move' : 'copy';
+                });
+                container.addEventListener('dragleave', (e) => {
+                    if (e.relatedTarget && container.contains(e.relatedTarget)) return;
+                });
+                container.addEventListener('drop', async (e) => {
+                    if (!canHandle(e)) return;
+                    e.preventDefault();
+                    let payload = dragTransferPayload;
+                    if (!payload) {
+                        try { payload = JSON.parse(e.dataTransfer.getData(DRAG_TRANSFER_TYPE)); } catch (_) {}
+                    }
+                    if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return;
+
+                    const fromPanel = payload.panel;
+                    const toPanel = isSourcePanel ? 'source' : 'target';
+                    if (fromPanel === toPanel) return;
+
+                    const mode = getCurrentTransferMode();
+                    const sourceServer = fromPanel === 'source'
+                        ? document.getElementById('sourceServer').value
+                        : document.getElementById('targetServer').value;
+                    const targetServer = fromPanel === 'source'
+                        ? document.getElementById('targetServer').value
+                        : document.getElementById('sourceServer').value;
+                    const targetPath = isSourcePanel ? currentSourcePath : currentTargetPath;
+                    const direction = fromPanel === 'source' ? 'ltr' : 'rtl';
+
+                    await startTransferWithParams(sourceServer, targetServer, targetPath, payload.files, mode, direction);
+                });
+            };
+            bind(source, true);
+            bind(target, false);
         }
 
         function selectAll(isSource) {
@@ -7950,6 +8075,7 @@
             // 初始化面板调整功能
             initializeResizers();
             bindContextMenus();
+            setupDragAndDrop();
 
             // 大目录滚动懒加载
             const sourceContainer = document.getElementById('sourceFileBrowser');
