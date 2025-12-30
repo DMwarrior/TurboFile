@@ -3771,7 +3771,14 @@ def index():
     with CLIENT_PATH_LOCK:
         remembered_paths = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
 
-    return render_template('index.html', servers=SERVERS, client_ipv4=client_ipv4, is_admin_client=is_admin_client, remembered_paths=remembered_paths)
+    return render_template(
+        'index.html',
+        servers=SERVERS,
+        client_ipv4=client_ipv4,
+        is_admin_client=is_admin_client,
+        remembered_paths=remembered_paths,
+        transfer_bytes_enabled=TRANSFER_BYTES_CONFIG.get('enabled', True)
+    )
 
 @app.route('/api/image/stream')
 def api_image_stream():

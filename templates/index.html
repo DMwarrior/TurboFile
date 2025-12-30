@@ -377,6 +377,12 @@
         .progress-container {
             display: none;
         }
+        .progress-container .stat-item {
+            align-items: flex-start !important;
+        }
+        .progress-container .stat-item i {
+            margin-top: 2px;
+        }
 
         /* Sublime 风格 minimap */
         /* 查找/替换面板 */
@@ -1975,9 +1981,10 @@
                                     准备传输...
                                 </div>
                             </div>
+                            {% set progress_col_class = 'col-6 col-md-3' if transfer_bytes_enabled else 'col-6 col-md-4' %}
                             <div class="row g-2">
-                                <div class="col-6 col-md-3">
-                                    <div class="d-flex align-items-center">
+                                <div class="{{ progress_col_class }}">
+                                    <div class="d-flex align-items-center stat-item">
                                         <i class="bi bi-speedometer text-info me-1" style="font-size: 0.85rem;"></i>
                                         <div>
                                             <small class="text-muted" style="font-size: 0.75em;">速度</small>
@@ -1985,8 +1992,9 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="col-6 col-md-3">
-                                    <div class="d-flex align-items-center">
+                                {% if transfer_bytes_enabled %}
+                                <div class="{{ progress_col_class }}">
+                                    <div class="d-flex align-items-center stat-item">
                                         <i class="bi bi-download text-success me-1" style="font-size: 0.85rem;"></i>
                                         <div>
                                             <small class="text-muted" style="font-size: 0.75em;">已传输</small>
@@ -1994,8 +2002,9 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="col-6 col-md-3">
-                                    <div class="d-flex align-items-center">
+                                {% endif %}
+                                <div class="{{ progress_col_class }}">
+                                    <div class="d-flex align-items-center stat-item">
                                         <i class="bi bi-clock text-warning me-1" style="font-size: 0.85rem;"></i>
                                         <div>
                                             <small class="text-muted" style="font-size: 0.75em;">已用时间</small>
@@ -2003,8 +2012,8 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="col-6 col-md-3">
-                                    <div class="d-flex align-items-center">
+                                <div class="{{ progress_col_class }}">
+                                    <div class="d-flex align-items-center stat-item">
                                         <i class="bi bi-info-circle text-primary me-1" style="font-size: 0.85rem;"></i>
                                         <div>
                                             <small class="text-muted" style="font-size: 0.75em;">状态</small>
@@ -2030,13 +2039,13 @@
             <i class="bi bi-pencil-square text-warning"></i>
             <span>重命名</span>
         </div>
-        <div class="menu-item" data-action="new-file">
-            <i class="bi bi-file-earmark-plus text-primary"></i>
-            <span>新建文件</span>
-        </div>
         <div class="menu-item" data-action="new-folder">
             <i class="bi bi-folder-plus text-success"></i>
             <span>新建文件夹</span>
+        </div>
+        <div class="menu-item" data-action="new-file">
+            <i class="bi bi-file-earmark-plus text-primary"></i>
+            <span>新建文件</span>
         </div>
         <div class="menu-item" data-action="run">
             <i class="bi bi-play-fill text-primary"></i>
@@ -3730,12 +3739,10 @@
                 if (result.success) {
                     addLogSuccess(`✅ ${result.message}`);
 
-                    if (!optimisticAdded) {
-                        if (type === 'source') {
-                            refreshSourceAsync({ silent: true });
-                        } else {
-                            refreshTargetAsync({ silent: true });
-                        }
+                    if (type === 'source') {
+                        refreshSourceAsync({ silent: true });
+                    } else {
+                        refreshTargetAsync({ silent: true });
                     }
                 } else {
                     addLogError(`❌ 创建文件夹失败: ${result.error}`);
@@ -3771,12 +3778,10 @@
                 const result = await response.json();
                 if (result.success) {
                     addLogSuccess(`✅ ${result.message || '创建文件成功'}`);
-                    if (!optimisticAdded) {
-                        if (type === 'source') {
-                            refreshSourceAsync({ silent: true });
-                        } else {
-                            refreshTargetAsync({ silent: true });
-                        }
+                    if (type === 'source') {
+                        refreshSourceAsync({ silent: true });
+                    } else {
+                        refreshTargetAsync({ silent: true });
                     }
                 } else {
                     addLogError(`❌ 创建文件失败: ${result.error || '未知错误'}`);
@@ -3863,12 +3868,10 @@
                         selectedTargetFiles = [];
                     }
 
-                    if (!optimistic || !optimistic.updated) {
-                        if (type === 'source') {
-                            refreshSourceAsync({ silent: true });
-                        } else {
-                            refreshTargetAsync({ silent: true });
-                        }
+                    if (type === 'source') {
+                        refreshSourceAsync({ silent: true });
+                    } else {
+                        refreshTargetAsync({ silent: true });
                     }
                 } else {
                     addLogError(`❌ 重命名失败: ${result.error}`);
@@ -5623,68 +5626,52 @@
                         addLogSuccess(transferredSuffix ? `✅ 传输已完成${transferredSuffix}` : '✅ 传输已完成');
                     }
 
-                    const optimistic = applyTransferOptimisticUpdate();
+                    applyTransferOptimisticUpdate();
 
                     // 根据方向自动刷新对应目录，显示最新传输的文件
-                    setTimeout(() => {
-                        const isMoveMode = (currentTransferMode === 'move');
-                        const skipSource = optimistic && optimistic.sourceUpdated;
-                        const skipTarget = optimistic && optimistic.targetUpdated;
+                    const isMoveMode = (currentTransferMode === 'move');
 
-                        if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
-                            if (refreshOverride.refreshSource) {
-                                const sourceServer = document.getElementById('sourceServer').value;
-                                if (sourceServer && currentSourcePath) {
-                                    if (!skipSource) {
-                                        refreshSourceAsync({ silent: true });
-                                    }
-                                }
-                            }
-                            if (refreshOverride.refreshTarget) {
-                                const targetServer = document.getElementById('targetServer').value;
-                                if (targetServer && currentTargetPath) {
-                                    if (!skipTarget) {
-                                        refreshTargetAsync({ silent: true });
-                                    }
-                                }
-                            }
-                            return;
-                        }
-
-                        if (currentTransferDirection === 'ltr') {
-                            const targetServer = document.getElementById('targetServer').value;
-                            if (targetServer && currentTargetPath) {
-                                if (!skipTarget) {
-                                    refreshTargetAsync({ silent: true });
-                                }
-                            }
-                            // 剪切模式下，源侧文件被删除，也需要立刻刷新源目录
-                            if (isMoveMode) {
-                                const sourceServer = document.getElementById('sourceServer').value;
-                                if (sourceServer && currentSourcePath) {
-                                    if (!skipSource) {
-                                        refreshSourceAsync({ silent: true });
-                                    }
-                                }
-                            }
-                        } else {
+                    if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
+                        if (refreshOverride.refreshSource) {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
-                                if (!skipSource) {
-                                    refreshSourceAsync({ silent: true });
-                                }
-                            }
-                            // 剪切模式下，目标侧新增文件，也需要刷新目标目录
-                            if (isMoveMode) {
-                                const targetServer = document.getElementById('targetServer').value;
-                                if (targetServer && currentTargetPath) {
-                                    if (!skipTarget) {
-                                        refreshTargetAsync({ silent: true });
-                                    }
-                                }
+                                refreshSourceAsync({ silent: true });
                             }
                         }
-                    }, 100);
+                        if (refreshOverride.refreshTarget) {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                refreshTargetAsync({ silent: true });
+                            }
+                        }
+                        return;
+                    }
+
+                    if (currentTransferDirection === 'ltr') {
+                        const targetServer = document.getElementById('targetServer').value;
+                        if (targetServer && currentTargetPath) {
+                            refreshTargetAsync({ silent: true });
+                        }
+                        // 剪切模式下，源侧文件被删除，也需要立刻刷新源目录
+                        if (isMoveMode) {
+                            const sourceServer = document.getElementById('sourceServer').value;
+                            if (sourceServer && currentSourcePath) {
+                                refreshSourceAsync({ silent: true });
+                            }
+                        }
+                    } else {
+                        const sourceServer = document.getElementById('sourceServer').value;
+                        if (sourceServer && currentSourcePath) {
+                            refreshSourceAsync({ silent: true });
+                        }
+                        // 剪切模式下，目标侧新增文件，也需要刷新目标目录
+                        if (isMoveMode) {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                refreshTargetAsync({ silent: true });
+                            }
+                        }
+                    }
                 } else if (data.status === 'partial_success') {
                     // 🔧 BUG修复：处理部分成功状态
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输部分完成'; }
@@ -5708,49 +5695,47 @@
 
 
                     // 部分成功也刷新对应目录（剪切模式下同样需要刷新两侧，保证删除/新增都可见）
-                    setTimeout(() => {
-                        const isMoveMode = (currentTransferMode === 'move');
+                    const isMoveMode = (currentTransferMode === 'move');
 
-                        if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
-                            if (refreshOverride.refreshSource) {
-                                const sourceServer = document.getElementById('sourceServer').value;
-                                if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync({ silent: true });
-                                }
-                            }
-                            if (refreshOverride.refreshTarget) {
-                                const targetServer = document.getElementById('targetServer').value;
-                                if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync({ silent: true });
-                                }
-                            }
-                            return;
-                        }
-
-                        if (currentTransferDirection === 'ltr') {
-                            const targetServer = document.getElementById('targetServer').value;
-                            if (targetServer && currentTargetPath) {
-                                refreshTargetAsync({ silent: true });
-                            }
-                            if (isMoveMode) {
-                                const sourceServer = document.getElementById('sourceServer').value;
-                                if (sourceServer && currentSourcePath) {
-                                    refreshSourceAsync({ silent: true });
-                                }
-                            }
-                        } else {
+                    if (refreshOverride && (refreshOverride.refreshSource || refreshOverride.refreshTarget)) {
+                        if (refreshOverride.refreshSource) {
                             const sourceServer = document.getElementById('sourceServer').value;
                             if (sourceServer && currentSourcePath) {
                                 refreshSourceAsync({ silent: true });
                             }
-                            if (isMoveMode) {
-                                const targetServer = document.getElementById('targetServer').value;
-                                if (targetServer && currentTargetPath) {
-                                    refreshTargetAsync({ silent: true });
-                                }
+                        }
+                        if (refreshOverride.refreshTarget) {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                refreshTargetAsync({ silent: true });
                             }
                         }
-                    }, 1000);
+                        return;
+                    }
+
+                    if (currentTransferDirection === 'ltr') {
+                        const targetServer = document.getElementById('targetServer').value;
+                        if (targetServer && currentTargetPath) {
+                            refreshTargetAsync({ silent: true });
+                        }
+                        if (isMoveMode) {
+                            const sourceServer = document.getElementById('sourceServer').value;
+                            if (sourceServer && currentSourcePath) {
+                                refreshSourceAsync({ silent: true });
+                            }
+                        }
+                    } else {
+                        const sourceServer = document.getElementById('sourceServer').value;
+                        if (sourceServer && currentSourcePath) {
+                            refreshSourceAsync({ silent: true });
+                        }
+                        if (isMoveMode) {
+                            const targetServer = document.getElementById('targetServer').value;
+                            if (targetServer && currentTargetPath) {
+                                refreshTargetAsync({ silent: true });
+                            }
+                        }
+                    }
                 } else {
                     // 完全失败
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输失败'; }
