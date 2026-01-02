@@ -1746,6 +1746,44 @@
         }
 
 
+        .toast-container {
+            position: fixed;
+            right: 10px;
+            bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            z-index: 1200;
+            pointer-events: none;
+        }
+
+        .toast-item {
+            pointer-events: auto;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--info-color);
+            border-radius: 8px;
+            box-shadow: var(--shadow-sm);
+            padding: 6px 10px;
+            font-size: 0.74rem;
+            color: var(--text-primary);
+            min-width: 200px;
+            max-width: 320px;
+            line-height: 1.4;
+        }
+
+        .toast-item.toast-success { border-left-color: var(--success-color); }
+        .toast-item.toast-warning { border-left-color: var(--warning-color); }
+        .toast-item.toast-error { border-left-color: var(--danger-color); }
+
+        .toast-message {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            word-break: break-word;
+        }
+
     </style>
 </head>
 <body>
@@ -2019,6 +2057,7 @@
 
 
     </div>
+    <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
     <!-- 文件区右键菜单 -->
     <div id="fileContextMenu" class="file-context-menu">
@@ -3567,6 +3606,29 @@
             addLog(message, 'success');
         }
 
+        const toastConfig = {
+            duration: 2400,
+            maxVisible: 3
+        };
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            if (!container || !message) return;
+            const item = document.createElement('div');
+            item.className = `toast-item toast-${type}`;
+            const msg = document.createElement('div');
+            msg.className = 'toast-message';
+            msg.textContent = message;
+            item.appendChild(msg);
+            container.appendChild(item);
+            while (container.children.length > toastConfig.maxVisible) {
+                container.removeChild(container.firstChild);
+            }
+            setTimeout(() => {
+                if (item.parentNode) item.parentNode.removeChild(item);
+            }, toastConfig.duration);
+        }
+
         // 复制到剪贴板（优先使用安全API）
         function copyTextToClipboard(text) {
             if (navigator.clipboard && window.isSecureContext) {
@@ -3666,6 +3728,12 @@
                     } else {
                         selectedTargetFiles = [];
                     }
+                    if (result.failed_items && result.failed_items.length > 0) {
+                        showToast(`⚠️ 部分删除失败 (${result.failed_items.length})`, 'warning');
+                    } else {
+                        const countText = result.deleted_count ? `${result.deleted_count} 项` : '已删除';
+                        showToast(`🗑️ 删除完成: ${countText}`, 'success');
+                    }
                     if (!result.success && result.failed_items && result.failed_items.length > 0) {
                         addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
                         result.failed_items.forEach(item => {
@@ -3674,6 +3742,7 @@
                     }
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 删除失败', 'error');
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -3683,6 +3752,7 @@
                 silentRefresh();
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
+                showToast('❌ 删除异常', 'error');
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -4106,12 +4176,16 @@
                 });
                 const result = await resp.json();
                 if (result.success) {
-                    addLogSuccess(`📏 大小: ${result.human_size || result.size_bytes + ' bytes'} (${fileName || filePath})`);
+                    const sizeText = result.human_size || result.size_bytes + ' bytes';
+                    addLogSuccess(`📏 大小: ${sizeText} (${fileName || filePath})`);
+                    showToast(`📏 大小: ${sizeText}`, 'success');
                 } else {
                     addLogError(`❌ 计算失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 计算失败', 'error');
                 }
             } catch (err) {
                 addLogError(`❌ 计算异常: ${err.message}`);
+                showToast('❌ 计算异常', 'error');
             }
         }
 
@@ -4125,12 +4199,16 @@
                 });
                 const result = await resp.json();
                 if (result.success) {
-                    addLogSuccess(`🗜️ 压缩完成: ${result.zip_name || fileName + '.zip'}`);
+                    const zipName = result.zip_name || fileName + '.zip';
+                    addLogSuccess(`🗜️ 压缩完成: ${zipName}`);
+                    showToast(`🗜️ 压缩完成: ${zipName}`, 'success');
                 } else {
                     addLogError(`❌ 压缩失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 压缩失败', 'error');
                 }
             } catch (err) {
                 addLogError(`❌ 压缩异常: ${err.message}`);
+                showToast('❌ 压缩异常', 'error');
             }
         }
 
@@ -4145,11 +4223,14 @@
                 const result = await resp.json();
                 if (result.success) {
                     addLogSuccess(`📂 解压完成: ${fileName}`);
+                    showToast(`📂 解压完成: ${fileName}`, 'success');
                 } else {
                     addLogError(`❌ 解压失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 解压失败', 'error');
                 }
             } catch (err) {
                 addLogError(`❌ 解压异常: ${err.message}`);
+                showToast('❌ 解压异常', 'error');
             }
         }
 
@@ -5744,11 +5825,15 @@
                                 }
                             }
                         }
-                        addLogSuccess(`✅ 传输已完成${transferredSuffix}${avgSpeedSuffix} - 总耗时: ${formattedTime}`);
+                        const completeMessage = `✅ 传输已完成${transferredSuffix}${avgSpeedSuffix} - 总耗时: ${formattedTime}`;
+                        addLogSuccess(completeMessage);
+                        showToast(completeMessage.replace(/^✅\s*/, ''), 'success');
                         const el = document.getElementById('elapsedTime');
                         if (el) el.textContent = formattedTime;
                     } else {
-                        addLogSuccess(transferredSuffix ? `✅ 传输已完成${transferredSuffix}` : '✅ 传输已完成');
+                        const completeMessage = transferredSuffix ? `✅ 传输已完成${transferredSuffix}` : '✅ 传输已完成';
+                        addLogSuccess(completeMessage);
+                        showToast(completeMessage.replace(/^✅\s*/, ''), 'success');
                     }
 
                     applyTransferOptimisticUpdate();
@@ -5814,6 +5899,7 @@
                         } else {
                             addLogWarning('🔶 传输部分完成（存在失败项目）');
                         }
+                        showToast('⚠️ 传输部分完成', 'warning');
                         if (data.message) {
                             addLogWarning(`详情: ${data.message}`);
                         }
@@ -5866,6 +5952,7 @@
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输失败'; }
                     { const pb = document.getElementById('progressBar'); if (pb) pb.classList.add('bg-danger'); }
                     addLogError(`❌ 传输失败: ${data.message}`);
+                    showToast('❌ 传输失败', 'error');
                 }
 
                 // 将UI重置延迟从3秒缩短为800ms，使结束更“丝滑”
