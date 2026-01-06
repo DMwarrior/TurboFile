@@ -579,6 +579,10 @@
             border-color: #3b82f6;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
 	        }
+        .image-grid-card.selected {
+            border-color: #60a5fa;
+            box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45);
+        }
         .image-grid-card img {
             width: 100%;
             height: auto;
@@ -3761,6 +3765,71 @@
             }
         }
 
+        async function deletePathsDirect(server, paths, isSource) {
+            const list = (paths || []).filter(Boolean);
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器');
+                return false;
+            }
+            if (!list.length) {
+                addLogWarning('⚠️ 没有可删除的项目');
+                return false;
+            }
+            if (imageDeleteInFlight) return false;
+            imageDeleteInFlight = true;
+
+            try {
+                const response = await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        paths: list
+                    })
+                });
+
+                const result = await response.json();
+                const ok = result && (result.success || (result.deleted_count && result.deleted_count > 0));
+
+                if (ok) {
+                    applyDeleteOptimistic(isSource ? 'source' : 'target', list.map(p => ({ path: p })));
+                    invalidatePreviewCache(server, list);
+                    if (result.failed_items && result.failed_items.length > 0) {
+                        showToast(`⚠️ 部分删除失败 (${result.failed_items.length})`, 'warning');
+                        if (!result.success) {
+                            addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
+                            result.failed_items.forEach(item => {
+                                addLogError(`  - ${item.path}: ${item.error}`);
+                            });
+                        }
+                    } else {
+                        const countText = result.deleted_count ? `${result.deleted_count} 项` : `${list.length} 项`;
+                        showToast(`🗑️ 删除完成: ${countText}`, 'success');
+                    }
+                } else {
+                    addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 删除失败', 'error');
+                    if (result.failed_items && result.failed_items.length > 0) {
+                        result.failed_items.forEach(item => {
+                            addLogError(`  - ${item.path}: ${item.error}`);
+                        });
+                    }
+                }
+                return ok;
+            } catch (error) {
+                addLogError(`❌ 删除操作异常: ${error.message}`);
+                showToast('❌ 删除异常', 'error');
+                return false;
+            } finally {
+                imageDeleteInFlight = false;
+                if (isSource) {
+                    refreshSourceAsync({ silent: true });
+                } else {
+                    refreshTargetAsync({ silent: true });
+                }
+            }
+        }
+
         // 显示创建文件夹对话框
         async function showCreateFolderDialog(type) {
             const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
@@ -6204,6 +6273,7 @@
                 server: '',
                 isSource: true
             };
+            let imageDeleteInFlight = false;
 
         const IMAGE_DPR_CAP = 2;
         const IMAGE_PREVIEW_MAX_DIM = 2200;
@@ -6368,6 +6438,26 @@
                 }
             }
 
+            async function deleteCurrentPreviewImage() {
+                if (!ImageViewer.items || ImageViewer.items.length === 0) return false;
+                if (ImageViewer.index < 0) return false;
+                const item = ImageViewer.items[ImageViewer.index];
+                if (!item || !item.path) return false;
+                const ok = await deletePathsDirect(ImageViewer.server, [item.path], ImageViewer.isSource);
+                if (!ok) return false;
+                removeImageGridItem(item.path);
+                ImageViewer.items.splice(ImageViewer.index, 1);
+                if (!ImageViewer.items.length) {
+                    closeImageModal();
+                    return true;
+                }
+                if (ImageViewer.index >= ImageViewer.items.length) {
+                    ImageViewer.index = ImageViewer.items.length - 1;
+                }
+                await showImageAt(ImageViewer.index);
+                return true;
+            }
+
             async function editTextFile(server, path, name) {
                 try {
                     // 立即打开编辑器，提升感知速度
@@ -6480,6 +6570,8 @@
             let imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
             let imageGridActiveServer = '';
             let imageGridActiveIsSource = true;
+            let imageGridSelectedPath = '';
+            let imageGridSelectedName = '';
 
 		            function computeImageGridThumbWidth(colsOverride) {
 		                const container = document.getElementById('imageGridContainer');
@@ -6582,11 +6674,66 @@
                 imageGridRowHeight = Math.max(1, Math.round(imgHeight + 48));
             }
 
+            function _escapeCssSelector(value) {
+                if (window.CSS && typeof window.CSS.escape === 'function') {
+                    return window.CSS.escape(value);
+                }
+                return String(value).replace(/["\\]/g, '\\$&');
+            }
+
+            function setImageGridSelection(path, name) {
+                imageGridSelectedPath = path || '';
+                imageGridSelectedName = name || '';
+                const container = document.getElementById('imageGridContainer');
+                if (!container) return;
+                container.querySelectorAll('.image-grid-card.selected').forEach(el => el.classList.remove('selected'));
+                if (!imageGridSelectedPath) return;
+                const selector = `.image-grid-card[data-path="${_escapeCssSelector(imageGridSelectedPath)}"]`;
+                const card = container.querySelector(selector);
+                if (card) card.classList.add('selected');
+            }
+
+            function clearImageGridSelection() {
+                setImageGridSelection('', '');
+            }
+
+            function removeImageGridItem(path) {
+                if (!path) return;
+                const idx = imageGridItems.findIndex(it => it && it.path === path);
+                if (idx < 0) return;
+                imageGridItems.splice(idx, 1);
+                for (let i = imageGridLoadQueue.length - 1; i >= 0; i--) {
+                    if (imageGridLoadQueue[i] && imageGridLoadQueue[i].path === path) {
+                        imageGridLoadQueue.splice(i, 1);
+                    }
+                }
+                if (imageGridSelectedPath === path) {
+                    clearImageGridSelection();
+                }
+                const container = document.getElementById('imageGridContainer');
+                if (!container) return;
+                if (imageGridVirtualEnabled) {
+                    imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
+                    scheduleImageGridVirtualRender(true);
+                    return;
+                }
+                const selector = `.image-grid-card[data-path="${_escapeCssSelector(path)}"]`;
+                const card = container.querySelector(selector);
+                if (card) card.remove();
+                if (!imageGridItems.length) {
+                    container.innerHTML = '<div class="image-grid-empty">当前目录没有图片</div>';
+                }
+            }
+
             function createImageGridCard(item, server, isSource) {
                 const card = document.createElement('div');
                 card.className = 'image-grid-card';
                 card.dataset.server = server;
                 card.dataset.path = item.path;
+                card.dataset.name = item.name;
+                if (imageGridSelectedPath && imageGridSelectedPath === item.path) {
+                    card.classList.add('selected');
+                }
 
                 const imgEl = document.createElement('img');
                 imgEl.alt = item.name;
@@ -6601,6 +6748,9 @@
                 card.appendChild(imgEl);
                 card.appendChild(nameEl);
                 card.addEventListener('click', () => {
+                    setImageGridSelection(item.path, item.name);
+                });
+                card.addEventListener('dblclick', () => {
                     previewImage(server, item.path, item.name, isSource);
                 });
 
@@ -6949,6 +7099,8 @@
                 imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
                 imageGridActiveServer = server;
                 imageGridActiveIsSource = isSource;
+                imageGridSelectedPath = '';
+                imageGridSelectedName = '';
                 imageGridLoadQueue.length = 0;
                 imageGridLoadingCount = 0;
                 ensureImageGridColsControls();
@@ -7053,6 +7205,19 @@
                 ensureAndRender();
             }
 
+            async function deleteSelectedImageGrid() {
+                if (!imageGridSelectedPath) return false;
+                if (!imageGridActiveServer) {
+                    addLogWarning('⚠️ 请先选择服务器');
+                    return false;
+                }
+                const path = imageGridSelectedPath;
+                const ok = await deletePathsDirect(imageGridActiveServer, [path], imageGridActiveIsSource);
+                if (!ok) return false;
+                removeImageGridItem(path);
+                return true;
+            }
+
             function closeImageGrid() {
                 const modal = document.getElementById('imageGridModal');
                 const container = document.getElementById('imageGridContainer');
@@ -7101,6 +7266,8 @@
                 imageGridLastRender = { startIndex: -1, endIndex: -1, cols: 0, total: 0 };
                 imageGridActiveServer = '';
                 imageGridActiveIsSource = true;
+                imageGridSelectedPath = '';
+                imageGridSelectedName = '';
             }
 
             const EDITOR_THEME_KEY = 'turbofile_editor_theme';
@@ -7599,6 +7766,8 @@
                 }
                 const modal = document.getElementById('imagePreviewModal');
                 const visible = modal && modal.style.display !== 'none';
+                const gridModal = document.getElementById('imageGridModal');
+                const gridVisible = gridModal && gridModal.style.display !== 'none';
                 if (visible && ImageViewer.items.length > 0) {
                     if (e.key === 'ArrowLeft') {
                         e.preventDefault();
@@ -7611,6 +7780,18 @@
 
                 if (e.key === 'Delete') {
                     if (_isEditableElement(e.target)) return;
+                    if (visible && ImageViewer.items.length > 0) {
+                        e.preventDefault();
+                        deleteCurrentPreviewImage();
+                        return;
+                    }
+                    if (gridVisible) {
+                        if (imageGridSelectedPath) {
+                            e.preventDefault();
+                            deleteSelectedImageGrid();
+                        }
+                        return;
+                    }
                     const activePanel = document.activeElement && document.activeElement.closest && document.activeElement.closest('.file-browser');
                     let isSource = true;
                     if (activePanel && activePanel.id === 'targetFileBrowser') {
