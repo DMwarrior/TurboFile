@@ -4746,7 +4746,12 @@ def rename_file():
         else:
             # 远程检查
             if is_windows:
-                check_cmd = f'if exist "{new_path}" (echo EXISTS) else (echo NOTEXISTS)'
+                cmd_new_path = normalize_windows_path_for_cmd(new_path)
+                safe_new_path = _escape_pwsh_literal(cmd_new_path)
+                check_cmd = (
+                    "powershell -NoProfile -Command "
+                    f"\"if (Test-Path -LiteralPath '{safe_new_path}') {{ 'EXISTS' }} else {{ 'NOTEXISTS' }}\""
+                )
             else:
                 # Linux/NAS: 使用 shlex.quote() 安全转义路径
                 check_cmd = f'test -e {shlex.quote(new_path)} && echo EXISTS || echo NOTEXISTS'
@@ -4770,10 +4775,14 @@ def rename_file():
         else:
             # 远程重命名
             if is_windows:
-                # Windows: 使用 ren 或 move 命令
-                # ren 只能在同一目录下重命名，且只需要新名称
-                # 为了支持路径中的空格和特殊字符，使用 move 命令
-                rename_cmd = f'move /Y "{old_path}" "{new_path}"'
+                # Windows: 使用 PowerShell Rename-Item，避免 cmd 对路径解析不一致
+                cmd_old_path = normalize_windows_path_for_cmd(old_path)
+                safe_old_path = _escape_pwsh_literal(cmd_old_path)
+                safe_new_name = _escape_pwsh_literal(new_name)
+                rename_cmd = (
+                    "powershell -NoProfile -Command "
+                    f"\"Rename-Item -LiteralPath '{safe_old_path}' -NewName '{safe_new_name}' -Force\""
+                )
             else:
                 # Linux/NAS: 使用 mv 命令 - 使用 shlex.quote() 安全转义路径
                 rename_cmd = f'mv {shlex.quote(old_path)} {shlex.quote(new_path)}'
