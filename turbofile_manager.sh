@@ -1,8 +1,8 @@
 #!/bin/bash
-# TurboFile 服务管理脚本
-# 用于方便地管理TurboFile系统服务
+# TurboFile service management script.
+# Provides convenience commands to manage the TurboFile systemd service.
 
-# 颜色定义
+# Color definitions.
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,28 +16,28 @@ show_status() {
     echo -e "${BLUE}📊 TurboFile服务状态${NC}"
     echo "=" * 40
     
-    # 检查服务状态
+    # Check service status.
     if systemctl is-active --quiet $SERVICE_NAME; then
         echo -e "服务状态: ${GREEN}✅ 运行中${NC}"
     else
         echo -e "服务状态: ${RED}❌ 已停止${NC}"
     fi
     
-    # 检查开机自启动
+    # Check systemd autostart status.
     if systemctl is-enabled --quiet $SERVICE_NAME; then
         echo -e "开机自启: ${GREEN}✅ 已启用${NC}"
     else
         echo -e "开机自启: ${RED}❌ 未启用${NC}"
     fi
     
-    # 检查端口
+    # Check port status.
     if ss -tlnp | grep -q ":5000"; then
         echo -e "端口5000: ${GREEN}✅ 正在监听${NC}"
     else
         echo -e "端口5000: ${RED}❌ 未监听${NC}"
     fi
     
-    # 检查Web访问
+    # Check web access.
     if curl -s -f $SERVICE_URL > /dev/null; then
         echo -e "Web访问: ${GREEN}✅ 正常${NC}"
     else
@@ -55,7 +55,7 @@ start_service() {
         echo -e "${GREEN}✅ 服务启动命令已执行${NC}"
         echo -e "${YELLOW}⏳ 等待服务完全启动...${NC}"
 
-        # 等待最多10秒，检查服务是否真正启动
+        # Wait up to 10 seconds and verify the service is active.
         for i in {1..10}; do
             sleep 1
             if systemctl is-active --quiet $SERVICE_NAME; then
@@ -75,36 +75,36 @@ start_service() {
 }
 
 check_active_transfers() {
-    # 检查是否有活跃的传输任务
-    # 返回0表示没有活跃传输，返回1表示有活跃传输
+    # Check whether there are active transfers.
+    # Return 0 when none, 1 when active transfers exist.
 
     if ! curl -s -f $SERVICE_URL > /dev/null 2>&1; then
-        # 服务未运行，无需检查
+        # Service is not running; nothing to check.
         return 0
     fi
 
-    # 调用API获取活跃传输
+    # Query active transfers via API.
     response=$(curl -s -f "${SERVICE_URL}/api/active_transfers" 2>/dev/null)
 
     if [ $? -ne 0 ]; then
-        # API调用失败，假设没有活跃传输
+        # API call failed; assume no active transfers.
         return 0
     fi
 
-    # 解析JSON响应，提取active_count
+    # Parse JSON response and extract active_count.
     active_count=$(echo "$response" | grep -o '"active_count":[0-9]*' | grep -o '[0-9]*')
 
     if [ -z "$active_count" ] || [ "$active_count" -eq 0 ]; then
         return 0
     fi
 
-    # 有活跃传输，显示详细信息
+    # Active transfers detected; show details.
     echo -e "${YELLOW}⚠️  检测到 ${active_count} 个正在进行的传输任务！${NC}"
     echo ""
     echo -e "${BLUE}活跃传输列表：${NC}"
     echo "----------------------------------------"
 
-    # 提取并显示每个传输的详细信息
+    # Extract and print transfer details.
     echo "$response" | python3 -c "
 import sys, json
 try:
@@ -130,7 +130,7 @@ except:
 stop_service() {
     echo -e "${YELLOW}🛑 停止TurboFile服务...${NC}"
 
-    # 检查活跃传输
+    # Check active transfers.
     check_active_transfers
     if [ $? -eq 1 ]; then
         echo ""
@@ -147,7 +147,7 @@ stop_service() {
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ systemd服务已停止${NC}"
 
-        # 清理可能残留的进程
+        # Clean up possible leftover processes.
         echo -e "${YELLOW}🧹 清理残留进程...${NC}"
         pids=$(ps aux | grep "python.*app.py" | grep -v grep | awk '{print $2}')
         if [ -n "$pids" ]; then
@@ -166,7 +166,7 @@ stop_service() {
 restart_service() {
     echo -e "${YELLOW}🔄 重启TurboFile服务...${NC}"
 
-    # 检查活跃传输
+    # Check active transfers.
     check_active_transfers
     if [ $? -eq 1 ]; then
         echo ""
@@ -178,12 +178,12 @@ restart_service() {
         fi
     fi
 
-    # 先停止systemd服务
+    # Stop the systemd service first.
     echo -e "${YELLOW}🛑 停止systemd服务...${NC}"
     sudo systemctl stop $SERVICE_NAME
     sleep 1
 
-    # 清理所有可能残留的Python进程（占用5000端口）
+    # Clean up leftover Python processes (port 5000).
     echo -e "${YELLOW}🧹 清理残留进程...${NC}"
     pids=$(ps aux | grep "python.*app.py" | grep -v grep | awk '{print $2}')
     if [ -n "$pids" ]; then
@@ -192,7 +192,7 @@ restart_service() {
         sleep 1
     fi
 
-    # 确认端口已释放
+    # Verify the port is released.
     if ss -tlnp | grep -q ":5000"; then
         echo -e "${RED}⚠️  端口5000仍被占用，尝试强制释放...${NC}"
         port_pid=$(ss -tlnp | grep ":5000" | grep -oP 'pid=\K[0-9]+' | head -1)
@@ -202,7 +202,7 @@ restart_service() {
         fi
     fi
 
-    # 启动服务
+    # Start the service.
     echo -e "${YELLOW}🚀 启动服务...${NC}"
     sudo systemctl start $SERVICE_NAME
 
@@ -210,7 +210,7 @@ restart_service() {
         echo -e "${GREEN}✅ 服务启动命令已执行${NC}"
         echo -e "${YELLOW}⏳ 等待服务完全启动...${NC}"
 
-        # 等待最多10秒，检查服务是否真正启动
+        # Wait up to 10 seconds and verify the service is active.
         for i in {1..10}; do
             sleep 1
             if systemctl is-active --quiet $SERVICE_NAME; then
@@ -311,7 +311,7 @@ show_help() {
     echo "  $0 logs      # 查看日志"
 }
 
-# 主逻辑
+# Main entry.
 case "$1" in
     status)
         show_status
