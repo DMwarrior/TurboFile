@@ -1,0 +1,27 @@
+{
+  "secret_key": "change-me",
+  "host_ip": "192.168.1.10",
+  "admin_mode_enabled": false,
+  "admin_client_ips": [
+    "192.168.1.100"
+  ],
+  "transfer_bytes_config": {
+    "enabled": false,
+    "update_interval": 5.0
+  },
+  "servers": {
+    "192.168.1.10": {
+      "name": "Linux Server",
+      "user": "ubuntu",
+      "password": "your_password",
+      "default_path": "/home/ubuntu"
+    },
+    "192.168.1.20": {
+      "name": "Windows Server",
+      "user": "Administrator",
+      "password": "your_password",
+      "os_type": "windows",
+      "default_path": "C:/"
+    }
+  }
+}
