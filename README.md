@@ -1,16 +1,17 @@
 # ⚡ TurboFile - 极速传文件传输系统 / Ultra-fast File Transfer
 
-一个基于 Web 的高速文件传输系统，支持多服务器间文件传输，提供实时进度、取消控制和现代化界面。
-A web-based high-speed file transfer system with multi-server support, real-time progress, cancellation, and a modern UI.
+面向局域网内 Linux/Windows 设备的极速文件传输系统，传输速度可接近打满带宽（千兆网络常见 115MB/s+），相比 WinSCP/MobaXterm/Xshell 等工具在同网段内更快更稳定。
+An ultra-fast LAN file transfer system for Linux/Windows devices that can saturate bandwidth (e.g., 115MB/s+ on Gigabit networks), delivering faster and more stable transfers than tools like WinSCP/MobaXterm/Xshell in the same subnet.
 
 ## 🚀 主要特性 / Features
 
 - **多服务器传输**：支持多台服务器任意方向传输  
   **Multi-server transfer**: copy/move across multiple servers in any direction
-- **实时进度**：进度条、速度、已传输量、剩余时间  
   **Real-time progress**: speed, transferred bytes, ETA
 - **复制/剪切模式**：支持复制与移动  
   **Copy/Move modes**
+- **图片预览**：支持直接预览 Linux 端图片  
+  **Image preview**: preview images stored on Linux servers directly
 - **SSH 连接优化**：连接池与稳定性提升  
   **Optimized SSH connections**
 - **现代化 UI**：响应式布局、快捷操作  
