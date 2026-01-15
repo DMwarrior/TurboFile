@@ -41,6 +41,7 @@ def api_image_stream():
     new_h = _safe_int(request.args.get('height', 0))
     quality = _safe_int(request.args.get('quality', 0))
     interp = (request.args.get('interp') or '').strip().lower()
+    img_format = (request.args.get('format') or '').strip().lower()
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
 
@@ -78,10 +79,26 @@ def api_image_stream():
                 interp_method = cv2.INTER_LANCZOS4
             resized = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
             q = quality if 1 <= quality <= 95 else 82
-            ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+            fmt = img_format if img_format in {'jpg', 'jpeg', 'png', 'webp'} else ''
+
+            if fmt in {'jpg', 'jpeg', ''}:
+                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+                if not ok:
+                    return img_bytes, None
+                return enc.tobytes(), 'image/jpeg'
+            if fmt == 'webp':
+                ok, enc = cv2.imencode('.webp', resized, [int(cv2.IMWRITE_WEBP_QUALITY), q])
+                if ok:
+                    return enc.tobytes(), 'image/webp'
+                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+                if ok:
+                    return enc.tobytes(), 'image/jpeg'
+                return img_bytes, None
+
+            ok, enc = cv2.imencode('.png', resized, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
             if not ok:
                 return img_bytes, None
-            return enc.tobytes(), 'image/jpeg'
+            return enc.tobytes(), 'image/png'
 
         # Local read.
         if is_local_server(server_ip):

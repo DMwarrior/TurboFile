@@ -2796,16 +2796,44 @@
                         return;
                     }
 
-                    const tailCount = Math.min(2, Math.max(1, segments.length - 2));
-                    const headCount = Math.min(2, segments.length - tailCount);
-                    const headSegments = segments.slice(0, headCount);
-                    const tailSegments = segments.slice(-tailCount);
-                    const leadingHtml = renderSegmentsHtml(headSegments);
-                    const tailHtml = renderSegmentsHtml(tailSegments, true);
-                    display.innerHTML = `
+                    const totalSegments = segments.length;
+                    if (totalSegments <= 2) {
+                        display.innerHTML = `<span class="path-display-leading">${renderSegmentsHtml(segments)}</span>`;
+                        display.dataset.collapsed = '';
+                        return;
+                    }
+
+                    const headCount = Math.min(2, totalSegments - 2);
+                    const maxTail = Math.max(1, totalSegments - headCount - 1);
+                    let tailCount = Math.min(2, maxTail);
+
+                    const buildCollapsedHtml = (hCount, tCount) => {
+                        const headSegments = segments.slice(0, hCount);
+                        const tailSegments = segments.slice(-tCount);
+                        const leadingHtml = renderSegmentsHtml(headSegments);
+                        const tailHtml = renderSegmentsHtml(tailSegments, true);
+                        return `
                         <span class="path-display-leading">${leadingHtml}<span class="path-separator">/</span><span class="path-ellipsis">…</span></span>
                         <span class="path-display-tail">${tailHtml}</span>
                     `;
+                    };
+
+                    let bestHtml = buildCollapsedHtml(headCount, tailCount);
+                    display.innerHTML = bestHtml;
+
+                    while (tailCount < maxTail && display.scrollWidth <= display.clientWidth + 1) {
+                        const next = tailCount + 1;
+                        const candidate = buildCollapsedHtml(headCount, next);
+                        display.innerHTML = candidate;
+                        if (display.scrollWidth <= display.clientWidth + 1) {
+                            tailCount = next;
+                            bestHtml = candidate;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    display.innerHTML = bestHtml;
                     display.dataset.collapsed = 'true';
                 });
             }
@@ -4244,9 +4272,11 @@
             const height = Math.max(0, Number.parseInt(options.height, 10) || 0);
             const quality = Math.max(0, Number.parseInt(options.quality, 10) || 0);
             const interp = options.interp ? String(options.interp) : '';
+            const format = options.format ? String(options.format).toLowerCase() : '';
             const interpKey = interp ? `i${interp}` : '';
-            const variant = (width || height || quality || interpKey)
-                ? `${width}x${height}q${quality}${interpKey ? '-' + interpKey : ''}`
+            const formatKey = format ? `f${format}` : '';
+            const variant = (width || height || quality || interpKey || formatKey)
+                ? `${width}x${height}q${quality}${interpKey ? '-' + interpKey : ''}${formatKey ? '-' + formatKey : ''}`
                 : '';
             const cached = previewCacheGet(server, path, 'blob', variant);
             if (cached) return cached.value;
@@ -4258,6 +4288,7 @@
             if (height > 0) params.set('height', String(height));
             if (quality > 0) params.set('quality', String(quality));
             if (interp) params.set('interp', interp);
+            if (format) params.set('format', format);
             const resp = await fetch(`/api/image/stream?${params.toString()}`, { cache: 'no-store' });
             if (!resp.ok) {
                 let msg = '';
@@ -4879,7 +4910,7 @@
                 if (!task) return;
 		                imageGridLoadingCount++;
 		                const thumbWidth = task.width || imageGridThumbWidth || computeImageGridThumbWidth();
-                getImageBlobUrl(task.server, task.path, { width: thumbWidth, quality: IMAGE_GRID_THUMB_QUALITY, interp: 'lanczos' })
+                getImageBlobUrl(task.server, task.path, { width: thumbWidth, quality: IMAGE_GRID_THUMB_QUALITY, interp: 'lanczos', format: 'webp' })
 		                    .then(url => {
 		                        if (task.imgEl && task.imgEl.dataset.loaded !== '1') {
 		                            task.imgEl.src = url;

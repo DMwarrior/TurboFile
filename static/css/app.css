@@ -1503,12 +1503,12 @@
         /* Path navigation tweaks. */
         .path-nav {
             background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            border-radius: var(--radius-sm);
             padding: 2px 4px;
             margin-bottom: 2px;
             font-size: 0.75rem;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: var(--font-mono);
             box-shadow: var(--shadow-sm);
             display: flex;
             align-items: center;
@@ -1543,6 +1543,7 @@
             white-space: normal;
         }
         .path-display-leading {
+            flex: 0 1 auto;
             min-width: 0;
             overflow: hidden;
             white-space: nowrap;
@@ -1553,9 +1554,9 @@
             overflow: visible;
         }
         .path-display-tail {
-            flex: 0 1 auto;
+            flex: 1 1 auto;
             min-width: 0;
-            max-width: 60%;
+            max-width: 100%;
             overflow: hidden;
             white-space: nowrap;
             text-overflow: ellipsis;
