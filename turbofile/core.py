@@ -957,27 +957,14 @@ class SSHManager:
             }
 
 
-            if is_nas_server(server_ip):
-
-                connect_kwargs['timeout'] = 15
-                connect_kwargs['banner_timeout'] = 15
-                connect_kwargs['auth_timeout'] = 15
-                connect_kwargs['channel_timeout'] = 15
-                connect_kwargs['password'] = server_config.get("password")
-                connect_kwargs['look_for_keys'] = False
-                connect_kwargs['allow_agent'] = False
+            try:
                 ssh.connect(**connect_kwargs)
-                print(f"✅ 使用密码直连到NAS服务器 {server_ip}")
-            else:
+                print(f"✅ 使用密钥连接到服务器 {server_ip}")
+            except:
 
-                try:
-                    ssh.connect(**connect_kwargs)
-                    print(f"✅ 使用密钥连接到服务器 {server_ip}")
-                except:
-
-                    connect_kwargs['password'] = server_config["password"]
-                    ssh.connect(**connect_kwargs)
-                    print(f"✅ 使用密码连接到服务器 {server_ip}")
+                connect_kwargs['password'] = server_config["password"]
+                ssh.connect(**connect_kwargs)
+                print(f"✅ 使用密码连接到服务器 {server_ip}")
 
 
             if len(pool) >= self.connection_pool_size:
@@ -1073,12 +1060,6 @@ def get_ssh_command_with_port(server_ip, fast_ssh=True):
         ])
 
     return " ".join(ssh_cmd_parts)
-
-def is_nas_server(server_ip):
-    """Return whether the server is a NAS."""
-    is_nas = server_ip == "10.190.21.253"
-    print(f"🔍 检查是否为NAS服务器: {server_ip} -> {is_nas}")
-    return is_nas
 
 def is_windows_server(server_ip):
     """Return whether the server is Windows."""
@@ -2142,8 +2123,6 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
             if source_is_windows and not target_is_windows:
                 exec_server = target_server
                 sshpass_cmd = "sshpass"
-                if is_nas_server(exec_server):
-                    sshpass_cmd = "~/bin/sshpass"
 
                 ssh_to_source = RSYNC_SSH_CMD
                 source_port = SERVERS[source_server].get('port', 22)
@@ -2178,8 +2157,6 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
             else:
                 exec_server = source_server
                 sshpass_cmd = "sshpass"
-                if is_nas_server(exec_server):
-                    sshpass_cmd = "~/bin/sshpass"
 
                 rsync_target_path = target_path
                 if target_is_windows:
@@ -2267,8 +2244,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
             total_files = len(source_files)
 
 
-            if (is_nas_server(source_server) or is_nas_server(target_server)
-                    or is_windows_server(source_server) or is_windows_server(target_server)):
+            if (is_windows_server(source_server) or is_windows_server(target_server)):
                 speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
             else:
                 speed_simulator.init_transfer_speed(transfer_id)
@@ -3184,9 +3160,6 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
 
         sshpass_cmd = "sshpass"
-        if is_nas_server(target_server):
-            sshpass_cmd = "~/bin/sshpass"
-            print(f"🔧 NAS服务器使用自定义sshpass路径: {sshpass_cmd}")
 
 
         ssh_to_source = RSYNC_SSH_CMD
@@ -3241,9 +3214,6 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
 
 
     sshpass_cmd = "sshpass"
-    if is_nas_server(source_server):
-        sshpass_cmd = "~/bin/sshpass"
-        print(f"🔧 NAS作为源服务器，使用自定义sshpass路径: {sshpass_cmd}")
 
 
 
@@ -3344,9 +3314,6 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
 
 
     sshpass_cmd = "sshpass"
-    if is_nas_server(source_server):
-        sshpass_cmd = "~/bin/sshpass"
-        print(f"🔧 NAS作为源服务器，使用自定义sshpass路径: {sshpass_cmd}")
 
 
     if is_directory:
@@ -3381,8 +3348,7 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
 
 
-    if (is_nas_server(source_server) or is_nas_server(target_server)
-            or is_windows_server(source_server) or is_windows_server(target_server)):
+    if (is_windows_server(source_server) or is_windows_server(target_server)):
         speed_simulator.init_transfer_speed(transfer_id, 50.0, 55.0)
     else:
         speed_simulator.init_transfer_speed(transfer_id)
@@ -3527,9 +3493,6 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                 if source_is_windows and not target_is_windows:
 
                     sshpass_cmd = "sshpass"
-                    if is_nas_server(target_server):
-                        sshpass_cmd = "~/bin/sshpass"
-                        print(f"🔧 NAS作为目标服务器，使用自定义sshpass路径: {sshpass_cmd}")
 
                     ssh_to_source = RSYNC_SSH_CMD
 
@@ -3559,9 +3522,6 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
 
                     sshpass_cmd = "sshpass"
-                    if is_nas_server(source_server):
-                        sshpass_cmd = "~/bin/sshpass"
-                        print(f"🔧 NAS作为源服务器，使用自定义sshpass路径: {sshpass_cmd}")
 
 
                     rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
