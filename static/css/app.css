@@ -93,7 +93,7 @@
         }
 
         .file-item {
-            cursor: pointer;
+            cursor: default;
             padding: 4px 8px;
             border-bottom: 1px solid #f1f5f9;
             font-size: 0.8rem;
@@ -112,6 +112,11 @@
             background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
             /* Remove transform animation; keep static hover. */
             box-shadow: var(--shadow-sm);
+        }
+
+        .file-item.drag-hover {
+            background: linear-gradient(135deg, #eef6ff 0%, #dbeafe 100%);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25), var(--shadow-sm);
         }
 
         .file-item.selected {
@@ -144,6 +149,21 @@
         .file-name {
             flex: 1;
             font-weight: 500;
+        }
+
+        .inline-rename-input {
+            flex: 0 0 auto;
+            min-width: 120px;
+            font: inherit;
+            line-height: 1.3;
+            height: 20px;
+            padding: 0 4px;
+            border: 1px solid #111827;
+            border-radius: 2px;
+            background: #ffffff;
+            color: #111827;
+            box-sizing: border-box;
+            outline: none;
         }
 
         .file-details {
@@ -871,25 +891,21 @@
         }
 
 
-        /* Force default cursor. */
+        /* Force default cursor across UI; avoid hand cursor. */
         body, html {
             cursor: default !important;
         }
 
-        .file-item, .file-item * {
-            cursor: pointer !important;
+        * {
+            cursor: default !important;
         }
 
-        .path-segment, .path-segment * {
-            cursor: pointer !important;
+        input, textarea, [contenteditable="true"] {
+            cursor: text !important;
         }
 
         .resizer {
             cursor: col-resize !important;
-        }
-
-        body.browsing .path-segment, body.browsing .path-segment * {
-            cursor: pointer !important;
         }
 
 

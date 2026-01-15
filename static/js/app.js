@@ -320,6 +320,7 @@
                 row.onmousedown = (event) => handleFileMouseDown(event, file.path, file.name, file.is_directory, fileId, isSource);
                 row.ondblclick = function() { handleFileItemDblClick(row, isSource); };
                 attachRowDragHandlers(row, isSource);
+                attachRowDropHandlers(row, isSource);
                 row.innerHTML = `
                     <i class="bi ${icon}"></i>
                     <div class="file-info">
@@ -501,7 +502,7 @@
             return panel === 'target' ? currentTargetPath : currentSourcePath;
         }
 
-        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null) {
+        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null, skipMoveConfirm = false) {
             if (isTransferring) {
                 addLogWarning('⚠️ 已有传输任务在进行中');
                 return false;
@@ -521,7 +522,7 @@
             const parallelTransfer = true;
 
 
-            if (finalMode === 'move') {
+            if (finalMode === 'move' && !skipMoveConfirm) {
                 const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
                     title: '剪切确认',
                     danger: true
@@ -2507,6 +2508,8 @@
                     const backRow = document.createElement('div');
                     backRow.className = 'file-item back-row';
                     backRow.title = '双击返回上级目录';
+                    backRow.dataset.path = parentPath;
+                    backRow.dataset.isDirectory = 'true';
                     backRow.ondblclick = () => navigateTo(containerId, parentPath, isSource);
                     backRow.innerHTML = `
                         <i class="bi bi-arrow-up-circle text-primary"></i>
@@ -2516,6 +2519,7 @@
                         </div>
                     `;
                     container.appendChild(backRow);
+                    attachRowDropHandlers(backRow, isSource);
                 }
             } else {
 
@@ -2555,6 +2559,7 @@
                 row.onmousedown = (event) => handleFileMouseDown(event, file.path, file.name, file.is_directory, fileId, isSource);
                 row.ondblclick = function() { handleFileItemDblClick(row, isSource); };
                 attachRowDragHandlers(row, isSource);
+                attachRowDropHandlers(row, isSource);
                 row.innerHTML = `
                     <i class="bi ${icon}"></i>
                     <div class="file-info">
@@ -3377,6 +3382,101 @@
             row.addEventListener('dragend', handleRowDragEnd);
         }
 
+        function _getDragPayload(event) {
+            let payload = dragTransferPayload;
+            if (!payload && event && event.dataTransfer) {
+                try {
+                    const raw = event.dataTransfer.getData(DRAG_TRANSFER_TYPE);
+                    if (raw) payload = JSON.parse(raw);
+                } catch (_) {}
+            }
+            if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return null;
+            return payload;
+        }
+
+        function attachRowDropHandlers(row, isSource) {
+            if (!row || row.dataset.dropBound === 'true') return;
+            if (row.classList.contains('temp-new') || row.classList.contains('temp-new-file')) return;
+            if (String(row.dataset.isDirectory).toLowerCase() !== 'true') return;
+
+            row.dataset.dropBound = 'true';
+            const canHandle = (e) => {
+                const types = e && e.dataTransfer ? Array.from(e.dataTransfer.types || []) : [];
+                return dragTransferPayload !== null || types.includes(DRAG_TRANSFER_TYPE);
+            };
+
+            row.addEventListener('dragenter', (e) => {
+                if (!canHandle(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                row.classList.add('drag-hover');
+            });
+            row.addEventListener('dragover', (e) => {
+                if (!canHandle(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = getCurrentTransferMode() === 'move' ? 'move' : 'copy';
+            });
+            row.addEventListener('dragleave', (e) => {
+                if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+                row.classList.remove('drag-hover');
+            });
+            row.addEventListener('drop', async (e) => {
+                if (!canHandle(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                row.classList.remove('drag-hover');
+
+                const payload = _getDragPayload(e);
+                if (!payload) return;
+
+                const fromPanel = payload.panel;
+                const toPanel = isSource ? 'source' : 'target';
+                const targetPath = row.dataset.path || '';
+                if (!targetPath) return;
+
+                const hasConflict = payload.files.some(file =>
+                    file.path === targetPath || targetPath.startsWith(file.path + '/')
+                );
+                if (hasConflict) {
+                    showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
+                    return;
+                }
+
+                const samePanel = fromPanel === toPanel;
+                const mode = samePanel ? 'move' : getCurrentTransferMode();
+                const sourceServer = _getPanelServer(fromPanel);
+                const targetServer = _getPanelServer(toPanel);
+                if (!sourceServer || !targetServer) {
+                    showToast('⚠️ 请先选择服务器', 'warning');
+                    return;
+                }
+
+                let direction = (toPanel === 'target') ? 'ltr' : 'rtl';
+                if (fromPanel === 'source' && toPanel === 'target') direction = 'ltr';
+                if (fromPanel === 'target' && toPanel === 'source') direction = 'rtl';
+
+                let refreshOverride = null;
+                if (samePanel) {
+                    refreshOverride = {
+                        refreshSource: toPanel === 'source',
+                        refreshTarget: toPanel === 'target'
+                    };
+                }
+
+                await startTransferWithParams(
+                    sourceServer,
+                    targetServer,
+                    targetPath,
+                    payload.files,
+                    mode,
+                    direction,
+                    refreshOverride,
+                    samePanel
+                );
+            });
+        }
+
         function buildDragPayload(isSource) {
             const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
             return { panel: isSource ? 'source' : 'target', files, mode: getCurrentTransferMode() };
@@ -3408,6 +3508,7 @@
 
         function handleRowDragEnd() {
             dragTransferPayload = null;
+            document.querySelectorAll('.file-item.drag-hover').forEach(el => el.classList.remove('drag-hover'));
             document.querySelectorAll('.file-browser.drag-target').forEach(el => el.classList.remove('drag-target'));
         }
 
@@ -5868,13 +5969,18 @@
                 const input = document.createElement('input');
                 input.type = 'text';
                 input.value = original;
-                input.className = 'form-control form-control-sm';
-                input.style.width = '100%';
-                input.style.padding = '1px 4px';
-                input.style.height = '22px';
-                input.style.fontSize = '0.9rem';
-                input.style.display = 'inline-block';
-                input.style.boxSizing = 'border-box';
+                input.className = 'inline-rename-input';
+                input.setAttribute('autocomplete', 'off');
+                input.setAttribute('spellcheck', 'false');
+                const info = row.querySelector('.file-info');
+                const details = row.querySelector('.file-details');
+                if (info) {
+                    const infoWidth = info.getBoundingClientRect().width;
+                    const detailsWidth = details ? details.getBoundingClientRect().width : 0;
+                    const maxWidth = Math.max(120, Math.floor(infoWidth - detailsWidth - 24));
+                    const estimated = Math.min(maxWidth, Math.max(120, Math.ceil(original.length * 8 + 24)));
+                    input.style.width = `${estimated}px`;
+                }
                 row.dataset.editing = 'true';
                 nameSpan.replaceWith(input);
                 input.focus();
