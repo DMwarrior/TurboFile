@@ -492,7 +492,7 @@
 	            font-size: 12px;
 	            font-weight: 600;
 	            line-height: 1.2;
-	            cursor: pointer;
+	            cursor: default;
 	            transition: background 120ms ease, color 120ms ease;
 	        }
 	        .image-grid-close-btn {
@@ -517,7 +517,7 @@
             font-size: 13px;
             padding: 6px 14px;
             border-radius: 6px;
-            cursor: pointer;
+            cursor: default;
             box-shadow: 0 6px 16px rgba(0,0,0,0.35);
         }
         .image-preview-close-btn:hover {
@@ -543,7 +543,7 @@
             background: rgba(255, 255, 255, 0.18);
             color: #fff;
             font-size: 26px;
-            cursor: pointer;
+            cursor: default;
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -585,7 +585,7 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
-            cursor: pointer;
+            cursor: default;
             transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
             content-visibility: auto;
             contain: layout paint style;
@@ -929,7 +929,7 @@
             align-items: center;
             gap: 8px;
             padding: 6px 12px;
-            cursor: pointer;
+            cursor: default;
             line-height: 1.2;
         }
 
@@ -986,7 +986,7 @@
 
         .path-segment {
             color: var(--primary-color);
-            cursor: pointer;
+            cursor: default;
             text-decoration: none;
             font-weight: 500;
             transition: all 0.2s ease;
@@ -1742,7 +1742,7 @@
         .transfer-mode-btn {
             padding: 6px 12px;
             font-size: 0.9rem;
-            cursor: pointer;
+            cursor: default;
             border-radius: 8px !important; /* Independent rounding. */
             transition: none !important;   /* Disable darkening transition. */
             box-shadow: none;              /* No default shadow. */

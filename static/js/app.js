@@ -4617,8 +4617,10 @@
 		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
 		            let imageGridColsControlsBound = false;
 		            let imageGridColsRaf = 0;
-            const IMAGE_GRID_MAX_PARALLEL = 8;
-            const IMAGE_GRID_MAX_PARALLEL_EAGER = 12;
+            const IMAGE_GRID_MAX_PARALLEL = 16;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER = 24;
+            const IMAGE_GRID_MAX_PARALLEL_BURST = 28;
+            const IMAGE_GRID_BURST_DURATION = 1200;
             const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
             const imageGridLoadQueue = [];
             let imageGridLoadingCount = 0;
@@ -4632,7 +4634,7 @@
             let imageGridEagerQueued = false;
             let imageGridScrollBound = false;
             const IMAGE_GRID_VIRTUAL_THRESHOLD = 320;
-            const IMAGE_GRID_VIRTUAL_OVERSCAN = 3;
+            const IMAGE_GRID_VIRTUAL_OVERSCAN = 6;
             let imageGridItems = [];
             let imageGridVirtualEnabled = false;
             let imageGridRowHeight = 0;
@@ -4646,6 +4648,8 @@
             let imageGridActiveIsSource = true;
             let imageGridSelectedPath = '';
             let imageGridSelectedName = '';
+            let imageGridBurstUntil = 0;
+            let imageGridLastScrollTop = 0;
 
 		            function computeImageGridThumbWidth(colsOverride) {
 		                const container = document.getElementById('imageGridContainer');
@@ -4672,6 +4676,9 @@
             }
 
 		            function getImageGridParallelLimit() {
+		                if (imageGridBurstUntil && Date.now() < imageGridBurstUntil) {
+		                    return IMAGE_GRID_MAX_PARALLEL_BURST;
+		                }
 		                return imageGridEagerMode ? IMAGE_GRID_MAX_PARALLEL_EAGER : IMAGE_GRID_MAX_PARALLEL;
 		            }
 
@@ -4811,7 +4818,7 @@
 
                 const imgEl = document.createElement('img');
                 imgEl.alt = item.name;
-                imgEl.loading = 'lazy';
+                imgEl.loading = 'eager';
                 imgEl.decoding = 'async';
                 imgEl.dataset.loaded = '0';
 
@@ -5031,20 +5038,43 @@
 		                    });
 		            }
 
-            function scheduleImageGridLoad(card) {
+            function scheduleImageGridLoad(card, priority = false) {
                 if (imageGridSwitching) return;
                 const imgEl = card.querySelector('img');
                 if (!imgEl || imgEl.dataset.loaded === '1' || imgEl.dataset.loading === '1') return;
 		                imgEl.dataset.loading = '1';
 		                const thumbWidth = imageGridThumbWidth || computeImageGridThumbWidth();
-		                imageGridLoadQueue.push({
+		                const task = {
 		                    server: card.dataset.server,
 		                    path: card.dataset.path,
 		                    imgEl,
 		                    width: thumbWidth
-		                });
+		                };
+		                if (priority) {
+		                    imageGridLoadQueue.unshift(task);
+		                } else {
+		                    imageGridLoadQueue.push(task);
+		                }
 		                processImageGridQueue();
 		            }
+
+            function activateImageGridBurstLoad() {
+                imageGridBurstUntil = Date.now() + IMAGE_GRID_BURST_DURATION;
+                const container = document.getElementById('imageGridContainer');
+                if (!container) return;
+                const cards = Array.from(container.querySelectorAll('.image-grid-card'));
+                if (!cards.length) return;
+                for (let i = imageGridLoadQueue.length - 1; i >= 0; i--) {
+                    const task = imageGridLoadQueue[i];
+                    if (!task || !task.imgEl || task.imgEl.dataset.loaded === '1' || !task.imgEl.isConnected) {
+                        imageGridLoadQueue.splice(i, 1);
+                    }
+                }
+                cards.forEach(card => scheduleImageGridLoad(card, true));
+                for (let i = 0; i < getImageGridParallelLimit(); i++) {
+                    processImageGridQueue();
+                }
+            }
 
 		            function queueAllImageGridLoads(batchSize = 160) {
 		                const container = document.getElementById('imageGridContainer');
@@ -5096,7 +5126,7 @@
 	                    });
 	                }, {
 	                    root: rootEl || null,
-	                    rootMargin: '120px',
+	                    rootMargin: '600px',
 	                    threshold: 0.01
 	                });
 	            }
@@ -5110,10 +5140,13 @@
 	                modal.addEventListener('scroll', () => {
 	                    if (modal.style.display === 'none') return;
 	                    if (imageGridVirtualEnabled) {
+	                        const currentTop = modal.scrollTop || 0;
+	                        imageGridLastScrollTop = currentTop;
 	                        if (!imageGridScrollRaf) {
 	                            imageGridScrollRaf = requestAnimationFrame(() => {
 	                                imageGridScrollRaf = 0;
 	                                scheduleImageGridVirtualRender();
+	                                activateImageGridBurstLoad();
 	                            });
 	                        }
 	                        return;
