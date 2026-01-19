@@ -21,6 +21,10 @@
             source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null },
             target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null }
         };
+        const browsePositionMemory = {
+            source: new Map(),
+            target: new Map()
+        };
 
 
         const lastSelectedIndex = { source: null, target: null };
@@ -2110,6 +2114,37 @@
             };
         }
 
+        function buildBrowseMemoryKey(isSource, path) {
+            if (!path) return null;
+            const { serverSelect } = getPanelConfig(isSource);
+            const server = document.getElementById(serverSelect).value;
+            if (!server) return null;
+            return `${server}::${path}`;
+        }
+
+        function rememberBrowsePosition(isSource) {
+            const state = isSource ? browseState.source : browseState.target;
+            const path = state.path || getActivePath(isSource);
+            const key = buildBrowseMemoryKey(isSource, path);
+            if (!key) return;
+            const { containerId } = getPanelConfig(isSource);
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            const scrollTop = container.scrollTop || 0;
+            const virtualOffset = Number.isInteger(state.virtualOffset) ? state.virtualOffset : 0;
+            const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
+            const selectedPath = selected && selected.length ? selected[selected.length - 1].path : null;
+            const map = isSource ? browsePositionMemory.source : browsePositionMemory.target;
+            map.set(key, { scrollTop, virtualOffset, selectedPath, ts: Date.now() });
+        }
+
+        function getBrowsePosition(isSource, path) {
+            const key = buildBrowseMemoryKey(isSource, path);
+            if (!key) return null;
+            const map = isSource ? browsePositionMemory.source : browsePositionMemory.target;
+            return map.get(key) || null;
+        }
+
         function resetBrowseState(isSource, path) {
             const state = isSource ? browseState.source : browseState.target;
             state.path = path;
@@ -2312,8 +2347,21 @@
             return loadDirectory('source', currentSourcePath, { reset: true });
         }
 
-        async function browseSourceInstant(targetPath) {
+        async function browseSourceInstant(targetPath, options = {}) {
+            const prevPath = browseState.source.path || currentSourcePath;
+            if (!options.skipRemember && prevPath && prevPath !== targetPath) {
+                rememberBrowsePosition(true);
+            }
             currentSourcePath = targetPath;
+            const memory = options.useMemory === false ? null : getBrowsePosition(true, targetPath);
+            if (memory) {
+                return loadDirectory('source', targetPath, {
+                    reset: true,
+                    overrideOffset: memory.virtualOffset || 0,
+                    virtualOffset: memory.virtualOffset || 0,
+                    preserveScrollTop: memory.scrollTop || 0
+                });
+            }
             return loadDirectory('source', targetPath, { reset: true });
         }
 
@@ -2337,8 +2385,21 @@
             return loadDirectory('target', currentTargetPath, { reset: true });
         }
 
-        async function browseTargetInstant(targetPath) {
+        async function browseTargetInstant(targetPath, options = {}) {
+            const prevPath = browseState.target.path || currentTargetPath;
+            if (!options.skipRemember && prevPath && prevPath !== targetPath) {
+                rememberBrowsePosition(false);
+            }
             currentTargetPath = targetPath;
+            const memory = options.useMemory === false ? null : getBrowsePosition(false, targetPath);
+            if (memory) {
+                return loadDirectory('target', targetPath, {
+                    reset: true,
+                    overrideOffset: memory.virtualOffset || 0,
+                    virtualOffset: memory.virtualOffset || 0,
+                    preserveScrollTop: memory.scrollTop || 0
+                });
+            }
             return loadDirectory('target', targetPath, { reset: true });
         }
 
@@ -2604,10 +2665,11 @@
             updateFileCountDisplay(isSource, loaded, total);
 
             if (preserveScrollTop !== null) {
-                requestAnimationFrame(() => {
-                    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-                    container.scrollTop = Math.min(preserveScrollTop, maxScroll);
-                });
+                const prevBehavior = container.style.scrollBehavior;
+                container.style.scrollBehavior = 'auto';
+                const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+                container.scrollTop = Math.min(preserveScrollTop, maxScroll);
+                container.style.scrollBehavior = prevBehavior || '';
             }
         }
 
@@ -6487,7 +6549,7 @@
                         return;
                     }
                     currentSourcePath = defaultPath;
-                    browseSourceInstant(currentSourcePath);
+                    browseSourceInstant(currentSourcePath, { skipRemember: true });
 
 
                     if (isWindows) {
@@ -6510,7 +6572,7 @@
                         return;
                     }
                     currentTargetPath = defaultPath;
-                    browseTargetInstant(currentTargetPath);
+                    browseTargetInstant(currentTargetPath, { skipRemember: true });
 
 
                     if (isWindows) {
