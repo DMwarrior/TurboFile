@@ -10,7 +10,29 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 SERVICE_NAME="turbofile"
-SERVICE_URL="http://192.168.9.64:5000"
+SERVICE_PORT="5000"
+SERVICE_URL_LOCAL="http://127.0.0.1:${SERVICE_PORT}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_public_service_url() {
+    # Resolve a URL that is reachable by other machines in the LAN.
+    # Falls back to the previous hard-coded IP when config is missing.
+
+    # Fall back to config.json host_ip when available.
+    if [ -f "${SCRIPT_DIR}/data/config.json" ]; then
+        host_ip=$(python3 -c "import json;print(json.load(open('${SCRIPT_DIR}/data/config.json','r',encoding='utf-8')).get('host_ip',''))" 2>/dev/null)
+        if [ -n "$host_ip" ]; then
+            echo "http://${host_ip}:${SERVICE_PORT}"
+            return 0
+        fi
+    fi
+
+    # Final fallback (keep previous default).
+    echo "http://192.168.9.64:${SERVICE_PORT}"
+}
+
+SERVICE_URL_PUBLIC="$(resolve_public_service_url)"
+SERVICE_URL="${SERVICE_URL_PUBLIC}"
 
 show_status() {
     echo -e "${BLUE}📊 TurboFile服务状态${NC}"
@@ -76,25 +98,36 @@ start_service() {
 
 check_active_transfers() {
     # Check whether there are active transfers.
-    # Return 0 when none, 1 when active transfers exist.
+    # Return 0 when none, 1 when active transfers exist, 2 when unable to determine.
 
-    if ! curl -s -f $SERVICE_URL > /dev/null 2>&1; then
+    # Prefer loopback; fall back to configured URL.
+    api_base="${SERVICE_URL_LOCAL}"
+    if ! curl -s -f "${api_base}/" > /dev/null 2>&1; then
+        api_base="${SERVICE_URL_PUBLIC}"
+    fi
+
+    if ! curl -s -f "${api_base}/" > /dev/null 2>&1; then
         # Service is not running; nothing to check.
         return 0
     fi
 
     # Query active transfers via API.
-    response=$(curl -s -f "${SERVICE_URL}/api/active_transfers" 2>/dev/null)
-
-    if [ $? -ne 0 ]; then
-        # API call failed; assume no active transfers.
-        return 0
+    response=$(curl -s "${api_base}/api/active_transfers" 2>/dev/null)
+    if [ -z "$response" ]; then
+        echo -e "${YELLOW}⚠️  无法获取活跃传输信息（接口无响应），将按“未知状态”处理。${NC}"
+        return 2
     fi
 
-    # Parse JSON response and extract active_count.
-    active_count=$(echo "$response" | grep -o '"active_count":[0-9]*' | grep -o '[0-9]*')
+    # Parse JSON response using python (robust to whitespace/pretty-print).
+    active_count=$(echo "$response" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('active_count',''))" 2>/dev/null)
+    success_flag=$(echo "$response" | python3 -c "import sys, json; d=json.load(sys.stdin); print('1' if d.get('success') else '0')" 2>/dev/null)
 
-    if [ -z "$active_count" ] || [ "$active_count" -eq 0 ]; then
+    if [ "$success_flag" != "1" ]; then
+        echo -e "${YELLOW}⚠️  活跃传输接口返回失败，无法确认是否有传输任务。${NC}"
+        return 2
+    fi
+
+    if [ -z "$active_count" ] || [ "$active_count" -eq 0 ] 2>/dev/null; then
         return 0
     fi
 
@@ -132,9 +165,14 @@ stop_service() {
 
     # Check active transfers.
     check_active_transfers
-    if [ $? -eq 1 ]; then
+    status=$?
+    if [ $status -ne 0 ]; then
         echo ""
-        echo -e "${RED}❌ 检测到活跃传输任务，停止服务可能会中断这些传输！${NC}"
+        if [ $status -eq 1 ]; then
+            echo -e "${RED}❌ 检测到活跃传输任务，停止服务可能会中断这些传输！${NC}"
+        else
+            echo -e "${RED}❌ 无法确认是否存在传输任务（检测失败/未知状态），停止服务可能会中断传输！${NC}"
+        fi
         read -p "是否确认停止服务？(yes/no): " confirm
         if [ "$confirm" != "yes" ]; then
             echo -e "${YELLOW}⏸️  已取消停止操作${NC}"
@@ -168,9 +206,14 @@ restart_service() {
 
     # Check active transfers.
     check_active_transfers
-    if [ $? -eq 1 ]; then
+    status=$?
+    if [ $status -ne 0 ]; then
         echo ""
-        echo -e "${RED}❌ 检测到活跃传输任务，重启服务会中断这些传输！${NC}"
+        if [ $status -eq 1 ]; then
+            echo -e "${RED}❌ 检测到活跃传输任务，重启服务会中断这些传输！${NC}"
+        else
+            echo -e "${RED}❌ 无法确认是否存在传输任务（检测失败/未知状态），重启服务可能会中断传输！${NC}"
+        fi
         read -p "是否确认重启服务？(yes/no): " confirm
         if [ "$confirm" != "yes" ]; then
             echo -e "${YELLOW}⏸️  已取消重启操作${NC}"

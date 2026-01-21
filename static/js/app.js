@@ -2709,8 +2709,19 @@
         };
 
 
-        let clickTimer = null;
-        let clickCount = 0;
+        const panelDoubleClickState = {
+            source: { lastPath: null, lastTs: 0 },
+            target: { lastPath: null, lastTs: 0 }
+        };
+
+        function isSameRowDoubleClick(isSource, path) {
+            const state = isSource ? panelDoubleClickState.source : panelDoubleClickState.target;
+            const now = Date.now();
+            const isDouble = state.lastPath === path && (now - state.lastTs) <= DOUBLE_CLICK_CONFIG.timeWindow;
+            state.lastPath = path;
+            state.lastTs = now;
+            return isDouble;
+        }
 
         function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
             if (event.button !== 0) return;
@@ -2723,34 +2734,18 @@
                 selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
             }
 
-            clickCount++;
+            const isDoubleClick = isSameRowDoubleClick(isSource, path);
+            if (!isDirectory || !isDoubleClick) return;
 
-            if (clickCount === 1) {
-
-                clickTimer = setTimeout(() => {
-
-                    clickCount = 0;
-                }, DOUBLE_CLICK_CONFIG.timeWindow);
-            } else if (clickCount === 2) {
-
-                clearTimeout(clickTimer);
-                clickCount = 0;
-
-                if (isDirectory) {
-
-                    console.log(`[双击] 立即进入目录: ${path}`);
+            console.log(`[双击] 立即进入目录: ${path}`);
 
 
-                    if (isSource) {
-                        currentSourcePath = path;
-
-                        browseSourceInstant(path);
-                    } else {
-                        currentTargetPath = path;
-
-                        browseTargetInstant(path);
-                    }
-                }
+            if (isSource) {
+                currentSourcePath = path;
+                browseSourceInstant(path);
+            } else {
+                currentTargetPath = path;
+                browseTargetInstant(path);
             }
         }
 
@@ -2998,8 +2993,17 @@
         }
 
         function maybeStartPathInlineEdit(event, isSource) {
+            const displayId = isSource ? 'sourcePathDisplay' : 'targetPathDisplay';
+            const display = document.getElementById(displayId);
+            if (!display) return;
 
-            if (event.target.closest('button') || event.target.closest('a') || event.target.closest('.bi')) return;
+            // Only allow entering "address bar" edit mode when clicking the empty area of the path display,
+            // similar to Windows Explorer (avoid accidental edit when clicking segments or the container).
+            if (!display.contains(event.target)) return;
+            if (event.target.closest('button') || event.target.closest('.bi')) return;
+            if (event.target.closest('a') || event.target.closest('.path-segment') || event.target.closest('.path-separator') || event.target.closest('.path-ellipsis')) {
+                return;
+            }
             startPathInlineEdit(isSource);
         }
 
@@ -5672,7 +5676,7 @@
                     if (data.success) {
                         addLogInfo('💾 已保存: ' + path);
                         previewCacheSet(server, path, 'text', content);
-                        closeEditorModal();
+                        showToast('✅ 已保存', 'success');
                     } else {
                         addLogError('保存失败: ' + (data.error || '未知错误'));
                     }
