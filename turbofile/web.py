@@ -1,10 +1,445 @@
 from flask import Blueprint, render_template, request, jsonify, Response
 from flask_socketio import emit
 
+import os
+import re
+import threading
+import time
+import uuid
+
 from .extensions import socketio
 from .core import *  # noqa: F403 - Keep legacy imports; refine to explicit later.
 
 bp = Blueprint('turbofile', __name__)
+
+_REMOTE_IMAGE_TOOL_CACHE = {}
+_REMOTE_IMAGE_TOOL_CACHE_GUARD = threading.Lock()
+_REMOTE_IMAGE_TOOL_CACHE_TTL_SEC = 300
+
+_REMOTE_WIN_IMAGE_TOOL_CACHE = {}
+_REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD = threading.Lock()
+_REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC = 300
+
+
+def _guess_image_mime_from_path(path: str):
+    try:
+        p = (path or '').lower()
+        if p.endswith(('.jpg', '.jpeg')):
+            return 'image/jpeg'
+        if p.endswith('.png'):
+            return 'image/png'
+        if p.endswith('.webp'):
+            return 'image/webp'
+        if p.endswith('.gif'):
+            return 'image/gif'
+        if p.endswith('.bmp'):
+            return 'image/bmp'
+        if p.endswith('.svg'):
+            return 'image/svg+xml'
+    except Exception:
+        return None
+    return None
+
+
+def _try_parse_jpeg_dimensions(data: bytes):
+    """Best-effort JPEG header parser for (width, height)."""
+    try:
+        if not isinstance(data, (bytes, bytearray)):
+            return None
+        buf = bytes(data)
+        if len(buf) < 4 or not buf.startswith(b'\xFF\xD8'):
+            return None
+
+        i = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3,
+            0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB,
+            0xCD, 0xCE, 0xCF,
+        }
+        while i + 1 < len(buf):
+            # Find marker prefix 0xFF.
+            if buf[i] != 0xFF:
+                i += 1
+                continue
+            # Skip fill bytes 0xFF.
+            while i < len(buf) and buf[i] == 0xFF:
+                i += 1
+            if i >= len(buf):
+                break
+            marker = buf[i]
+            i += 1
+
+            # Standalone markers.
+            if marker in {0xD8, 0xD9}:
+                continue
+            # Start of Scan: image data begins; stop parsing.
+            if marker == 0xDA:
+                break
+
+            if i + 2 > len(buf):
+                break
+            seg_len = (buf[i] << 8) + buf[i + 1]
+            i += 2
+            if seg_len < 2:
+                break
+
+            if marker in sof_markers:
+                # Segment: [precision(1), height(2), width(2), ...]
+                if i + 5 > len(buf):
+                    break
+                height = (buf[i + 1] << 8) + buf[i + 2]
+                width = (buf[i + 3] << 8) + buf[i + 4]
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+                return None
+
+            i += seg_len - 2
+    except Exception:
+        return None
+    return None
+
+
+def _get_remote_linux_imagemagick_tool(server_ip: str):
+    """Return 'magick' or 'convert' when available on a remote Linux server, else None."""
+    if not server_ip:
+        return None
+    now = time.time()
+    with _REMOTE_IMAGE_TOOL_CACHE_GUARD:
+        entry = _REMOTE_IMAGE_TOOL_CACHE.get(server_ip)
+        if entry and (now - float(entry.get('ts', 0) or 0)) < _REMOTE_IMAGE_TOOL_CACHE_TTL_SEC:
+            tool = entry.get('tool') or ''
+            return tool if tool in {'magick', 'convert'} else None
+
+    tool = None
+    try:
+        # Only meaningful for remote Linux.
+        if is_local_server(server_ip) or is_windows_server(server_ip):
+            tool = None
+        else:
+            cmd = (
+                "sh -lc \""
+                "if command -v magick >/dev/null 2>&1; then echo magick; "
+                "elif command -v convert >/dev/null 2>&1; then echo convert; "
+                "else echo; fi\""
+            )
+            out, _, _ = ssh_manager.execute_command(server_ip, cmd)
+            candidate = (out or '').strip().splitlines()
+            tool = (candidate[0].strip() if candidate else '') or None
+            if tool not in {'magick', 'convert'}:
+                tool = None
+    except Exception:
+        tool = None
+
+    with _REMOTE_IMAGE_TOOL_CACHE_GUARD:
+        _REMOTE_IMAGE_TOOL_CACHE[server_ip] = {'ts': now, 'tool': tool or ''}
+    return tool
+
+
+def _get_remote_windows_imagemagick_tool(server_ip: str):
+    """Return 'magick' when available on a remote Windows server, else None."""
+    if not server_ip:
+        return None
+    now = time.time()
+    with _REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD:
+        entry = _REMOTE_WIN_IMAGE_TOOL_CACHE.get(server_ip)
+        if entry and (now - float(entry.get('ts', 0) or 0)) < _REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC:
+            tool = entry.get('tool') or ''
+            return tool if tool == 'magick' else None
+
+    tool = None
+    try:
+        if is_local_server(server_ip) or (not is_windows_server(server_ip)):
+            tool = None
+        else:
+            # `where magick` is the most reliable on Windows (avoid `convert` name clash).
+            cmd = 'cmd /c "where magick 2>nul"'
+            out, _, _ = ssh_manager.execute_command(server_ip, cmd)
+            if (out or '').strip():
+                tool = 'magick'
+    except Exception:
+        tool = None
+
+    with _REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD:
+        _REMOTE_WIN_IMAGE_TOOL_CACHE[server_ip] = {'ts': now, 'tool': tool or ''}
+    return tool
+
+
+def _exec_ssh_command_bytes(ssh, command: str, timeout_sec: float = 25.0):
+    """Execute command via paramiko and return (stdout_bytes, stderr_bytes, exit_code)."""
+    if not ssh or not command:
+        return b'', b'', 1
+    try:
+        stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout_sec)
+        out_b = stdout.read() if stdout else b''
+        err_b = stderr.read() if stderr else b''
+        try:
+            exit_code = stdout.channel.recv_exit_status() if stdout and stdout.channel else 0
+        except Exception:
+            exit_code = 0 if out_b else 1
+        return out_b or b'', err_b or b'', int(exit_code or 0)
+    except Exception as e:
+        return b'', str(e).encode('utf-8', errors='ignore'), 1
+
+
+def _windows_file_stat_via_ssh(ssh, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a Windows path via PowerShell."""
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                "$i=Get-Item -LiteralPath $p;"
+                "$len=[int64]$i.Length;"
+                "$ts=[int64]([DateTimeOffset]$i.LastWriteTimeUtc).ToUnixTimeSeconds();"
+                "Write-Output (\"{0} {1}\" -f $len,$ts);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code != 0:
+                raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh stat failed')
+            text = (out_b or b'').decode('utf-8', errors='ignore').strip()
+            parts = text.split()
+            if len(parts) >= 2:
+                size = int(parts[0])
+                mtime = int(parts[1])
+                return size, mtime
+            raise RuntimeError(f"bad stat output: {text}")
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _windows_thumbnail_via_imagemagick(ssh, path: str, geom: str, fmt_key: str, quality_eff: int, timeout_sec: float = 25.0):
+    """Return (data_bytes, mime) using `magick` on Windows via cmd.exe."""
+    if not ssh or not path:
+        return None, None
+    out_spec = 'webp:-' if fmt_key == 'webp' else ('png:-' if fmt_key == 'png' else 'jpg:-')
+    out_mime = 'image/webp' if fmt_key == 'webp' else ('image/png' if fmt_key == 'png' else 'image/jpeg')
+    q = int(quality_eff) if 1 <= int(quality_eff) <= 95 else 82
+
+    def _q(s: str) -> str:
+        # cmd.exe quoting: double quotes; escape inner quotes by doubling.
+        return '"' + str(s).replace('"', '""') + '"'
+
+    src = _q(path)
+    geom_q = _q(geom) if geom else ''
+    q_arg = f"-quality {q}"
+    thumb_arg = f"-thumbnail {geom_q}" if geom_q else ""
+    cmd = f"cmd /c \"magick {src} {thumb_arg} -strip {q_arg} {out_spec}\""
+    out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+    if exit_code == 0 and out_b:
+        return out_b, out_mime
+
+    if out_spec == 'webp:-':
+        cmd2 = f"cmd /c \"magick {src} {thumb_arg} -strip {q_arg} jpg:-\""
+        out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd2, timeout_sec=timeout_sec)
+        if exit_code == 0 and out_b:
+            return out_b, 'image/jpeg'
+    return None, None
+
+
+def _windows_thumbnail_via_powershell(ssh, path: str, target_w: int, target_h: int, quality_eff: int, timeout_sec: float = 25.0):
+    """Return (jpeg_bytes, 'image/jpeg') using System.Drawing on Windows."""
+    if not ssh or not path:
+        return None, None
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            q = int(quality_eff) if 1 <= int(quality_eff) <= 95 else 82
+            tw = int(target_w or 0)
+            th = int(target_h or 0)
+            if tw <= 0 and th <= 0:
+                tw, th = 0, 0
+
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                "Add-Type -AssemblyName System.Drawing;"
+                f"$p='{safe_p}';"
+                f"$tw={tw};$th={th};$q={q};"
+                "$img=[System.Drawing.Image]::FromFile($p);"
+                "$w=$img.Width; $h=$img.Height;"
+                "if($tw -le 0 -and $th -le 0){$nw=$w;$nh=$h} "
+                "elseif($tw -le 0){$nh=$th; $nw=[int]([math]::Round($w*($nh/[double]$h)))} "
+                "elseif($th -le 0){$nw=$tw; $nh=[int]([math]::Round($h*($nw/[double]$w)))} "
+                "else{$r=[math]::Min($tw/[double]$w,$th/[double]$h); if($r -gt 1){$r=1}; $nw=[int]([math]::Round($w*$r)); $nh=[int]([math]::Round($h*$r))};"
+                "if($nw -lt 1){$nw=1}; if($nh -lt 1){$nh=1};"
+                "$bmp=New-Object System.Drawing.Bitmap $nw,$nh;"
+                "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+                "$g.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic;"
+                "$g.SmoothingMode=[System.Drawing.Drawing2D.SmoothingMode]::HighQuality;"
+                "$g.PixelOffsetMode=[System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality;"
+                "$g.CompositingQuality=[System.Drawing.Drawing2D.CompositingQuality]::HighQuality;"
+                "$g.DrawImage($img,0,0,$nw,$nh);"
+                "$ms=New-Object System.IO.MemoryStream;"
+                "$codec=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1;"
+                "$ep=New-Object System.Drawing.Imaging.EncoderParameters 1;"
+                "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality),([int]$q);"
+                "$bmp.Save($ms,$codec,$ep);"
+                "$g.Dispose();$bmp.Dispose();$img.Dispose();"
+                "$b=$ms.ToArray();$ms.Dispose();"
+                "$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0 and out_b:
+                return out_b, 'image/jpeg'
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh thumb failed')
+        except Exception as e:
+            last_err = e
+            continue
+    return None, None
+
+
+def _windows_sftp_path_candidates(path: str):
+    """
+    Generate candidate SFTP paths for Windows OpenSSH.
+
+    Windows file listings return paths like: C:\\dir\\file.jpg
+    But SFTP implementations often expect: C:/dir/file.jpg or /C:/dir/file.jpg
+    """
+    raw = str(path or '').strip()
+    if not raw:
+        return []
+
+    # Strip surrounding quotes if present.
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+
+    candidates = []
+    candidates.append(raw)
+
+    slash = raw.replace('\\', '/')
+    # Normalize repeated slashes for drive-letter paths (keep UNC-like leading '//' untouched).
+    slash = re.sub(r'^([A-Za-z]:)/+', r'\1/', slash)
+    slash = re.sub(r'^/([A-Za-z]:)/+', r'/\1/', slash)
+    if slash != raw:
+        candidates.append(slash)
+
+    # If looks like a drive path, try adding leading '/' (common in SFTP on Windows).
+    m = re.match(r'^([A-Za-z]):/(.*)$', slash)
+    if m:
+        drive = m.group(1)
+        rest = m.group(2)
+        candidates.append(f"/{drive}:/{rest}")
+
+    # Also handle already-prefixed form: /C:/...
+    m2 = re.match(r'^/([A-Za-z]):/(.*)$', slash)
+    if m2:
+        drive = m2.group(1)
+        rest = m2.group(2)
+        candidates.append(f"{drive}:/{rest}")
+
+    # Dedup, keep order.
+    seen = set()
+    out = []
+    for c in candidates:
+        if not c:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def _sftp_stat_with_fallback(sftp, path: str, is_windows: bool):
+    if not sftp:
+        raise FileNotFoundError("SFTP unavailable")
+    if not is_windows:
+        return sftp.stat(path), path
+    last_err = None
+    for p in _windows_sftp_path_candidates(path):
+        try:
+            return sftp.stat(p), p
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _sftp_open_with_fallback(sftp, path: str, mode: str, is_windows: bool):
+    if not sftp:
+        raise FileNotFoundError("SFTP unavailable")
+    if not is_windows:
+        return sftp.file(path, mode), path
+    last_err = None
+    for p in _windows_sftp_path_candidates(path):
+        try:
+            return sftp.file(p, mode), p
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _windows_pwsh_path_candidates(path: str):
+    raw = str(path or '').strip()
+    if not raw:
+        return []
+
+    # Strip SFTP-style leading "/C:/".
+    if raw.startswith('/') and re.match(r'^/[A-Za-z]:', raw):
+        raw = raw[1:]
+
+    candidates = []
+    # Prefer normalized cmd path (backslashes), but keep the original around.
+    try:
+        candidates.append(normalize_windows_path_for_cmd(raw))  # noqa: F405
+    except Exception:
+        candidates.append(raw)
+    candidates.append(raw)
+
+    # Also try slash form converted to cmd form.
+    try:
+        candidates.append(normalize_windows_path_for_cmd(raw.replace('\\', '/')))  # noqa: F405
+    except Exception:
+        pass
+
+    # Dedup.
+    seen = set()
+    out = []
+    for c in candidates:
+        c = str(c or '').strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def _read_windows_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) -> bytes:
+    """
+    Read a Windows file via PowerShell over SSH and return raw bytes.
+    This is a fallback when SFTP path mapping/chroot causes ENOENT.
+    """
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                "[byte[]]$b=[System.IO.File]::ReadAllBytes($p);"
+                "$o=[Console]::OpenStandardOutput();"
+                "$o.Write($b,0,$b.Length);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0 and out_b:
+                return out_b
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
 
 @bp.route('/')
 def index():
@@ -42,89 +477,356 @@ def api_image_stream():
     quality = _safe_int(request.args.get('quality', 0))
     interp = (request.args.get('interp') or '').strip().lower()
     img_format = (request.args.get('format') or '').strip().lower()
+    fmt_requested = img_format in {'jpg', 'jpeg', 'png', 'webp'}
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
+
+    resize_requested = bool(new_w or new_h)
+    encode_requested = bool(quality or interp or img_format)
+    transform_requested = resize_requested or encode_requested
+
+    # Normalize params for cache key.
+    quality_eff = quality if 1 <= quality <= 95 else 82
+    interp_key = interp if interp in {'lanczos', 'lanczos4', 'sharp'} else 'area'
+    fmt_key = img_format if img_format in {'jpg', 'jpeg', 'png', 'webp'} else ''
+    if fmt_key == 'jpeg':
+        fmt_key = 'jpg'
+    if transform_requested and not fmt_key:
+        fmt_key = 'jpg'
+
+    is_local = is_local_server(server_ip)
+    is_windows = is_windows_server(server_ip)
+    ssh = None
+    sftp = None
+    engine = 'unknown'
+    resolved_remote_path = path
 
     try:
         import cv2
         import numpy as np
 
-        def resize_bytes(img_bytes: bytes):
-            if not new_w and not new_h:
-                return img_bytes, None
-            arr = np.frombuffer(img_bytes, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        def _decode_image_bytes(img_bytes: bytes):
+            try:
+                decode_flag = cv2.IMREAD_UNCHANGED
+                if resize_requested and (new_w > 0 or new_h > 0):
+                    lower = (path or '').lower()
+                    is_jpeg = lower.endswith(('.jpg', '.jpeg')) or (isinstance(img_bytes, (bytes, bytearray)) and bytes(img_bytes[:2]) == b'\xFF\xD8')
+                    if is_jpeg:
+                        desired_w = new_w if new_w > 0 else new_h
+                        desired_h = new_h if new_h > 0 else new_w
+                        if desired_w and not desired_h:
+                            desired_h = desired_w
+                        if desired_h and not desired_w:
+                            desired_w = desired_h
+                        dims = _try_parse_jpeg_dimensions(bytes(img_bytes[:131072]))
+                        if dims and desired_w and desired_h:
+                            orig_w, orig_h = dims
+                            reduce_factor = 1
+                            if orig_w // 8 >= desired_w and orig_h // 8 >= desired_h:
+                                reduce_factor = 8
+                            elif orig_w // 4 >= desired_w and orig_h // 4 >= desired_h:
+                                reduce_factor = 4
+                            elif orig_w // 2 >= desired_w and orig_h // 2 >= desired_h:
+                                reduce_factor = 2
+
+                            if reduce_factor == 8:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_8
+                            elif reduce_factor == 4:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_4
+                            elif reduce_factor == 2:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_2
+                            else:
+                                decode_flag = cv2.IMREAD_COLOR
+
+                arr = np.frombuffer(img_bytes, dtype=np.uint8)
+                return cv2.imdecode(arr, decode_flag)
+            except Exception:
+                return None
+
+        def _transform_cv_image(img):
             if img is None:
-                return img_bytes, None
+                return None, None
             h, w = img.shape[:2]
             if w <= 0 or h <= 0:
-                return img_bytes, None
+                return None, None
 
-            target_w, target_h = new_w, new_h
-            if target_w <= 0 and target_h <= 0:
-                return img_bytes, None
-            if target_w > 0 and target_h > 0:
-                ratio = min(target_w / w, target_h / h)
-            elif target_w > 0:
-                ratio = target_w / w
-            else:
-                ratio = target_h / h
-            if ratio <= 0 or ratio >= 1:
-                return img_bytes, None
+            out_img = img
+            did_resize = False
+            if resize_requested and (new_w > 0 or new_h > 0):
+                target_w, target_h = new_w, new_h
+                if target_w > 0 and target_h > 0:
+                    ratio = min(target_w / w, target_h / h)
+                elif target_w > 0:
+                    ratio = target_w / w
+                else:
+                    ratio = target_h / h
 
-            target_w = max(1, int(w * ratio))
-            target_h = max(1, int(h * ratio))
-            interp_method = cv2.INTER_AREA
-            if interp in {'lanczos', 'lanczos4', 'sharp'}:
-                interp_method = cv2.INTER_LANCZOS4
-            resized = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
-            q = quality if 1 <= quality <= 95 else 82
-            fmt = img_format if img_format in {'jpg', 'jpeg', 'png', 'webp'} else ''
+                # Only downscale; keep original size when ratio >= 1 unless a re-encode is requested.
+                if ratio > 0 and ratio < 1:
+                    target_w = max(1, int(w * ratio))
+                    target_h = max(1, int(h * ratio))
+                    interp_method = cv2.INTER_AREA if interp_key == 'area' else cv2.INTER_LANCZOS4
+                    out_img = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
+                    did_resize = True
 
-            if fmt in {'jpg', 'jpeg', ''}:
-                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-                if not ok:
-                    return img_bytes, None
-                return enc.tobytes(), 'image/jpeg'
+            if resize_requested and not did_resize and not encode_requested and not fmt_requested:
+                return None, None
+
+            fmt = fmt_key
+            if fmt not in {'jpg', 'png', 'webp'}:
+                fmt = 'jpg'
+
+            q = quality_eff
             if fmt == 'webp':
-                ok, enc = cv2.imencode('.webp', resized, [int(cv2.IMWRITE_WEBP_QUALITY), q])
+                ok, enc = cv2.imencode('.webp', out_img, [int(cv2.IMWRITE_WEBP_QUALITY), q])
                 if ok:
                     return enc.tobytes(), 'image/webp'
-                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+                # Fallback to jpeg.
+                ok, enc = cv2.imencode('.jpg', out_img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
                 if ok:
                     return enc.tobytes(), 'image/jpeg'
-                return img_bytes, None
+                return None, None
+            if fmt == 'png':
+                ok, enc = cv2.imencode('.png', out_img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                if ok:
+                    return enc.tobytes(), 'image/png'
+                return None, None
 
-            ok, enc = cv2.imencode('.png', resized, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
-            if not ok:
-                return img_bytes, None
-            return enc.tobytes(), 'image/png'
+            ok, enc = cv2.imencode('.jpg', out_img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+            if ok:
+                return enc.tobytes(), 'image/jpeg'
+            return None, None
 
         # Local read.
-        if is_local_server(server_ip):
-            with open(path, 'rb') as f:
-                data = f.read()
-            data, mime = resize_bytes(data)
-            return Response(data, mimetype=mime or 'application/octet-stream')
-        # Remote read.
-        ssh = ssh_manager.get_connection(server_ip)
-        if not ssh:
-            return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
-        sftp = ssh.open_sftp()
-        try:
-            with sftp.file(path, 'rb') as f:
-                data = f.read()
-                if not isinstance(data, (bytes, bytearray)):
-                    data = bytes(data)
-            data, mime = resize_bytes(data)
-            return Response(data, mimetype=mime or 'application/octet-stream')
-        finally:
+        if is_local:
+            if not transform_requested:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw'
+                return resp
+
+            img_read_flag = cv2.IMREAD_UNCHANGED
+            try:
+                lower = (path or '').lower()
+                if resize_requested and (new_w > 0 or new_h > 0) and lower.endswith(('.jpg', '.jpeg')):
+                    desired_w = new_w if new_w > 0 else new_h
+                    desired_h = new_h if new_h > 0 else new_w
+                    if desired_w and not desired_h:
+                        desired_h = desired_w
+                    if desired_h and not desired_w:
+                        desired_w = desired_h
+                    if desired_w and desired_h:
+                        head = b''
+                        try:
+                            with open(path, 'rb') as hf:
+                                head = hf.read(131072)
+                        except Exception:
+                            head = b''
+                        dims = _try_parse_jpeg_dimensions(head)
+                        if dims:
+                            orig_w, orig_h = dims
+                            reduce_factor = 1
+                            if orig_w // 8 >= desired_w and orig_h // 8 >= desired_h:
+                                reduce_factor = 8
+                            elif orig_w // 4 >= desired_w and orig_h // 4 >= desired_h:
+                                reduce_factor = 4
+                            elif orig_w // 2 >= desired_w and orig_h // 2 >= desired_h:
+                                reduce_factor = 2
+                            if reduce_factor == 8:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_8
+                            elif reduce_factor == 4:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_4
+                            elif reduce_factor == 2:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_2
+                            else:
+                                img_read_flag = cv2.IMREAD_COLOR
+            except Exception:
+                img_read_flag = cv2.IMREAD_UNCHANGED
+
+            img = cv2.imread(path, img_read_flag)
+            if img is None:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw'
+                return resp
+
+            data, mime = _transform_cv_image(img)
+            did_transform = bool(data and mime)
+            engine = 'opencv' if did_transform else 'raw'
+            if not did_transform:
+                # Fallback to raw bytes when encode is bypassed/failed.
+                with open(path, 'rb') as f:
+                    data = f.read()
+                mime = _guess_image_mime_from_path(path)
+        else:
+            if not ssh:
+                ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            if not sftp:
+                try:
+                    sftp = ssh.open_sftp()
+                except Exception:
+                    sftp = None
+
+            if not transform_requested:
+                data_in = None
+                try:
+                    fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        data_in = f.read()
+                        if not isinstance(data_in, (bytes, bytearray)):
+                            data_in = bytes(data_in)
+                except Exception:
+                    if is_windows:
+                        data_in = _read_windows_file_bytes_via_ssh(ssh, path)
+                        engine = 'windows-pwsh'
+                    else:
+                        raise
+                resp = Response(data_in, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = engine if engine != 'unknown' else 'raw'
+                return resp
+
+            did_transform = False
+            data = None
+            mime = None
+
+            # Windows: try remote thumbnail generation first (much faster than transferring full originals).
+            if is_windows:
+                try:
+                    target_w = new_w if new_w > 0 else new_h
+                    target_h = new_h if new_h > 0 else new_w
+                    if not target_w:
+                        target_w = 0
+                    if not target_h:
+                        target_h = 0
+                    if target_w and not target_h:
+                        target_h = target_w
+                    if target_h and not target_w:
+                        target_w = target_h
+                    geom = f"{int(target_w)}x{int(target_h)}>" if (target_w and target_h) else ""
+
+                    win_tool = _get_remote_windows_imagemagick_tool(server_ip)
+                    if win_tool == 'magick':
+                        out_b, out_mime = _windows_thumbnail_via_imagemagick(ssh, path, geom, fmt_key, quality_eff, timeout_sec=25.0)
+                        if out_b and out_mime:
+                            data, mime = out_b, out_mime
+                            did_transform = True
+                            engine = 'windows-imagemagick'
+                    if not did_transform:
+                        out_b, out_mime = _windows_thumbnail_via_powershell(ssh, path, int(target_w or 0), int(target_h or 0), quality_eff, timeout_sec=25.0)
+                        if out_b and out_mime:
+                            data, mime = out_b, out_mime
+                            did_transform = True
+                            engine = 'windows-powershell-resize'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            # Prefer remote thumbnail generation to avoid transferring the full original image over SSH.
+            remote_tool = None
+            try:
+                if not is_windows_server(server_ip):
+                    remote_tool = _get_remote_linux_imagemagick_tool(server_ip)
+            except Exception:
+                remote_tool = None
+
+            if (not did_transform) and remote_tool:
+                try:
+                    target_w = new_w if new_w > 0 else new_h
+                    target_h = new_h if new_h > 0 else new_w
+                    if not target_w:
+                        target_w = 0
+                    if not target_h:
+                        target_h = 0
+                    if target_w and not target_h:
+                        target_h = target_w
+                    if target_h and not target_w:
+                        target_w = target_h
+                    if target_w and target_h:
+                        geom = f"{target_w}x{target_h}>"
+                    elif target_w:
+                        geom = f"{target_w}x{target_w}>"
+                    else:
+                        geom = ""
+
+                    out_mime = 'image/webp' if fmt_key == 'webp' else ('image/png' if fmt_key == 'png' else 'image/jpeg')
+                    out_spec = 'webp:-' if fmt_key == 'webp' else ('png:-' if fmt_key == 'png' else 'jpg:-')
+
+                    filter_opt = ""
+                    if interp_key != 'area':
+                        filter_opt = " -filter Lanczos"
+                    quality_opt = f" -quality {int(quality_eff)}" if 1 <= quality_eff <= 95 else ""
+                    thumb_opt = f" -thumbnail {shlex.quote(geom)}" if geom else ""
+
+                    # IM7: magick <in> ... <out>; IM6: convert <in> ... <out>
+                    im_cmd = remote_tool
+                    src = shlex.quote(path)
+                    cmd = f"{im_cmd} {src}{thumb_opt}{filter_opt} -strip{quality_opt} {out_spec}"
+                    out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=25.0)
+
+                    if exit_code != 0 or not out_b:
+                        # Fallback when webp delegate is missing etc.
+                        if out_spec == 'webp:-':
+                            cmd2 = f"{im_cmd} {src}{thumb_opt}{filter_opt} -strip{quality_opt} jpg:-"
+                            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd2, timeout_sec=25.0)
+                            if exit_code == 0 and out_b:
+                                out_mime = 'image/jpeg'
+                        if exit_code != 0 or not out_b:
+                            raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'remote thumbnail failed')
+
+                    data = out_b
+                    mime = out_mime
+                    did_transform = True
+                    engine = 'remote-imagemagick'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            if not did_transform:
+                data_in = None
+                try:
+                    fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        data_in = f.read()
+                        if not isinstance(data_in, (bytes, bytearray)):
+                            data_in = bytes(data_in)
+                except Exception:
+                    if is_windows:
+                        data_in = _read_windows_file_bytes_via_ssh(ssh, path)
+                        engine = 'windows-pwsh'
+                    else:
+                        raise
+
+                img = _decode_image_bytes(data_in)
+                data, mime = _transform_cv_image(img)
+                did_transform = bool(data and mime)
+                if not did_transform:
+                    data = data_in
+                    mime = _guess_image_mime_from_path(path)
+                    engine = 'raw'
+                else:
+                    engine = 'opencv' if engine != 'windows-pwsh' else 'windows-pwsh+opencv'
+
+        resp = Response(data, mimetype=mime or 'application/octet-stream')
+        resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+        resp.headers['X-TurboFile-Image-Engine'] = engine
+        return resp
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if sftp:
             try:
                 sftp.close()
             except Exception:
                 pass
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @bp.route('/api/file/read', methods=['GET'])

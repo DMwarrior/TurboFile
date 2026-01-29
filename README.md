@@ -39,6 +39,7 @@ pip install -r requirements.txt
 # system packages
 sudo apt update
 sudo apt install rsync sshpass
+sudo apt install -y imagemagick
 ```
 
 ### Windows 端 SSH + rsync 配置 / Windows SSH + rsync setup

@@ -4342,6 +4342,8 @@
 
 
             const PreviewCache = new Map(); // key -> { type: 'blob'|'text', value: string, ts: number }
+            const PREVIEW_CACHE_MAX_TOTAL = 3500;
+            const PREVIEW_CACHE_MAX_BLOB = 2000;
 
             function normalizePreviewPath(path) {
                 return String(path || '').replace(/\\/g, '/');
@@ -4359,11 +4361,41 @@
                 }
             }
 
+            function trimPreviewCache() {
+                if (PreviewCache.size <= PREVIEW_CACHE_MAX_TOTAL) {
+                    let blobCount = 0;
+                    for (const entry of PreviewCache.values()) {
+                        if (entry && entry.type === 'blob') blobCount++;
+                    }
+                    if (blobCount <= PREVIEW_CACHE_MAX_BLOB) return;
+                }
+
+                let blobCount = 0;
+                for (const entry of PreviewCache.values()) {
+                    if (entry && entry.type === 'blob') blobCount++;
+                }
+
+                while (PreviewCache.size > PREVIEW_CACHE_MAX_TOTAL || blobCount > PREVIEW_CACHE_MAX_BLOB) {
+                    const first = PreviewCache.keys().next();
+                    const firstKey = first && first.value;
+                    if (!firstKey) break;
+                    const entry = PreviewCache.get(firstKey);
+                    if (entry && entry.type === 'blob') blobCount--;
+                    revokePreviewEntry(entry);
+                    PreviewCache.delete(firstKey);
+                }
+            }
+
             function previewCacheGet(server, path, type, variant = '') {
                 const key = getPreviewKey(server, path, variant);
                 const entry = PreviewCache.get(key);
                 if (!entry) return null;
                 if (type && entry.type !== type) return null;
+                // LRU: refresh key ordering.
+                try {
+                    PreviewCache.delete(key);
+                    PreviewCache.set(key, entry);
+                } catch (_) {}
                 return entry;
             }
 
@@ -4374,6 +4406,7 @@
                     revokePreviewEntry(prev);
                 }
                 PreviewCache.set(key, { type, value, ts: Date.now() });
+                trimPreviewCache();
             }
 
             function invalidatePreviewCache(server, paths) {
@@ -4411,14 +4444,42 @@
                 isSource: true
             };
             let imageDeleteInFlight = false;
+            let imagePreviewFetchController = null;
+            let imagePreviewRequestSeq = 0;
+            let imageNavQueuedIndex = null;
+            let imageNavRunning = false;
+            let imagePrefetchTimer = 0;
+            const IMAGE_PREVIEW_LOADING_SRC = (() => {
+                const svg =
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">' +
+                    '<rect width="160" height="120" fill="#0b1220"/>' +
+                    '<text x="80" y="62" fill="#94a3b8" font-family="Arial, sans-serif" font-size="14" text-anchor="middle">Loading...</text>' +
+                    '</svg>';
+                return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+            })();
+
+            function _shouldRetryPreviewError(err) {
+                const msg = String((err && (err.message || err)) || '');
+                const m = msg.match(/HTTP\s+(\d+)/i);
+                if (m) {
+                    const code = Number.parseInt(m[1], 10);
+                    if (Number.isFinite(code)) {
+                        return code >= 500 || code === 408 || code === 429;
+                    }
+                }
+                const lower = msg.toLowerCase();
+                return lower.includes('failed to fetch') || lower.includes('network') || lower.includes('timeout');
+            }
 
         const IMAGE_DPR_CAP = 2;
         const IMAGE_PREVIEW_MAX_DIM = 2200;
         const IMAGE_PREVIEW_MIN_DIM = 320;
         const IMAGE_PREVIEW_QUALITY = 82;
-        const IMAGE_GRID_THUMB_MAX = 1024;
-        const IMAGE_GRID_THUMB_MIN = 120;
-        const IMAGE_GRID_THUMB_QUALITY = 82;
+        const IMAGE_PREVIEW_DIM_STEP = 128;
+        const IMAGE_GRID_THUMB_MAX = 640;
+        const IMAGE_GRID_THUMB_MIN = 96;
+        const IMAGE_GRID_THUMB_QUALITY = 72;
+        const IMAGE_GRID_THUMB_STEP = 64;
 
         function clampNumber(value, min, max) {
             if (!Number.isFinite(value)) return min;
@@ -4427,10 +4488,19 @@
             return value;
         }
 
+        function quantizeNumber(value, step) {
+            const n = Number(value);
+            const s = Math.max(1, Number(step) || 1);
+            if (!Number.isFinite(n)) return 0;
+            return Math.round(n / s) * s;
+        }
+
         function getImagePreviewRequestSize() {
             const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
-            const width = clampNumber(Math.round(window.innerWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
-            const height = clampNumber(Math.round(window.innerHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const widthRaw = clampNumber(Math.round(window.innerWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const heightRaw = clampNumber(Math.round(window.innerHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const width = clampNumber(quantizeNumber(widthRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const height = clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
             return { width, height, quality: IMAGE_PREVIEW_QUALITY };
         }
 
@@ -4440,6 +4510,7 @@
             const quality = Math.max(0, Number.parseInt(options.quality, 10) || 0);
             const interp = options.interp ? String(options.interp) : '';
             const format = options.format ? String(options.format).toLowerCase() : '';
+            const signal = options.signal;
             const interpKey = interp ? `i${interp}` : '';
             const formatKey = format ? `f${format}` : '';
             const variant = (width || height || quality || interpKey || formatKey)
@@ -4456,7 +4527,11 @@
             if (quality > 0) params.set('quality', String(quality));
             if (interp) params.set('interp', interp);
             if (format) params.set('format', format);
-            const resp = await fetch(`/api/image/stream?${params.toString()}`, { cache: 'no-store' });
+            const fetchOptions = { cache: 'no-store' };
+            if (signal) {
+                fetchOptions.signal = signal;
+            }
+            const resp = await fetch(`/api/image/stream?${params.toString()}`, fetchOptions);
             if (!resp.ok) {
                 let msg = '';
                 try { msg = await resp.text(); } catch (_) {}
@@ -4517,60 +4592,228 @@
                 caption.textContent = sizeText ? `${base} | ${sizeText}` : base;
             }
 
+            function prefetchAdjacentPreviewImages(currentIndex) {
+                try {
+                    const items = ImageViewer.items || [];
+                    const len = items.length || 0;
+                    if (len <= 1) return;
+                    const server = ImageViewer.server;
+                    if (!server) return;
+
+                    const req = getImagePreviewRequestSize();
+                    const options = { width: req.width, height: req.height, quality: req.quality, interp: 'lanczos', format: 'webp' };
+
+                    const prevIndex = (currentIndex - 1 + len) % len;
+                    const nextIndex = (currentIndex + 1) % len;
+                    const targets = [prevIndex, nextIndex];
+
+                    targets.forEach((idx) => {
+                        const it = items[idx];
+                        if (!it || !it.path) return;
+                        getImageBlobUrl(server, it.path, options).catch(() => {});
+                    });
+                } catch (_) {}
+            }
+
+            function schedulePrefetchAdjacentPreviewImages(currentIndex) {
+                try {
+                    if (imagePrefetchTimer) {
+                        clearTimeout(imagePrefetchTimer);
+                        imagePrefetchTimer = 0;
+                    }
+                    imagePrefetchTimer = setTimeout(() => {
+                        imagePrefetchTimer = 0;
+                        prefetchAdjacentPreviewImages(currentIndex);
+                    }, 180);
+                } catch (_) {}
+            }
+
+            function requestShowImageAt(index) {
+                const n = Number.parseInt(index, 10);
+                if (!Number.isFinite(n)) return;
+                imageNavQueuedIndex = n;
+
+                // If already navigating, cancel the in-flight load so we can jump quickly.
+                if (imageNavRunning) {
+                    imagePreviewRequestSeq++;
+                    if (imagePreviewFetchController) {
+                        try { imagePreviewFetchController.abort(); } catch (_) {}
+                    }
+                    return;
+                }
+
+                imageNavRunning = true;
+                (async () => {
+                    while (imageNavQueuedIndex !== null) {
+                        const nextIndex = imageNavQueuedIndex;
+                        imageNavQueuedIndex = null;
+                        await showImageAt(nextIndex);
+                    }
+                })()
+                    .catch(() => {})
+                    .finally(() => { imageNavRunning = false; });
+            }
+
             async function showImageAt(index) {
                 if (!ImageViewer.items || ImageViewer.items.length === 0) return;
                 const len = ImageViewer.items.length;
                 if (len === 0) return;
+                index = Number.parseInt(index, 10);
+                if (!Number.isFinite(index)) index = 0;
                 if (index < 0) index = len - 1;
                 if (index >= len) index = 0;
                 ImageViewer.index = index;
                 const item = ImageViewer.items[index];
                 const server = ImageViewer.server;
+                if (!item || !item.path || !server) return;
+                const reqId = ++imagePreviewRequestSeq;
 
 
                 const modal = document.getElementById('imagePreviewModal');
-                const img = modal.querySelector('img');
+                const img = modal ? modal.querySelector('img') : null;
                 if (modal && img) {
+                    try {
+                        const gridModal = document.getElementById('imageGridModal');
+                        if (gridModal && gridModal.style.display !== 'none') {
+                            pauseImageGridLoading();
+                        }
+                    } catch (_) {}
                     modal.style.display = 'block';
                     img.style.opacity = '0.3';
                     img.decoding = 'async';
                     img.dataset.imagePath = item.path || '';
-                    img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+                    img.src = IMAGE_PREVIEW_LOADING_SRC;
                     imageZoom = 1;
                     imageOffsetX = 0;
                     imageOffsetY = 0;
                     applyImageTransform(img);
                 }
+                _updateImageCaption(item, index, len, '');
 
                 try {
-                    const blobUrl = await getImageBlobUrl(server, item.path);
+                    if (imagePreviewFetchController) {
+                        try { imagePreviewFetchController.abort(); } catch (_) {}
+                    }
+                    imagePreviewFetchController = new AbortController();
+                    const req = getImagePreviewRequestSize();
+                    const options = {
+                        width: req.width,
+                        height: req.height,
+                        quality: req.quality,
+                        interp: 'lanczos',
+                        format: 'webp',
+                        signal: imagePreviewFetchController.signal
+                    };
+
+                    let blobUrl = null;
+                    let lastErr = null;
+                    for (let attempt = 0; attempt < 2; attempt++) {
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        try {
+                            blobUrl = await getImageBlobUrl(server, item.path, options);
+                            lastErr = null;
+                            break;
+                        } catch (e) {
+                            lastErr = e;
+                            if (e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort'))) {
+                                throw e;
+                            }
+                            if (attempt === 0 && _shouldRetryPreviewError(e)) {
+                                await new Promise(r => setTimeout(r, 180 + Math.floor(Math.random() * 140)));
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    if (!blobUrl) {
+                        throw lastErr || new Error('加载失败');
+                    }
 
 
+                    if (reqId !== imagePreviewRequestSeq) return;
                     if (img) {
                         const expectedPath = item.path || '';
+                        if (img.dataset.imagePath !== expectedPath) return;
+                        img.onerror = () => {
+                            if (reqId !== imagePreviewRequestSeq) return;
+                            if (img.dataset.imagePath !== expectedPath) return;
+                            img.style.opacity = '1';
+                            _updateImageCaption(item, index, len, '加载失败');
+                        };
                         img.onload = () => {
+                            if (reqId !== imagePreviewRequestSeq) return;
                             if (img.dataset.imagePath !== expectedPath) return;
                             img.style.opacity = '1';
                             _updateImageCaption(item, index, len, _getImageSizeText(img));
                         };
                         img.src = blobUrl;
                     }
-                    _updateImageCaption(item, index, len, '');
+
+                    // Prefetch neighbors (debounced) to make switching feel instant without flooding.
+                    schedulePrefetchAdjacentPreviewImages(index);
                 } catch (e) {
+                    if (e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort'))) {
+                        return;
+                    }
+                    if (reqId !== imagePreviewRequestSeq) return;
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
-                    closeImageModal();
+                    if (img && img.dataset.imagePath === (item.path || '')) {
+                        img.style.opacity = '1';
+                    }
+                    _updateImageCaption(item, index, len, '加载失败');
                 }
             }
 
             async function previewImage(server, path, name, isSource) {
                 try {
                     const state = isSource ? browseState.source : browseState.target;
-                    if (!state.fullItems || state.fullHasMore) {
-                        await ensureAllItemsLoaded(isSource);
+
+                    // If opened from the image grid, use its in-memory list for instant preview.
+                    try {
+                        const gridModal = document.getElementById('imageGridModal');
+                        const gridVisible = gridModal && gridModal.style.display !== 'none';
+                        if (gridVisible &&
+                            imageGridActiveServer === server &&
+                            imageGridActiveIsSource === isSource &&
+                            Array.isArray(imageGridItems) &&
+                            imageGridItems.length) {
+                            const imgs = imageGridItems.map(it => ({ path: it.path, name: it.name }));
+                            let idx = imgs.findIndex(it => it.path === path && it.name === name);
+                            if (idx < 0) {
+                                idx = imgs.findIndex(it => it.path === path);
+                                if (idx < 0) idx = 0;
+                            }
+                            ImageViewer.items = imgs;
+                            ImageViewer.index = idx >= 0 ? idx : 0;
+                            ImageViewer.server = server;
+                            ImageViewer.isSource = isSource;
+                            await showImageAt(ImageViewer.index);
+                            return;
+                        }
+                    } catch (_) {}
+
+                    // Fast path: show immediately using already-loaded entries, then load the rest in background.
+                    if (state.fullItems && state.fullItems.length) {
+                        buildImageViewer(server, path, name, isSource);
+                        await showImageAt(ImageViewer.index);
+                        if (state.fullHasMore) {
+                            ensureAllItemsLoaded(isSource)
+                                .then(() => buildImageViewer(server, path, name, isSource))
+                                .catch(() => {});
+                        }
+                        return;
                     }
-                    buildImageViewer(server, path, name, isSource);
-                    await showImageAt(ImageViewer.index);
+
+                    // Minimal fallback: show the current image first, then build the full list asynchronously.
+                    ImageViewer.items = [{ path, name }];
+                    ImageViewer.index = 0;
+                    ImageViewer.server = server;
+                    ImageViewer.isSource = isSource;
+                    await showImageAt(0);
+                    ensureAllItemsLoaded(isSource)
+                        .then(() => buildImageViewer(server, path, name, isSource))
+                        .catch(() => {});
                 } catch (e) {
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
@@ -4666,6 +4909,16 @@
                 const modal = document.getElementById('imagePreviewModal');
                 if (!modal) return;
                 modal.style.display = 'none';
+                imagePreviewRequestSeq++;
+                imageNavQueuedIndex = null;
+                if (imagePrefetchTimer) {
+                    clearTimeout(imagePrefetchTimer);
+                    imagePrefetchTimer = 0;
+                }
+                if (imagePreviewFetchController) {
+                    try { imagePreviewFetchController.abort(); } catch (_) {}
+                    imagePreviewFetchController = null;
+                }
                 const img = modal.querySelector('img');
                 if (img) img.removeAttribute('src');
                 imageZoom = 1;
@@ -4675,6 +4928,12 @@
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
                 ImageViewer.index = -1;
+                try {
+                    const gridModal = document.getElementById('imageGridModal');
+                    if (gridModal && gridModal.style.display !== 'none') {
+                        resumeImageGridLoading(gridModal);
+                    }
+                } catch (_) {}
 	            }
 
 		            let imageGridObserver = null;
@@ -4683,9 +4942,12 @@
 		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
 		            let imageGridColsControlsBound = false;
 		            let imageGridColsRaf = 0;
-            const IMAGE_GRID_MAX_PARALLEL = 16;
-            const IMAGE_GRID_MAX_PARALLEL_EAGER = 24;
-            const IMAGE_GRID_MAX_PARALLEL_BURST = 28;
+            const IMAGE_GRID_MAX_PARALLEL = 24;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER = 32;
+            const IMAGE_GRID_MAX_PARALLEL_BURST = 40;
+            const IMAGE_GRID_MAX_PARALLEL_WIN = 10;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER_WIN = 12;
+            const IMAGE_GRID_MAX_PARALLEL_BURST_WIN = 16;
             const IMAGE_GRID_BURST_DURATION = 1200;
             const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
             const imageGridLoadQueue = [];
@@ -4700,7 +4962,7 @@
             let imageGridEagerQueued = false;
             let imageGridScrollBound = false;
             const IMAGE_GRID_VIRTUAL_THRESHOLD = 320;
-            const IMAGE_GRID_VIRTUAL_OVERSCAN = 6;
+            const IMAGE_GRID_VIRTUAL_OVERSCAN = 3;
             let imageGridItems = [];
             let imageGridVirtualEnabled = false;
             let imageGridRowHeight = 0;
@@ -4730,7 +4992,8 @@
 		                const colWidth = available / cols;
 		                const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
 		                const scaled = Math.round(colWidth * dpr);
-		                return clampNumber(scaled, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
+		                const quantized = quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP);
+		                return clampNumber(quantized, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 		            }
 
             function scheduleImageGridThumbUpdate() {
@@ -4742,11 +5005,15 @@
             }
 
 		            function getImageGridParallelLimit() {
-		                if (imageGridBurstUntil && Date.now() < imageGridBurstUntil) {
-		                    return IMAGE_GRID_MAX_PARALLEL_BURST;
-		                }
-		                return imageGridEagerMode ? IMAGE_GRID_MAX_PARALLEL_EAGER : IMAGE_GRID_MAX_PARALLEL;
-		            }
+		                const isWin = imageGridActiveServer && isWindowsServer(imageGridActiveServer);
+		                const maxNormal = isWin ? IMAGE_GRID_MAX_PARALLEL_WIN : IMAGE_GRID_MAX_PARALLEL;
+		                const maxEager = isWin ? IMAGE_GRID_MAX_PARALLEL_EAGER_WIN : IMAGE_GRID_MAX_PARALLEL_EAGER;
+		                const maxBurst = isWin ? IMAGE_GRID_MAX_PARALLEL_BURST_WIN : IMAGE_GRID_MAX_PARALLEL_BURST;
+			                if (imageGridBurstUntil && Date.now() < imageGridBurstUntil) {
+			                    return maxBurst;
+			                }
+			                return imageGridEagerMode ? maxEager : maxNormal;
+			            }
 
 		            function normalizeImageGridCols(value) {
 		                const n = Number.parseInt(value, 10);
@@ -4977,6 +5244,10 @@
                 container.innerHTML = '';
                 container.appendChild(frag);
 
+                if (force) {
+                    activateImageGridBurstLoad();
+                }
+
                 if (!imageGridRowMeasured) {
                     imageGridRowMeasured = true;
                     requestAnimationFrame(() => {
@@ -5099,7 +5370,29 @@
 		                        }
 		                    })
 		                    .finally(() => {
+		                        if (task.imgEl) {
+		                            try { delete task.imgEl.dataset.loading; } catch (_) { task.imgEl.dataset.loading = '0'; }
+		                        }
 		                        imageGridLoadingCount = Math.max(0, imageGridLoadingCount - 1);
+		                        // Best-effort retry once for transient failures (SSH hiccups, temporary overload).
+		                        try {
+		                            if (task.imgEl && task.imgEl.isConnected && task.imgEl.dataset.loaded === 'err') {
+		                                const retryCount = Number.parseInt(task.imgEl.dataset.retry || '0', 10) || 0;
+		                                if (retryCount < 1) {
+		                                    task.imgEl.dataset.retry = String(retryCount + 1);
+		                                    const card = task.imgEl.closest && task.imgEl.closest('.image-grid-card');
+		                                    if (card) {
+		                                        const delay = 600 + Math.floor(Math.random() * 500);
+		                                        setTimeout(() => {
+		                                            if (!task.imgEl || !task.imgEl.isConnected) return;
+		                                            if (task.imgEl.dataset.loaded !== 'err') return;
+		                                            task.imgEl.dataset.loaded = '0';
+		                                            scheduleImageGridLoad(card, true);
+		                                        }, delay);
+		                                    }
+		                                }
+		                            }
+		                        } catch (_) {}
 		                        requestAnimationFrame(processImageGridQueue);
 		                    });
 		            }
@@ -5187,19 +5480,19 @@
 	                    entries.forEach(entry => {
 	                        if (!entry.isIntersecting) return;
 	                        const card = entry.target;
-	                        scheduleImageGridLoad(card);
+	                        scheduleImageGridLoad(card, true);
 	                        imageGridObserver && imageGridObserver.unobserve(card);
 	                    });
 	                }, {
 	                    root: rootEl || null,
-	                    rootMargin: '600px',
+	                    rootMargin: '400px',
 	                    threshold: 0.01
 	                });
 	            }
 
-	            function loadImageCardImmediately(card) {
-	                scheduleImageGridLoad(card);
-	            }
+		            function loadImageCardImmediately(card) {
+		                scheduleImageGridLoad(card, true);
+		            }
 
 	            function ensureImageGridScrollWatcher(modal) {
 	                if (imageGridScrollBound || !modal) return;
@@ -5310,6 +5603,13 @@
 
                 const ensureAndRender = async () => {
                     try {
+                        let burstKicked = false;
+                        const kickBurst = () => {
+                            if (burstKicked) return;
+                            burstKicked = true;
+                            requestAnimationFrame(() => activateImageGridBurstLoad());
+                        };
+
                         const initial = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
                         imageGridItems = initial.slice();
                         const switchedInitial = setImageGridVirtualEnabled(shouldUseImageGridVirtual(imageGridItems.length));
@@ -5320,6 +5620,7 @@
                             scheduleImageGridVirtualRender(true);
                         } else if (imageGridItems.length) {
                             appendImagesChunked(imageGridItems, server);
+                            kickBurst();
                         } else {
                             container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
                         }
@@ -5351,6 +5652,7 @@
                                             container.innerHTML = '';
                                         }
                                         renderBatch(pageFiles, server);
+                                        kickBurst();
                                     }
                                 }
                                 state.fullItems = (state.fullItems || []).concat(data.files || []);
@@ -5694,8 +5996,8 @@
                 if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
                 const prevBtn = document.getElementById('imagePrevBtn');
                 const nextBtn = document.getElementById('imageNextBtn');
-                if (prevBtn) prevBtn.addEventListener('click', () => showImageAt(ImageViewer.index - 1));
-                if (nextBtn) nextBtn.addEventListener('click', () => showImageAt(ImageViewer.index + 1));
+                if (prevBtn) prevBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index - 1));
+                if (nextBtn) nextBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index + 1));
 
                 const ta = document.getElementById('editorTextarea');
                 if (ta) {
@@ -5949,10 +6251,10 @@
                 if (visible && ImageViewer.items.length > 0) {
                     if (e.key === 'ArrowLeft') {
                         e.preventDefault();
-                        showImageAt(ImageViewer.index - 1);
+                        requestShowImageAt(ImageViewer.index - 1);
                     } else if (e.key === 'ArrowRight') {
                         e.preventDefault();
-                        showImageAt(ImageViewer.index + 1);
+                        requestShowImageAt(ImageViewer.index + 1);
                     }
                 }
 

@@ -131,3 +131,6 @@ development.ini
 # 数据文件（包含敏感信息）
 data/config.json
 data/client_paths.json
+
+# 图片缩略图/预览缓存（运行时生成）
+data/image_cache/
