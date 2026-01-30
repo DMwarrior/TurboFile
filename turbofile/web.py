@@ -696,8 +696,33 @@ def api_image_stream():
             data = None
             mime = None
 
-            # Windows: try remote thumbnail generation first (much faster than transferring full originals).
+            # Windows: prefer SFTP read + local OpenCV transform first (fast path similar to older versions).
+            # This avoids spawning a PowerShell/ImageMagick process per image when SFTP access works.
             if is_windows:
+                try:
+                    data_in = None
+                    try:
+                        fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', True)
+                        with fobj as f:
+                            data_in = f.read()
+                            if not isinstance(data_in, (bytes, bytearray)):
+                                data_in = bytes(data_in)
+                    except Exception:
+                        data_in = None
+
+                    if data_in:
+                        img = _decode_image_bytes(data_in)
+                        data, mime = _transform_cv_image(img)
+                        did_transform = bool(data and mime)
+                        if did_transform:
+                            engine = 'opencv'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            # Windows fallback: remote thumbnail generation (handles cases where SFTP path mapping fails).
+            if is_windows and (not did_transform):
                 try:
                     target_w = new_w if new_w > 0 else new_h
                     target_h = new_h if new_h > 0 else new_w
@@ -719,7 +744,17 @@ def api_image_stream():
                             did_transform = True
                             engine = 'windows-imagemagick'
                     if not did_transform:
-                        out_b, out_mime = _windows_thumbnail_via_powershell(ssh, path, int(target_w or 0), int(target_h or 0), quality_eff, timeout_sec=25.0)
+                        # For grid thumbnails, use a faster scaling preset to reduce per-image latency.
+                        is_thumb = max(int(target_w or 0), int(target_h or 0)) <= 900
+                        out_b, out_mime = _windows_thumbnail_via_powershell(
+                            ssh,
+                            path,
+                            int(target_w or 0),
+                            int(target_h or 0),
+                            quality_eff,
+                            fast=bool(is_thumb),
+                            timeout_sec=25.0
+                        )
                         if out_b and out_mime:
                             data, mime = out_b, out_mime
                             did_transform = True
@@ -1167,13 +1202,34 @@ def handle_start_transfer(data):
     # Get client IP.
     client_ip = _get_client_ip()
 
+    source_server = data.get('source_server')
+    target_server = data.get('target_server')
+    target_path = data.get('target_path')
+    source_files = data.get('source_files') or []
+    mode = data.get('mode', 'copy')
+    fast_ssh = data.get('fast_ssh', True)
+
+    select_all = bool(data.get('select_all', False))
+    source_dir = data.get('source_dir') or ''
+    exclude_paths = data.get('exclude_paths') or []
+
+    if not source_server or not target_server or not target_path:
+        emit('transfer_cancelled', {'status': 'error', 'message': '参数不完整：请提供源/目标服务器与目标路径'})
+        return
+    if select_all and not source_dir:
+        emit('transfer_cancelled', {'status': 'error', 'message': '全选传输缺少 source_dir'})
+        return
+
     # Record transfer task.
     active_transfers[transfer_id] = {
-        'source_server': data['source_server'],
-        'source_files': data['source_files'],
-        'target_server': data['target_server'],
-        'target_path': data['target_path'],
-        'mode': data.get('mode', 'copy'),
+        'source_server': source_server,
+        'source_files': source_files,
+        'target_server': target_server,
+        'target_path': target_path,
+        'mode': mode,
+        'select_all': select_all,
+        'source_dir': source_dir,
+        'exclude_paths': exclude_paths,
         'parallel_enabled': parallel_enabled,
         'start_time': datetime.now(),
         'client_ip': client_ip
@@ -1183,12 +1239,15 @@ def handle_start_transfer(data):
     # Start immediate parallel transfer.
     start_instant_parallel_transfer(
         transfer_id,
-        data['source_server'],
-        data['source_files'],
-        data['target_server'],
-        data['target_path'],
-        data.get('mode', 'copy'),
-        data.get('fast_ssh', True),
+        source_server,
+        source_files,
+        target_server,
+        target_path,
+        mode,
+        fast_ssh,
+        select_all=select_all,
+        source_dir=source_dir,
+        exclude_paths=exclude_paths,
         parallel_enabled=parallel_enabled
     )
 
@@ -1305,15 +1364,152 @@ def delete_files():
     start_ts = time.time()
     client_ip = _get_client_ip()
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         server_ip = data.get('server')
         paths = data.get('paths', [])  # Support batch delete.
+        delete_all = bool(data.get('delete_all', False))
+        base_dir = data.get('base_dir') or ''
+        exclude_paths = data.get('exclude_paths') or []
+        show_hidden = bool(data.get('show_hidden', False))
 
-        if not server_ip or not paths:
+        if not server_ip:
             return jsonify({'success': False, 'error': '缺少必要参数'})
 
         is_windows = is_windows_server(server_ip)
         is_local = is_local_server(server_ip)
+
+        if delete_all:
+            if not base_dir:
+                return jsonify({'success': False, 'error': '缺少必要参数'}), 400
+
+            deleted_count = 0
+            failed_items = []
+            parent_dirs = {str(base_dir).replace('\\', '/')}
+
+            if is_local:
+                # Local delete: delete immediate children of base_dir.
+                if is_windows:
+                    # Best-effort: try PowerShell on local Windows (rare).
+                    win_dir = normalize_windows_path_for_cmd(base_dir)
+                    exclude_win = [normalize_windows_path_for_cmd(p) for p in exclude_paths if p]
+                    ps_dir = _escape_pwsh_literal(win_dir)
+                    ps_ex = ",".join([f"'{_escape_pwsh_literal(p)}'" for p in exclude_win])
+                    force_flag = "-Force" if show_hidden else ""
+                    ps_script = (
+                        "$failed=@();"
+                        f"$dir='{ps_dir}';"
+                        f"$exclude=@({ps_ex});"
+                        f"$items=Get-ChildItem -LiteralPath $dir {force_flag};"
+                        "foreach($it in $items){"
+                        "  $p=$it.FullName;"
+                        "  if($exclude -contains $p){ continue }"
+                        "  $err='';"
+                        "  try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                        "  if(Test-Path -LiteralPath $p){"
+                        "    if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                        "    $failed += [pscustomobject]@{path=$p; error=$err}"
+                        "  }"
+                        "}"
+                        "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                        "exit 0"
+                    )
+                    cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                    try:
+                        subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+                    except subprocess.CalledProcessError as e:
+                        failed_items.append({'path': base_dir, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
+                else:
+                    find_args = ['find', base_dir, '-mindepth', '1', '-maxdepth', '1']
+                    if not show_hidden:
+                        find_args += ['!', '-name', '.*']
+                    for p in exclude_paths:
+                        if p:
+                            find_args += ['!', '-path', p]
+                    find_args += ['-exec', 'rm', '-rf', '--', '{}', '+']
+                    try:
+                        subprocess.check_output(['sudo', '-n'] + find_args, stderr=subprocess.STDOUT)
+                    except subprocess.CalledProcessError:
+                        # Fallback without sudo.
+                        subprocess.check_output(find_args, stderr=subprocess.STDOUT)
+            else:
+                # Remote delete: delete immediate children of base_dir.
+                if is_windows:
+                    win_dir = normalize_windows_path_for_cmd(base_dir)
+                    exclude_win = [normalize_windows_path_for_cmd(p) for p in exclude_paths if p]
+                    ps_dir = _escape_pwsh_literal(win_dir)
+                    ps_ex = ",".join([f"'{_escape_pwsh_literal(p)}'" for p in exclude_win])
+                    force_flag = "-Force" if show_hidden else ""
+                    ps_script = (
+                        "$failed=@();"
+                        f"$dir='{ps_dir}';"
+                        f"$exclude=@({ps_ex});"
+                        f"$items=Get-ChildItem -LiteralPath $dir {force_flag};"
+                        "foreach($it in $items){"
+                        "  $p=$it.FullName;"
+                        "  if($exclude -contains $p){ continue }"
+                        "  $err='';"
+                        "  try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                        "  if(Test-Path -LiteralPath $p){"
+                        "    if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                        "    $failed += [pscustomobject]@{path=$p; error=$err}"
+                        "  }"
+                        "}"
+                        "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                        "exit 0"
+                    )
+                    delete_cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
+                    if exit_code != 0:
+                        failed_items.append({'path': base_dir, 'error': stderr or stdout or '删除失败'})
+                else:
+                    parts = [
+                        "find",
+                        shlex.quote(base_dir),
+                        "-mindepth 1",
+                        "-maxdepth 1",
+                    ]
+                    if not show_hidden:
+                        parts.append("! -name '.*'")
+                    for p in exclude_paths:
+                        if p:
+                            parts.append(f"! -path {shlex.quote(p)}")
+                    parts.append("-exec rm -rf -- {} +")
+                    find_cmd = " ".join(parts)
+                    rm_cmd_sudo = f"sudo -n {find_cmd}"
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd_sudo)
+                    if exit_code != 0:
+                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, find_cmd)
+                    if exit_code != 0:
+                        failed_items.append({'path': base_dir, 'error': stderr or stdout or '删除失败'})
+
+            # Clear cache for affected dirs to refresh the browser view.
+            cache_cleared = 0
+            try:
+                for d in parent_dirs:
+                    cache_cleared += clear_cached_listing(server_ip, d)
+            except Exception:
+                pass
+
+            if failed_items:
+                return jsonify({
+                    'success': False,
+                    'deleted_all': False,
+                    'deleted_count': deleted_count,
+                    'failed_items': failed_items,
+                    'cache_cleared': cache_cleared,
+                    'error': '删除失败'
+                })
+
+            return jsonify({
+                'success': True,
+                'deleted_all': True,
+                'deleted_count': deleted_count,
+                'cache_cleared': cache_cleared,
+                'message': '删除完成'
+            })
+
+        if not paths:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
 
         deleted_count = 0
         failed_items = []

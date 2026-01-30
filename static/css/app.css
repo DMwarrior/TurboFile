@@ -132,6 +132,32 @@
             box-shadow: none;
         }
 
+        /* Virtual "Select All" mode: avoid touching tens of thousands of DOM nodes. */
+        .file-browser.select-all-mode .file-item.selectable {
+            background: #cce8ff;
+            color: #111827;
+            box-shadow: none;
+            border: 1px solid #99caff;
+        }
+
+        .file-browser.select-all-mode .file-item.selectable:hover {
+            background: #cce8ff;
+            color: #111827;
+            box-shadow: none;
+        }
+
+        /* Excluded items in select-all mode. */
+        .file-browser.select-all-mode .file-item.selectable.deselected {
+            background: transparent;
+            color: inherit;
+            border: 1px solid transparent;
+        }
+
+        .file-browser.select-all-mode .file-item.selectable.deselected:hover {
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            box-shadow: var(--shadow-sm);
+        }
+
         .file-item i {
             margin-right: 6px;
             width: 14px;

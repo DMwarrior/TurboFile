@@ -1,14 +1,18 @@
 
         const socket = io();
         let currentTransferId = null;
-        let latestTransferredBytes = 0;
-        let selectedSourceFiles = [];
-        let selectedTargetFiles = [];
-        let currentTransferDirection = 'ltr';
-        let currentTransferMode = 'copy';
-        let currentSourcePath = '';
-        let currentTargetPath = '';
-        let transferContext = null;
+	        let latestTransferredBytes = 0;
+	        let selectedSourceFiles = [];
+	        let selectedTargetFiles = [];
+	        const selectAllState = {
+	            source: { active: false, excluded: new Set(), path: null },
+	            target: { active: false, excluded: new Set(), path: null }
+	        };
+	        let currentTransferDirection = 'ltr';
+	        let currentTransferMode = 'copy';
+	        let currentSourcePath = '';
+	        let currentTargetPath = '';
+	        let transferContext = null;
 
 
         let windowsDrivesSource = [];
@@ -506,21 +510,22 @@
             return panel === 'target' ? currentTargetPath : currentSourcePath;
         }
 
-        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null, skipMoveConfirm = false) {
-            if (isTransferring) {
-                addLogWarning('⚠️ 已有传输任务在进行中');
-                return false;
-            }
+	        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null, skipMoveConfirm = false) {
+	            if (isTransferring) {
+	                addLogWarning('⚠️ 已有传输任务在进行中');
+	                return false;
+	            }
 
-            const files = _cloneTransferFiles(sourceFiles || []);
-            if (!files.length) {
-                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
-                return false;
-            }
+	            const selectAllPayload = (sourceFiles && sourceFiles.select_all) ? sourceFiles : null;
+	            const files = selectAllPayload ? [] : _cloneTransferFiles(sourceFiles || []);
+	            if (!selectAllPayload && !files.length) {
+	                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
+	                return false;
+	            }
 
-            const finalMode = (mode === 'move') ? 'move' : 'copy';
-            currentTransferMode = finalMode;
-            currentTransferDirection = direction || currentTransferDirection || 'ltr';
+	            const finalMode = (mode === 'move') ? 'move' : 'copy';
+	            currentTransferMode = finalMode;
+	            currentTransferDirection = direction || currentTransferDirection || 'ltr';
 
             const fastSSH = true;
             const parallelTransfer = true;
@@ -537,25 +542,43 @@
             }
 
 
-            if (!sourceServer || !targetServer || !targetPath) {
-                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
-                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
-                return false;
-            }
+	            if (!sourceServer || !targetServer || !targetPath) {
+	                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
+	                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
+	                return false;
+	            }
 
 
-            if (sourceServer === targetServer) {
-                const hasConflict = files.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
-                    return false;
-                }
-            }
+	            if (sourceServer === targetServer) {
+	                if (selectAllPayload && selectAllPayload.source_dir) {
+	                    const srcDir = String(selectAllPayload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const conflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (conflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return false;
+	                    }
+	                } else {
+	                    const hasConflict = files.some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return false;
+	                    }
+	                }
+	            }
 
-            cacheTransferContext(sourceServer, targetServer, '', targetPath, files, finalMode);
+	            cacheTransferContext(
+	                sourceServer,
+	                targetServer,
+	                selectAllPayload ? (selectAllPayload.source_dir || '') : '',
+	                targetPath,
+	                files,
+	                finalMode
+	            );
 
 
             transferRefreshOverride = refreshOverride;
@@ -569,24 +592,40 @@
             if (startBtn) startBtn.style.display = 'none';
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
-            const fileNames = files.map(f => f.name).join(', ');
-            addLogInfo(`📤 源: ${sourceServer} (${files.length}项)`);
-            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
-            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            const fileNames = files.map(f => f.name).join(', ');
+	            if (selectAllPayload) {
+	                const excludedCount = (selectAllPayload.exclude_paths || []).length;
+	                const excludedText = excludedCount > 0 ? `，排除 ${excludedCount} 项` : '';
+	                addLogInfo(`📤 源: ${sourceServer} (当前目录全部${excludedText})`);
+	            } else {
+	                addLogInfo(`📤 源: ${sourceServer} (${files.length}项)`);
+	            }
+	            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+	            if (selectAllPayload) {
+	                addLogInfo(`📋 目录: ${selectAllPayload.source_dir || ''}`);
+	            } else {
+	                addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            }
 
 
-            socket.emit('start_transfer', {
-                source_server: sourceServer,
-                source_files: files,
-                target_server: targetServer,
-                target_path: targetPath,
-                mode: finalMode,
-                fast_ssh: fastSSH,
-                parallel_transfer: parallelTransfer
-            });
+	            const payload = {
+	                source_server: sourceServer,
+	                source_files: files,
+	                target_server: targetServer,
+	                target_path: targetPath,
+	                mode: finalMode,
+	                fast_ssh: fastSSH,
+	                parallel_transfer: parallelTransfer
+	            };
+	            if (selectAllPayload) {
+	                payload.select_all = true;
+	                payload.source_dir = selectAllPayload.source_dir || '';
+	                payload.exclude_paths = selectAllPayload.exclude_paths || [];
+	            }
+	            socket.emit('start_transfer', payload);
 
-            return true;
-        }
+	            return true;
+	        }
 
         function setTransferClipboardFromSelection(mode) {
             if (isTransferring) {
@@ -1472,25 +1511,89 @@
         }
 
 
-        async function deleteSelected(type, event) {
-            const blurBtn = () => {
-                if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
-                    event.currentTarget.blur();
-                }
-            };
-            blurBtn();
-            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
-            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+	        async function deleteSelected(type, event) {
+	            const blurBtn = () => {
+	                if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
+	                    event.currentTarget.blur();
+	                }
+	            };
+	            blurBtn();
+	            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
+	            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+	            const isSource = type === 'source';
 
-            if (!server) {
-                addLogWarning('⚠️ 请先选择服务器');
-                return;
-            }
+	            if (!server) {
+	                addLogWarning('⚠️ 请先选择服务器');
+	                return;
+	            }
 
-            if (selectedFiles.length === 0) {
-                addLogWarning('⚠️ 请先选择要删除的文件或文件夹');
-                return;
-            }
+	            const deleteSelectAll = async () => {
+	                const baseDir = isSource ? currentSourcePath : currentTargetPath;
+	                if (!baseDir) {
+	                    addLogWarning('⚠️ 当前目录为空，无法删除');
+	                    return;
+	                }
+	                const state = isSource ? browseState.source : browseState.target;
+	                const total = state.total || state.loadedCount || 0;
+	                const excluded = isSource ? selectAllState.source.excluded : selectAllState.target.excluded;
+	                const excludePaths = Array.from(excluded || []);
+	                const { showHiddenCheckbox } = getPanelConfig(isSource);
+	                const showHidden = !!(document.getElementById(showHiddenCheckbox) && document.getElementById(showHiddenCheckbox).checked);
+
+	                const excludedText = excludePaths.length > 0 ? `（已排除 ${excludePaths.length} 项）` : '';
+	                const msg = total > 0
+	                    ? `确定要删除当前目录全部内容吗？（共 ${total} 项）${excludedText}`
+	                    : `确定要删除当前目录全部内容吗？${excludedText}`;
+	                const ok = await showConfirmDialog(msg, {
+	                    title: '删除确认',
+	                    warning: '此操作不可恢复！',
+	                    danger: true,
+	                    confirmText: '删除'
+	                });
+	                if (!ok) return;
+
+	                try {
+	                    const response = await fetch('/api/delete', {
+	                        method: 'POST',
+	                        headers: { 'Content-Type': 'application/json' },
+	                        body: JSON.stringify({
+	                            server: server,
+	                            delete_all: true,
+	                            base_dir: baseDir,
+	                            exclude_paths: excludePaths,
+	                            show_hidden: showHidden
+	                        })
+	                    });
+	                    const result = await response.json();
+	                    const ok2 = result && (result.success || result.deleted_all);
+	                    if (ok2) {
+	                        resetSelectAllState(isSource);
+	                        applySelectAllVisual(isSource);
+	                        showToast('🗑️ 删除完成：当前目录全部', 'success');
+	                    } else {
+	                        addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
+	                        showToast('❌ 删除失败', 'error');
+	                    }
+	                } catch (err) {
+	                    addLogError(`❌ 删除异常: ${err.message}`);
+	                    showToast('❌ 删除异常', 'error');
+	                } finally {
+	                    if (isSource) {
+	                        refreshSourceAsync({ silent: true });
+	                    } else {
+	                        refreshTargetAsync({ silent: true });
+	                    }
+	                }
+	            };
+
+	            if (selectedFiles.length === 0) {
+	                if (isPanelSelectAllActive(isSource)) {
+	                    await deleteSelectAll();
+	                    return;
+	                }
+	                addLogWarning('⚠️ 请先选择要删除的文件或文件夹');
+	                return;
+	            }
 
 
             const ok = await showConfirmDialog(`确定要删除以下 ${selectedFiles.length} 项吗？`, {
@@ -2167,15 +2270,17 @@
             }
         }
 
-        function clearSelectionsForPanel(isSource) {
-            if (isSource) {
-                selectedSourceFiles = [];
-            } else {
-                selectedTargetFiles = [];
-            }
-            const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
-            document.querySelectorAll(`#${containerId} .file-item.selected`).forEach(el => el.classList.remove('selected'));
-        }
+	        function clearSelectionsForPanel(isSource) {
+	            resetSelectAllState(isSource);
+	            if (isSource) {
+	                selectedSourceFiles = [];
+	            } else {
+	                selectedTargetFiles = [];
+	            }
+	            const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
+	            document.querySelectorAll(`#${containerId} .file-item.selected`).forEach(el => el.classList.remove('selected'));
+	            document.querySelectorAll(`#${containerId} .file-item.deselected`).forEach(el => el.classList.remove('deselected'));
+	        }
 
         function updateFileCountDisplay(isSource, loaded, total) {
             const el = document.getElementById(isSource ? 'sourceFileCount' : 'targetFileCount');
@@ -2194,13 +2299,54 @@
             }
         }
 
-        function getActivePath(isSource) {
-            return isSource ? currentSourcePath : currentTargetPath;
-        }
+	        function getActivePath(isSource) {
+	            return isSource ? currentSourcePath : currentTargetPath;
+	        }
 
-        async function loadDirectory(type, targetPath, options = {}) {
-            const isSource = type === 'source';
-            const state = isSource ? browseState.source : browseState.target;
+	        function resetSelectAllState(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const st = selectAllState[key];
+	            st.active = false;
+	            st.excluded.clear();
+	            st.path = null;
+	            const container = document.getElementById(isSource ? 'sourceFileBrowser' : 'targetFileBrowser');
+	            if (container) {
+	                container.classList.remove('select-all-mode');
+	            }
+	        }
+
+	        function isPanelSelectAllActive(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const st = selectAllState[key];
+	            const path = getActivePath(isSource);
+	            return !!(st && st.active && st.path && path && st.path === path);
+	        }
+
+	        function applySelectAllVisual(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const container = document.getElementById(isSource ? 'sourceFileBrowser' : 'targetFileBrowser');
+	            if (!container) return;
+	            const active = isPanelSelectAllActive(isSource);
+	            container.classList.toggle('select-all-mode', active);
+	            if (!active) {
+	                container.querySelectorAll('.file-item.selectable.deselected').forEach(el => el.classList.remove('deselected'));
+	                return;
+	            }
+	            container.querySelectorAll('.file-item.selectable.selected').forEach(el => el.classList.remove('selected'));
+	            const excluded = selectAllState[key].excluded;
+	            container.querySelectorAll('.file-item.selectable').forEach(el => {
+	                const p = el.dataset.path || '';
+	                if (p && excluded.has(p)) {
+	                    el.classList.add('deselected');
+	                } else {
+	                    el.classList.remove('deselected');
+	                }
+	            });
+	        }
+
+	        async function loadDirectory(type, targetPath, options = {}) {
+	            const isSource = type === 'source';
+	            const state = isSource ? browseState.source : browseState.target;
             const { serverSelect, showHiddenCheckbox, containerId } = getPanelConfig(isSource);
             const server = document.getElementById(serverSelect).value;
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
@@ -2664,14 +2810,16 @@
             const total = totalCount !== null ? totalCount : loaded;
             updateFileCountDisplay(isSource, loaded, total);
 
-            if (preserveScrollTop !== null) {
-                const prevBehavior = container.style.scrollBehavior;
-                container.style.scrollBehavior = 'auto';
-                const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-                container.scrollTop = Math.min(preserveScrollTop, maxScroll);
-                container.style.scrollBehavior = prevBehavior || '';
-            }
-        }
+	            if (preserveScrollTop !== null) {
+	                const prevBehavior = container.style.scrollBehavior;
+	                container.style.scrollBehavior = 'auto';
+	                const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+	                container.scrollTop = Math.min(preserveScrollTop, maxScroll);
+	                container.style.scrollBehavior = prevBehavior || '';
+	            }
+	
+	            applySelectAllVisual(isSource);
+	        }
 
 
         function formatFileSize(bytes) {
@@ -2723,19 +2871,22 @@
             return isDouble;
         }
 
-        function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
-            if (event.button !== 0) return;
+	        function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
+	            if (event.button !== 0) return;
 
-            lastActivePanel = isSource ? 'source' : 'target';
+	            lastActivePanel = isSource ? 'source' : 'target';
 
+	            const selectAllActive = isPanelSelectAllActive(isSource);
+	            const isToggle = !!(event.ctrlKey || event.metaKey || event.shiftKey);
+	            if (fileId) {
+	                // In virtual select-all mode, keep the selection unless user explicitly toggles (Ctrl/Meta) or range-selects (Shift).
+	                if (!selectAllActive || isToggle) {
+	                    selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
+	                }
+	            }
 
-            if (fileId) {
-
-                selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
-            }
-
-            const isDoubleClick = isSameRowDoubleClick(isSource, path);
-            if (!isDirectory || !isDoubleClick) return;
+	            const isDoubleClick = isSameRowDoubleClick(isSource, path);
+	            if (!isDirectory || !isDoubleClick) return;
 
             console.log(`[双击] 立即进入目录: ${path}`);
 
@@ -3135,19 +3286,41 @@
         }
 
 
-        function selectFileImmediate(event, path, name, isDirectory, fileId, isSource) {
-            event.stopPropagation();
+	        function selectFileImmediate(event, path, name, isDirectory, fileId, isSource) {
+	            event.stopPropagation();
 
-            const fileElement = document.getElementById(fileId);
-            if (!fileElement) return;
+	            const fileElement = document.getElementById(fileId);
+	            if (!fileElement) return;
 
-            const idx = Number(fileElement.dataset.idx || -1);
+	            const idx = Number(fileElement.dataset.idx || -1);
+	            const panelKey = isSource ? 'source' : 'target';
 
-            if (!event.shiftKey && !event.ctrlKey && !event.metaKey && fileElement.classList.contains('selected')) {
-                lastSelectedIndex[isSource ? 'source' : 'target'] = idx;
-                updateSelectionInfo();
-                return;
-            }
+	            if (isPanelSelectAllActive(isSource)) {
+	                if (event.ctrlKey || event.metaKey) {
+	                    const excluded = selectAllState[panelKey].excluded;
+	                    if (excluded.has(path)) {
+	                        excluded.delete(path);
+	                        fileElement.classList.remove('deselected');
+	                    } else {
+	                        excluded.add(path);
+	                        fileElement.classList.add('deselected');
+	                    }
+	                    lastSelectedIndex[panelKey] = idx;
+	                    lastActivePanel = panelKey;
+	                    updateSelectionInfo();
+	                    return;
+	                }
+
+	                // Any non-toggle selection exits select-all mode first.
+	                resetSelectAllState(isSource);
+	                applySelectAllVisual(isSource);
+	            }
+
+	            if (!event.shiftKey && !event.ctrlKey && !event.metaKey && fileElement.classList.contains('selected')) {
+	                lastSelectedIndex[isSource ? 'source' : 'target'] = idx;
+	                updateSelectionInfo();
+	                return;
+	            }
 
             if (event.shiftKey && (lastSelectedIndex[isSource ? 'source' : 'target'] !== null)) {
                 const anchor = lastSelectedIndex[isSource ? 'source' : 'target'];
@@ -3405,26 +3578,28 @@
         }
 
 
-        function clearAllSelections() {
-            selectedSourceFiles = [];
-            selectedTargetFiles = [];
-            document.querySelectorAll('.file-item.selected').forEach(item => {
-                item.classList.remove('selected');
-            });
-            lastSelectedIndex.source = null;
-            lastSelectedIndex.target = null;
-        }
+	        function clearAllSelections() {
+	            selectedSourceFiles = [];
+	            selectedTargetFiles = [];
+	            resetSelectAllState(true);
+	            resetSelectAllState(false);
+	            document.querySelectorAll('#sourceFileBrowser .file-item.selected, #targetFileBrowser .file-item.selected').forEach(item => item.classList.remove('selected'));
+	            document.querySelectorAll('#sourceFileBrowser .file-item.deselected, #targetFileBrowser .file-item.deselected').forEach(item => item.classList.remove('deselected'));
+	            lastSelectedIndex.source = null;
+	            lastSelectedIndex.target = null;
+	        }
 
         function getCurrentTransferMode() {
             const modeRadio = document.querySelector('input[name="transferMode"]:checked');
             return modeRadio ? modeRadio.value : (currentTransferMode || 'copy');
         }
 
-        function ensureDragSelection(row, isSource) {
-            if (!row || row.classList.contains('selected')) return;
-            clearAllSelections();
-            row.classList.add('selected');
-            const item = {
+	        function ensureDragSelection(row, isSource) {
+	            if (!row || row.classList.contains('selected')) return;
+	            resetSelectAllState(isSource);
+	            clearAllSelections();
+	            row.classList.add('selected');
+	            const item = {
                 path: row.dataset.path,
                 name: row.dataset.name,
                 is_directory: String(row.dataset.isDirectory).toLowerCase() === 'true'
@@ -3448,17 +3623,19 @@
             row.addEventListener('dragend', handleRowDragEnd);
         }
 
-        function _getDragPayload(event) {
-            let payload = dragTransferPayload;
-            if (!payload && event && event.dataTransfer) {
-                try {
-                    const raw = event.dataTransfer.getData(DRAG_TRANSFER_TYPE);
-                    if (raw) payload = JSON.parse(raw);
-                } catch (_) {}
-            }
-            if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return null;
-            return payload;
-        }
+	        function _getDragPayload(event) {
+	            let payload = dragTransferPayload;
+	            if (!payload && event && event.dataTransfer) {
+	                try {
+	                    const raw = event.dataTransfer.getData(DRAG_TRANSFER_TYPE);
+	                    if (raw) payload = JSON.parse(raw);
+	                } catch (_) {}
+	            }
+	            if (!payload) return null;
+	            if (payload.select_all) return payload;
+	            if (!Array.isArray(payload.files) || payload.files.length === 0) return null;
+	            return payload;
+	        }
 
         function attachRowDropHandlers(row, isSource) {
             if (!row || row.dataset.dropBound === 'true') return;
@@ -3501,13 +3678,23 @@
                 const targetPath = row.dataset.path || '';
                 if (!targetPath) return;
 
-                const hasConflict = payload.files.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
-                    return;
-                }
+	                if (payload.select_all && payload.source_dir) {
+	                    const srcDir = String(payload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const hasConflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (hasConflict) {
+	                        showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
+	                        return;
+	                    }
+	                } else {
+	                    const hasConflict = (payload.files || []).some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
+	                        return;
+	                    }
+	                }
 
                 const samePanel = fromPanel === toPanel;
                 const mode = samePanel ? 'move' : getCurrentTransferMode();
@@ -3530,47 +3717,73 @@
                     };
                 }
 
-                await startTransferWithParams(
-                    sourceServer,
-                    targetServer,
-                    targetPath,
-                    payload.files,
-                    mode,
-                    direction,
-                    refreshOverride,
-                    samePanel
-                );
-            });
-        }
+	                await startTransferWithParams(
+	                    sourceServer,
+	                    targetServer,
+	                    targetPath,
+	                    payload.select_all
+	                        ? {
+	                            select_all: true,
+	                            source_dir: payload.source_dir || '',
+	                            exclude_paths: payload.exclude_paths || []
+	                        }
+	                        : payload.files,
+	                    mode,
+	                    direction,
+	                    refreshOverride,
+	                    samePanel
+	                );
+	            });
+	        }
 
-        function buildDragPayload(isSource) {
-            const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
-            return { panel: isSource ? 'source' : 'target', files, mode: getCurrentTransferMode() };
-        }
+	        function buildDragPayload(isSource) {
+	            const panel = isSource ? 'source' : 'target';
+	            if (isPanelSelectAllActive(isSource)) {
+	                const excluded = isSource ? selectAllState.source.excluded : selectAllState.target.excluded;
+	                return {
+	                    panel,
+	                    select_all: true,
+	                    source_dir: getActivePath(isSource),
+	                    exclude_paths: Array.from(excluded || []),
+	                    mode: getCurrentTransferMode()
+	                };
+	            }
+	            const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
+	            return { panel, files, mode: getCurrentTransferMode() };
+	        }
 
-        function handleRowDragStart(event, isSource) {
-            const row = event.currentTarget;
-            if (!row || row.dataset.editing === 'true') {
-                event.preventDefault();
-                return;
-            }
-            ensureDragSelection(row, isSource);
-            const payload = buildDragPayload(isSource);
-            if (!payload.files || payload.files.length === 0) {
-                event.preventDefault();
-                return;
-            }
+	        function handleRowDragStart(event, isSource) {
+	            const row = event.currentTarget;
+	            if (!row || row.dataset.editing === 'true') {
+	                event.preventDefault();
+	                return;
+	            }
+	            if (!isPanelSelectAllActive(isSource)) {
+	                ensureDragSelection(row, isSource);
+	            } else {
+	                // Keep virtual select-all state during drag.
+	                applySelectAllVisual(isSource);
+	            }
+	            const payload = buildDragPayload(isSource);
+	            if (!payload.select_all && (!payload.files || payload.files.length === 0)) {
+	                event.preventDefault();
+	                return;
+	            }
 
-            event.dataTransfer.effectAllowed = 'copyMove';
-            event.dataTransfer.setData(DRAG_TRANSFER_TYPE, JSON.stringify(payload));
-            const mode = payload.mode === 'move' ? 'move' : 'copy';
-            event.dataTransfer.setData('text/plain', `${payload.files.length}项${mode === 'move' ? '剪切' : '复制'}`);
-            dragTransferPayload = payload;
-            const ghost = getDragGhostImage();
-            if (ghost && event.dataTransfer.setDragImage) {
-                event.dataTransfer.setDragImage(ghost, 0, 0);
-            }
-        }
+	            event.dataTransfer.effectAllowed = 'copyMove';
+	            event.dataTransfer.setData(DRAG_TRANSFER_TYPE, JSON.stringify(payload));
+	            const mode = payload.mode === 'move' ? 'move' : 'copy';
+	            if (payload.select_all) {
+	                event.dataTransfer.setData('text/plain', `当前目录全部${mode === 'move' ? '剪切' : '复制'}`);
+	            } else {
+	                event.dataTransfer.setData('text/plain', `${payload.files.length}项${mode === 'move' ? '剪切' : '复制'}`);
+	            }
+	            dragTransferPayload = payload;
+	            const ghost = getDragGhostImage();
+	            if (ghost && event.dataTransfer.setDragImage) {
+	                event.dataTransfer.setDragImage(ghost, 0, 0);
+	            }
+	        }
 
         function handleRowDragEnd() {
             dragTransferPayload = null;
@@ -3599,18 +3812,19 @@
                 container.addEventListener('dragleave', (e) => {
                     if (e.relatedTarget && container.contains(e.relatedTarget)) return;
                 });
-                container.addEventListener('drop', async (e) => {
-                    if (!canHandle(e)) return;
-                    e.preventDefault();
-                    let payload = dragTransferPayload;
-                    if (!payload) {
-                        try { payload = JSON.parse(e.dataTransfer.getData(DRAG_TRANSFER_TYPE)); } catch (_) {}
-                    }
-                    if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return;
+	                container.addEventListener('drop', async (e) => {
+	                    if (!canHandle(e)) return;
+	                    e.preventDefault();
+	                    let payload = dragTransferPayload;
+	                    if (!payload) {
+	                        try { payload = JSON.parse(e.dataTransfer.getData(DRAG_TRANSFER_TYPE)); } catch (_) {}
+	                    }
+	                    if (!payload) return;
+	                    if (!payload.select_all && (!Array.isArray(payload.files) || payload.files.length === 0)) return;
 
-                    const fromPanel = payload.panel;
-                    const toPanel = isSourcePanel ? 'source' : 'target';
-                    if (fromPanel === toPanel) return;
+	                    const fromPanel = payload.panel;
+	                    const toPanel = isSourcePanel ? 'source' : 'target';
+	                    if (fromPanel === toPanel) return;
 
                     const mode = getCurrentTransferMode();
                     const sourceServer = fromPanel === 'source'
@@ -3619,59 +3833,74 @@
                     const targetServer = fromPanel === 'source'
                         ? document.getElementById('targetServer').value
                         : document.getElementById('sourceServer').value;
-                    const targetPath = isSourcePanel ? currentSourcePath : currentTargetPath;
-                    const direction = fromPanel === 'source' ? 'ltr' : 'rtl';
+	                    const targetPath = isSourcePanel ? currentSourcePath : currentTargetPath;
+	                    const direction = fromPanel === 'source' ? 'ltr' : 'rtl';
 
-                    await startTransferWithParams(sourceServer, targetServer, targetPath, payload.files, mode, direction);
-                });
-            };
+	                    await startTransferWithParams(
+	                        sourceServer,
+	                        targetServer,
+	                        targetPath,
+	                        payload.select_all
+	                            ? {
+	                                select_all: true,
+	                                source_dir: payload.source_dir || '',
+	                                exclude_paths: payload.exclude_paths || []
+	                            }
+	                            : payload.files,
+	                        mode,
+	                        direction
+	                    );
+	                });
+	            };
             bind(source, true);
             bind(target, false);
         }
 
-        function selectAll(isSource) {
-            ensureAllItemsLoaded(isSource).then(allItems => {
-                renderAllItems(isSource, allItems || []);
-                const nodes = getFileNodes(isSource);
-                nodes.forEach(node => node.classList.add('selected'));
-                const selected = (allItems || []).map((f) => ({
-                    path: f.path,
-                    name: f.name,
-                    is_directory: f.is_directory
-                }));
-                if (isSource) {
-                    selectedSourceFiles = selected;
-                    lastSelectedIndex.source = selected.length ? selected.length - 1 : null;
-                } else {
-                    selectedTargetFiles = selected;
-                    lastSelectedIndex.target = selected.length ? selected.length - 1 : null;
-                }
-                updateSelectionInfo();
-            });
-        }
+	        function selectAll(isSource) {
+	            // Virtual select-all: do not fetch/render all items or toggle thousands of nodes.
+	            clearAllSelections();
+	            const key = isSource ? 'source' : 'target';
+	            selectAllState[key].active = true;
+	            selectAllState[key].excluded.clear();
+	            selectAllState[key].path = getActivePath(isSource);
+	            applySelectAllVisual(isSource);
+	            updateSelectionInfo();
+	        }
 
 
-        function updateSelectionInfo() {
-            if (selectedSourceFiles.length > 0 && selectedTargetFiles.length > 0) {
-                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
-            }
+	        function updateSelectionInfo() {
+	            const leftSelected = selectedSourceFiles.length > 0 || isPanelSelectAllActive(true);
+	            const rightSelected = selectedTargetFiles.length > 0 || isPanelSelectAllActive(false);
+	            if (leftSelected && rightSelected) {
+	                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
+	            }
 
-            function renderSelectedInfo(isSource, selectedArr) {
-                const el = document.getElementById(isSource ? 'sourceSelectedInfo' : 'targetSelectedInfo');
-                if (!el) return;
-                if (!selectedArr || selectedArr.length === 0) {
-                    el.style.display = 'none';
-                    el.textContent = '';
-                    return;
-                }
-                const fileCount = selectedArr.filter(it => !it.is_directory).length;
-                const dirCount = selectedArr.filter(it => it.is_directory).length;
-                const parts = [];
-                if (fileCount > 0) parts.push(`${fileCount} 文件`);
-                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
-                el.textContent = `已选中：${parts.join('，')}`;
-                el.style.display = 'inline';
-            }
+	            function renderSelectedInfo(isSource, selectedArr) {
+	                const el = document.getElementById(isSource ? 'sourceSelectedInfo' : 'targetSelectedInfo');
+	                if (!el) return;
+	                if (isPanelSelectAllActive(isSource)) {
+	                    const state = isSource ? browseState.source : browseState.target;
+	                    const total = state.total || state.loadedCount || 0;
+	                    const key = isSource ? 'source' : 'target';
+	                    const excluded = selectAllState[key].excluded.size || 0;
+	                    const base = total > 0 ? `已全选：当前目录全部（共 ${total} 项）` : '已全选：当前目录全部';
+	                    el.textContent = excluded > 0 ? `${base}，已排除 ${excluded} 项` : base;
+	                    el.style.display = 'inline';
+	                    return;
+	                }
+	                if (!selectedArr || selectedArr.length === 0) {
+	                    el.style.display = 'none';
+	                    el.textContent = '';
+	                    return;
+	                }
+	                const fileCount = selectedArr.filter(it => !it.is_directory).length;
+	                const dirCount = selectedArr.filter(it => it.is_directory).length;
+	                const parts = [];
+	                if (fileCount > 0) parts.push(`${fileCount} 文件`);
+	                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
+	                el.textContent = `已选中：${parts.join('，')}`;
+	                el.style.display = 'inline';
+	            }
 
             renderSelectedInfo(true, selectedSourceFiles);
             renderSelectedInfo(false, selectedTargetFiles);
@@ -3680,10 +3909,11 @@
 
 
 
-        function selectRange(isSource, startIdx, endIdx) {
-            const nodes = getFileNodes(isSource);
-            const min = Math.min(startIdx, endIdx);
-            const max = Math.max(startIdx, endIdx);
+	        function selectRange(isSource, startIdx, endIdx) {
+	            resetSelectAllState(isSource);
+	            const nodes = getFileNodes(isSource);
+	            const min = Math.min(startIdx, endIdx);
+	            const max = Math.max(startIdx, endIdx);
             const selected = [];
             nodes.forEach(node => {
                 const idx = Number(node.dataset.idx || -1);
@@ -3706,11 +3936,13 @@
         }
 
 
-        async function startTransfer() {
-            const sourceServerLeft = document.getElementById('sourceServer').value;
-            const targetServerRight = document.getElementById('targetServer').value;
-            const leftSelected = selectedSourceFiles.length > 0;
-            const rightSelected = selectedTargetFiles.length > 0;
+	        async function startTransfer() {
+	            const sourceServerLeft = document.getElementById('sourceServer').value;
+	            const targetServerRight = document.getElementById('targetServer').value;
+	            const leftSelectAll = isPanelSelectAllActive(true);
+	            const rightSelectAll = isPanelSelectAllActive(false);
+	            const leftSelected = leftSelectAll || selectedSourceFiles.length > 0;
+	            const rightSelected = rightSelectAll || selectedTargetFiles.length > 0;
 
 
             const modeRadio = document.querySelector('input[name="transferMode"]:checked');
@@ -3744,22 +3976,37 @@
             }
 
 
-            let sourceServer, targetServer, targetPath, sourceFiles;
-            if (leftSelected) {
+	            let sourceServer, targetServer, targetPath, sourceFiles;
+	            let selectAllPayload = null; // { source_dir, exclude_paths }
+	            if (leftSelected) {
 
                 sourceServer = sourceServerLeft;
-                targetServer = targetServerRight;
-                targetPath = currentTargetPath;
-                sourceFiles = selectedSourceFiles;
-                currentTransferDirection = 'ltr';
-            } else {
+	                targetServer = targetServerRight;
+	                targetPath = currentTargetPath;
+	                sourceFiles = selectedSourceFiles;
+	                if (leftSelectAll) {
+	                    selectAllPayload = {
+	                        source_dir: currentSourcePath,
+	                        exclude_paths: Array.from(selectAllState.source.excluded || [])
+	                    };
+	                    sourceFiles = [];
+	                }
+	                currentTransferDirection = 'ltr';
+	            } else {
 
-                sourceServer = targetServerRight;
-                targetServer = sourceServerLeft;
-                targetPath = currentSourcePath;
-                sourceFiles = selectedTargetFiles;
-                currentTransferDirection = 'rtl';
-            }
+	                sourceServer = targetServerRight;
+	                targetServer = sourceServerLeft;
+	                targetPath = currentSourcePath;
+	                sourceFiles = selectedTargetFiles;
+	                if (rightSelectAll) {
+	                    selectAllPayload = {
+	                        source_dir: currentTargetPath,
+	                        exclude_paths: Array.from(selectAllState.target.excluded || [])
+	                    };
+	                    sourceFiles = [];
+	                }
+	                currentTransferDirection = 'rtl';
+	            }
 
 
             if (!sourceServer || !targetServer || !targetPath) {
@@ -3769,19 +4016,30 @@
             }
 
 
-            if (sourceServer === targetServer) {
-                const hasConflict = sourceFiles.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
-                    return;
-                }
-            }
+	            if (sourceServer === targetServer) {
+	                if (selectAllPayload && selectAllPayload.source_dir) {
+	                    const srcDir = String(selectAllPayload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const conflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (conflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return;
+	                    }
+	                } else {
+	                    const hasConflict = (sourceFiles || []).some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return;
+	                    }
+	                }
+	            }
 
-            const sourcePath = leftSelected ? currentSourcePath : currentTargetPath;
-            cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, sourceFiles, mode);
+	            const sourcePath = leftSelected ? currentSourcePath : currentTargetPath;
+	            cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, sourceFiles || [], mode);
 
 
             isTransferring = true;
@@ -3792,28 +4050,44 @@
             if (startBtn) startBtn.style.display = 'none';
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
-            const fileNames = sourceFiles.map(f => f.name).join(', ');
-            const modeText = mode === 'copy' ? '复制' : '移动';
-            const sshText = fastSSH ? '(SSH加速)' : '';
-            const parallelText = parallelTransfer ? '(立即并行传输)' : '';
+	            const fileNames = (sourceFiles || []).map(f => f.name).join(', ');
+	            const modeText = mode === 'copy' ? '复制' : '移动';
+	            const sshText = fastSSH ? '(SSH加速)' : '';
+	            const parallelText = parallelTransfer ? '(立即并行传输)' : '';
 
 
 
-            addLogInfo(`📤 源: ${sourceServer} (${sourceFiles.length}项)`);
-            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
-            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            if (selectAllPayload) {
+	                const excludedCount = (selectAllPayload.exclude_paths || []).length;
+	                const excludedText = excludedCount > 0 ? `，排除 ${excludedCount} 项` : '';
+	                addLogInfo(`📤 源: ${sourceServer} (当前目录全部${excludedText})`);
+	            } else {
+	                addLogInfo(`📤 源: ${sourceServer} (${(sourceFiles || []).length}项)`);
+	            }
+	            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+	            if (selectAllPayload) {
+	                addLogInfo(`📋 目录: ${selectAllPayload.source_dir}`);
+	            } else {
+	                addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            }
 
 
-            socket.emit('start_transfer', {
-                source_server: sourceServer,
-                source_files: sourceFiles,
-                target_server: targetServer,
-                target_path: targetPath,
-                mode: mode,
-                fast_ssh: fastSSH,
-                parallel_transfer: parallelTransfer
-            });
-        }
+	            const payload = {
+	                source_server: sourceServer,
+	                source_files: sourceFiles || [],
+	                target_server: targetServer,
+	                target_path: targetPath,
+	                mode: mode,
+	                fast_ssh: fastSSH,
+	                parallel_transfer: parallelTransfer
+	            };
+	            if (selectAllPayload && selectAllPayload.source_dir) {
+	                payload.select_all = true;
+	                payload.source_dir = selectAllPayload.source_dir;
+	                payload.exclude_paths = selectAllPayload.exclude_paths || [];
+	            }
+	            socket.emit('start_transfer', payload);
+	        }
 
 
 
@@ -4447,8 +4721,12 @@
             let imagePreviewFetchController = null;
             let imagePreviewRequestSeq = 0;
             let imageNavQueuedIndex = null;
-            let imageNavRunning = false;
+            let imageNavTimer = 0;
+            let imageNavLastStartAt = 0;
             let imagePrefetchTimer = 0;
+            let imagePreviewPrefetchImg = null;
+            const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS = 80;
+            const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS_WIN = 140;
             const IMAGE_PREVIEW_LOADING_SRC = (() => {
                 const svg =
                     '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">' +
@@ -4600,18 +4878,25 @@
                     const server = ImageViewer.server;
                     if (!server) return;
 
-                    const req = getImagePreviewRequestSize();
-                    const options = { width: req.width, height: req.height, quality: req.quality, interp: 'lanczos', format: 'webp' };
-
                     const prevIndex = (currentIndex - 1 + len) % len;
                     const nextIndex = (currentIndex + 1) % len;
-                    const targets = [prevIndex, nextIndex];
+                    const it = items[nextIndex];
+                    if (!it || !it.path) return;
 
-                    targets.forEach((idx) => {
-                        const it = items[idx];
-                        if (!it || !it.path) return;
+                    if (isWindowsServer(server)) {
+                        const req = getImagePreviewRequestSize();
+                        const options = { width: req.width, height: req.height, quality: req.quality, interp: 'lanczos', format: 'webp' };
                         getImageBlobUrl(server, it.path, options).catch(() => {});
-                    });
+                        return;
+                    }
+
+                    // Linux: preload original image URL into browser cache.
+                    const url = getImageStreamUrl(server, it.path);
+                    if (!imagePreviewPrefetchImg) {
+                        imagePreviewPrefetchImg = new Image();
+                    }
+                    try { imagePreviewPrefetchImg.decoding = 'async'; } catch (_) {}
+                    imagePreviewPrefetchImg.src = url;
                 } catch (_) {}
             }
 
@@ -4628,30 +4913,72 @@
                 } catch (_) {}
             }
 
+            function getImageStreamUrl(server, path, params = null) {
+                const search = new URLSearchParams();
+                search.set('server', server);
+                search.set('path', path);
+                if (params && typeof params === 'object') {
+                    Object.entries(params).forEach(([k, v]) => {
+                        if (v === undefined || v === null) return;
+                        if (v === '') return;
+                        search.set(k, String(v));
+                    });
+                }
+                return `/api/image/stream?${search.toString()}`;
+            }
+
+            function _getPreviewNavIntervalMs() {
+                try {
+                    const s = ImageViewer && ImageViewer.server;
+                    if (s && isWindowsServer(s)) return IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS_WIN;
+                } catch (_) {}
+                return IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS;
+            }
+
+            function _scheduleImageNavRun() {
+                if (imageNavTimer) return;
+                const now = Date.now();
+                const elapsed = now - (imageNavLastStartAt || 0);
+                const wait = Math.max(0, _getPreviewNavIntervalMs() - elapsed);
+                imageNavTimer = setTimeout(() => {
+                    imageNavTimer = 0;
+                    if (imageNavQueuedIndex === null) return;
+                    const nextIndex = imageNavQueuedIndex;
+                    imageNavQueuedIndex = null;
+                    imageNavLastStartAt = Date.now();
+                    showImageAt(nextIndex);
+                    // If another keypress arrived during this run, schedule again.
+                    if (imageNavQueuedIndex !== null) {
+                        _scheduleImageNavRun();
+                    }
+                }, wait);
+            }
+
             function requestShowImageAt(index) {
                 const n = Number.parseInt(index, 10);
                 if (!Number.isFinite(n)) return;
-                imageNavQueuedIndex = n;
+                if (!ImageViewer.items || !ImageViewer.items.length) return;
+                const len = ImageViewer.items.length;
+                let normalized = n;
+                if (normalized < 0) normalized = len - 1;
+                if (normalized >= len) normalized = 0;
+                imageNavQueuedIndex = normalized;
 
-                // If already navigating, cancel the in-flight load so we can jump quickly.
-                if (imageNavRunning) {
-                    imagePreviewRequestSeq++;
-                    if (imagePreviewFetchController) {
-                        try { imagePreviewFetchController.abort(); } catch (_) {}
-                    }
-                    return;
+                // Update UI immediately so the index number keeps up with key repeat.
+                try {
+                    ImageViewer.index = normalized;
+                    const item = ImageViewer.items[normalized];
+                    if (item) _updateImageCaption(item, normalized, len, '');
+                } catch (_) {}
+
+                // When user is holding the key, throttle requests so we don't overwhelm the server.
+                // Also cancel the current load (client-side) so the UI stays responsive.
+                imagePreviewRequestSeq++;
+                if (imagePreviewFetchController) {
+                    try { imagePreviewFetchController.abort(); } catch (_) {}
                 }
 
-                imageNavRunning = true;
-                (async () => {
-                    while (imageNavQueuedIndex !== null) {
-                        const nextIndex = imageNavQueuedIndex;
-                        imageNavQueuedIndex = null;
-                        await showImageAt(nextIndex);
-                    }
-                })()
-                    .catch(() => {})
-                    .finally(() => { imageNavRunning = false; });
+                _scheduleImageNavRun();
             }
 
             async function showImageAt(index) {
@@ -4683,60 +5010,59 @@
                     img.decoding = 'async';
                     img.dataset.imagePath = item.path || '';
                     img.src = IMAGE_PREVIEW_LOADING_SRC;
+                    img.dataset.previewRetry = '0';
                     imageZoom = 1;
                     imageOffsetX = 0;
                     imageOffsetY = 0;
                     applyImageTransform(img);
                 }
-                _updateImageCaption(item, index, len, '');
+                const isWin = isWindowsServer(server);
+                _updateImageCaption(item, index, len, isWin ? '' : '原图加载中');
 
                 try {
                     if (imagePreviewFetchController) {
                         try { imagePreviewFetchController.abort(); } catch (_) {}
                     }
                     imagePreviewFetchController = new AbortController();
-                    const req = getImagePreviewRequestSize();
-                    const options = {
-                        width: req.width,
-                        height: req.height,
-                        quality: req.quality,
-                        interp: 'lanczos',
-                        format: 'webp',
-                        signal: imagePreviewFetchController.signal
-                    };
-
-                    let blobUrl = null;
-                    let lastErr = null;
-                    for (let attempt = 0; attempt < 2; attempt++) {
-                        if (reqId !== imagePreviewRequestSeq) return;
-                        try {
-                            blobUrl = await getImageBlobUrl(server, item.path, options);
-                            lastErr = null;
-                            break;
-                        } catch (e) {
-                            lastErr = e;
-                            if (e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort'))) {
-                                throw e;
-                            }
-                            if (attempt === 0 && _shouldRetryPreviewError(e)) {
-                                await new Promise(r => setTimeout(r, 180 + Math.floor(Math.random() * 140)));
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    if (!blobUrl) {
-                        throw lastErr || new Error('加载失败');
-                    }
-
-
                     if (reqId !== imagePreviewRequestSeq) return;
                     if (img) {
                         const expectedPath = item.path || '';
                         if (img.dataset.imagePath !== expectedPath) return;
+                        const url = getImageStreamUrl(server, expectedPath);
+                        const req = getImagePreviewRequestSize();
+                        const previewOptions = {
+                            width: req.width,
+                            height: req.height,
+                            quality: req.quality,
+                            interp: 'lanczos',
+                            format: 'webp',
+                            signal: imagePreviewFetchController.signal
+                        };
                         img.onerror = () => {
                             if (reqId !== imagePreviewRequestSeq) return;
                             if (img.dataset.imagePath !== expectedPath) return;
+                            const retry = Number.parseInt(img.dataset.previewRetry || '0', 10) || 0;
+                            if (retry < 1) {
+                                img.dataset.previewRetry = String(retry + 1);
+                                // Retry once; still guard against stale nav.
+                                setTimeout(() => {
+                                    if (reqId !== imagePreviewRequestSeq) return;
+                                    if (img.dataset.imagePath !== expectedPath) return;
+                                    img.style.opacity = '0.3';
+                                    if (isWin) {
+                                        getImageBlobUrl(server, expectedPath, previewOptions)
+                                            .then((u) => {
+                                                if (reqId !== imagePreviewRequestSeq) return;
+                                                if (img.dataset.imagePath !== expectedPath) return;
+                                                img.src = u;
+                                            })
+                                            .catch(() => {});
+                                    } else {
+                                        img.src = getImageStreamUrl(server, expectedPath, { t: Date.now() });
+                                    }
+                                }, 180 + Math.floor(Math.random() * 160));
+                                return;
+                            }
                             img.style.opacity = '1';
                             _updateImageCaption(item, index, len, '加载失败');
                         };
@@ -4744,9 +5070,17 @@
                             if (reqId !== imagePreviewRequestSeq) return;
                             if (img.dataset.imagePath !== expectedPath) return;
                             img.style.opacity = '1';
-                            _updateImageCaption(item, index, len, _getImageSizeText(img));
+                            const sizeText = _getImageSizeText(img);
+                            _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
                         };
-                        img.src = blobUrl;
+                        if (isWin) {
+                            const u = await getImageBlobUrl(server, expectedPath, previewOptions);
+                            if (reqId !== imagePreviewRequestSeq) return;
+                            if (img.dataset.imagePath !== expectedPath) return;
+                            img.src = u;
+                        } else {
+                            img.src = url;
+                        }
                     }
 
                     // Prefetch neighbors (debounced) to make switching feel instant without flooding.
@@ -4911,6 +5245,10 @@
                 modal.style.display = 'none';
                 imagePreviewRequestSeq++;
                 imageNavQueuedIndex = null;
+                if (imageNavTimer) {
+                    clearTimeout(imageNavTimer);
+                    imageNavTimer = 0;
+                }
                 if (imagePrefetchTimer) {
                     clearTimeout(imagePrefetchTimer);
                     imagePrefetchTimer = 0;
@@ -4928,6 +5266,7 @@
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
                 ImageViewer.index = -1;
+                imagePreviewPrefetchImg = null;
                 try {
                     const gridModal = document.getElementById('imageGridModal');
                     if (gridModal && gridModal.style.display !== 'none') {
@@ -6280,13 +6619,13 @@
                         isSource = true;
                     } else {
                         isSource = lastActivePanel !== 'target';
-                    }
-                    const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
-                    if (selected && selected.length) {
-                        e.preventDefault();
-                        deleteSelected(isSource ? 'source' : 'target');
-                    }
-                }
+	                    }
+	                    const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
+	                    if ((selected && selected.length) || isPanelSelectAllActive(isSource)) {
+	                        e.preventDefault();
+	                        deleteSelected(isSource ? 'source' : 'target');
+	                    }
+	                }
 
                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
                     if (_isEditableElement(e.target)) return;

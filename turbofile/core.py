@@ -2209,7 +2209,132 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
     except Exception as e:
         return {'success': False, 'message': str(e)}
 
-def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True):
+def _build_rsync_excludes_for_dir(source_dir: str, exclude_paths: list):
+    src = str(source_dir or '').replace('\\', '/').rstrip('/')
+    patterns = []
+    for p in (exclude_paths or []):
+        if not p:
+            continue
+        path = str(p).replace('\\', '/')
+        if src and (path == src or path.startswith(src + '/')):
+            rel = path[len(src):].lstrip('/')
+            if rel:
+                # Anchor exclude at transfer root to avoid accidental partial matches.
+                patterns.append('/' + rel)
+    # Deduplicate but keep stable order.
+    seen = set()
+    out = []
+    for pat in patterns:
+        if pat in seen:
+            continue
+        seen.add(pat)
+        out.append(pat)
+    return out
+
+
+def transfer_directory_contents_instant(transfer_id, source_server, source_dir, target_server, target_path, mode="copy", fast_ssh=True, exclude_paths=None):
+    """
+    Transfer "current directory contents" via a single rsync command:
+      rsync -a <source_dir>/ <target_dir>/
+    This avoids constructing a huge file list (Ctrl+A on large directories).
+    """
+    try:
+        if not source_dir or not target_path:
+            return {'success': False, 'message': 'empty source_dir or target_path'}
+
+        source_is_windows = is_windows_server(source_server)
+        target_is_windows = is_windows_server(target_server)
+        src_dir_raw = str(source_dir)
+        tgt_dir_raw = str(target_path)
+
+        src_dir = convert_windows_path_to_cygwin(src_dir_raw) if source_is_windows else src_dir_raw
+        tgt_dir = convert_windows_path_to_cygwin(tgt_dir_raw) if target_is_windows else tgt_dir_raw
+
+        # Normalize trailing slash semantics: "dir/" means copy contents.
+        src_with_slash = src_dir.rstrip('/') + '/'
+        tgt_with_slash = tgt_dir.rstrip('/') + '/'
+
+        rsync_opts = [
+            "-a",
+            "--inplace",
+            "--whole-file",
+            "--no-compress",
+            "--numeric-ids",
+            "--timeout=600",
+            "-s",
+            "--no-perms",
+            "--no-owner",
+            "--no-group",
+            "--omit-dir-times",
+        ]
+        if source_is_windows or target_is_windows:
+            rsync_opts.append("--iconv=UTF-8,UTF-8")
+
+        # Exclude specific paths (relative to source_dir).
+        for pat in _build_rsync_excludes_for_dir(source_dir, exclude_paths or []):
+            rsync_opts.append(f"--exclude={shlex.quote(pat)}")
+
+        # Move mode: remove source files after successful transfer.
+        if mode == "move":
+            rsync_opts.append("--remove-source-files")
+
+        _append_rsync_progress_opts(rsync_opts)
+        rsync_opts_str = ' '.join(rsync_opts)
+
+        ssh = ssh_manager.get_connection(source_server)
+        if not ssh:
+            raise Exception(f"无法连接到源服务器 {source_server}")
+
+        if source_server == target_server:
+            remote_cmd = f"rsync {rsync_opts_str} {shlex.quote(src_with_slash)} {shlex.quote(tgt_with_slash)}"
+        else:
+            target_user = SERVERS[target_server]['user']
+            target_password = SERVERS[target_server].get('password')
+
+            # SSH options for rsync target.
+            ssh_to_target = RSYNC_SSH_CMD
+            target_port = SERVERS[target_server].get('port', 22)
+            if target_port != 22:
+                ssh_to_target = f"{ssh_to_target} -p {target_port}"
+
+            dest = shlex.quote(f"{target_user}@{target_server}:{tgt_with_slash}")
+            if target_password:
+                sshpass_cmd = "sshpass"
+                remote_cmd = (
+                    f"{sshpass_cmd} -p {shlex.quote(target_password)} "
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} "
+                    f"{shlex.quote(src_with_slash)} {dest}"
+                )
+            else:
+                remote_cmd = (
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} "
+                    f"{shlex.quote(src_with_slash)} {dest}"
+                )
+
+        emit_transfer_log(transfer_id, f"📁 全选目录传输: {source_dir} -> {target_server}:{target_path}")
+        part_id = f"rsync_{uuid.uuid4().hex}"
+        exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
+        if exit_status != 0:
+            return {'success': False, 'message': f'rsync exit {exit_status}: {error}'}
+
+        # Cleanup empty dirs after move (best-effort).
+        if mode == "move":
+            try:
+                if source_is_windows:
+                    # Cygwin find may exist in cwRsync environment.
+                    cleanup_cmd = f"find {shlex.quote(src_dir)} -type d -empty -delete"
+                else:
+                    cleanup_cmd = f"find {shlex.quote(src_dir_raw)} -type d -empty -delete"
+                ssh_manager.execute_command(source_server, cleanup_cmd)
+            except Exception:
+                emit_transfer_log(transfer_id, "⚠️ 剪切模式：清理空目录失败（已忽略）")
+
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'message': str(e)}
+
+
+def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True, select_all=False, source_dir="", exclude_paths=None):
     """Start instant parallel transfer tasks without pre-analysis."""
     def _log_transfer_summary(status: str, total_time: str = "", error: str = ""):
         meta = active_transfers.get(transfer_id, {})
@@ -2218,6 +2343,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         tgt_server = meta.get('target_server', target_server)
         target_base = meta.get('target_path', target_path)
         files = meta.get('source_files', source_files)
+        src_dir = meta.get('source_dir') or source_dir
         if isinstance(files, list):
             file_names = ','.join([f.get('name', '') for f in files if isinstance(f, dict)])
             source_paths = ';'.join([f.get('path', '') for f in files if isinstance(f, dict)])
@@ -2228,7 +2354,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         append_transfer_log_record(
             source_ip=src_server,
             target_ip=tgt_server,
-            source_path=source_paths or target_base,
+            source_path=source_paths or src_dir or target_base,
             target_full_path=target_base,
             duration_sec=_hhmmss_to_seconds(total_time),
             status=status,
@@ -2241,7 +2367,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
     def transfer_worker():
         try:
-            total_files = len(source_files)
+            if select_all and source_dir:
+                total_files = 1
+            else:
+                total_files = len(source_files)
 
 
             if (is_windows_server(source_server) or is_windows_server(target_server)):
@@ -2254,6 +2383,39 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
 
             progress_manager.init_transfer(transfer_id, total_files)
+
+            if select_all and source_dir:
+                time_tracker.start_transfer(transfer_id)
+                result = transfer_directory_contents_instant(
+                    transfer_id,
+                    source_server,
+                    source_dir,
+                    target_server,
+                    target_path,
+                    mode=mode,
+                    fast_ssh=fast_ssh,
+                    exclude_paths=exclude_paths or [],
+                )
+                total_time = time_tracker.end_transfer(transfer_id)
+                emit_transfer_bytes_snapshot(transfer_id)
+                if result and result.get('success'):
+                    socketio.emit('transfer_complete', {
+                        'transfer_id': transfer_id,
+                        'status': 'success',
+                        'message': '目录内容传输完成',
+                        'total_time': total_time
+                    })
+                    _log_transfer_summary('success', total_time)
+                else:
+                    error_msg = (result or {}).get('message', 'unknown error')
+                    socketio.emit('transfer_complete', {
+                        'transfer_id': transfer_id,
+                        'status': 'error',
+                        'message': f'目录内容传输失败: {error_msg}',
+                        'total_time': total_time
+                    })
+                    _log_transfer_summary('error', total_time, error_msg)
+                return
 
 
             if not PERFORMANCE_CONFIG.get('reduce_websocket_traffic', True):

@@ -361,19 +361,19 @@
         </div>
     </div>
 
-    <div id="imagePreviewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1100;">
-        <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
-            <img alt="preview" style="max-width: 95vw; max-height: 85vh; object-fit: contain; user-select: none; cursor: grab;">
-        </div>
-        <button id="imagePreviewCloseBtn" type="button" class="image-preview-close-btn" style="position: absolute; top: 16px; right: 16px; z-index: 1202;">
-            关闭
-        </button>
-        <div id="imagePreviewCaption"></div>
-        <div class="image-preview-nav">
-            <button id="imagePrevBtn" type="button" class="image-preview-nav-btn" aria-label="上一张">‹</button>
-            <button id="imageNextBtn" type="button" class="image-preview-nav-btn" aria-label="下一张">›</button>
-        </div>
-    </div>
+	    <div id="imagePreviewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1100;">
+	        <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
+	            <img alt="preview" style="max-width: 95vw; max-height: 85vh; object-fit: contain; user-select: none; cursor: grab;">
+	        </div>
+	        <button id="imagePreviewCloseBtn" type="button" class="image-preview-close-btn" style="position: absolute; top: 16px; right: 16px; z-index: 1202;">
+	            关闭
+	        </button>
+	        <div id="imagePreviewCaption"></div>
+	        <div class="image-preview-nav">
+	            <button id="imagePrevBtn" type="button" class="image-preview-nav-btn" aria-label="上一张">‹</button>
+	            <button id="imageNextBtn" type="button" class="image-preview-nav-btn" aria-label="下一张">›</button>
+	        </div>
+	    </div>
 
     <div id="imageGridModal" style="display: none; position: fixed; inset: 0; overflow: auto; background: #11161f; z-index: 1050;">
         <div class="image-grid-header">
@@ -518,16 +518,27 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
-        <script>
-      window.TURBOFILE_BOOT = {
-        servers: {{ servers|tojson }},
-        remembered_paths: {{ remembered_paths|tojson }},
-        client_ipv4: {{ client_ipv4|tojson|default('null') }},
-        transfer_bytes_enabled: {{ transfer_bytes_enabled|tojson }}
-      };
-    </script>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-</body>
-</html>
+	    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+	    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+	    <script id="turbofileBoot" type="application/json">
+	      {{ {
+	        'servers': servers,
+	        'remembered_paths': remembered_paths,
+	        'client_ipv4': (client_ipv4 | default(none, true)),
+	        'transfer_bytes_enabled': transfer_bytes_enabled
+	      } | tojson }}
+	    </script>
+	    <script>
+	      (function () {
+	        try {
+	          const el = document.getElementById('turbofileBoot');
+	          window.TURBOFILE_BOOT = el ? JSON.parse(el.textContent || '{}') : {};
+	        } catch (e) {
+	          window.TURBOFILE_BOOT = {};
+	          console.error('Failed to parse TURBOFILE_BOOT:', e);
+	        }
+	      })();
+	    </script>
+	    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+	</body>
+	</html>
