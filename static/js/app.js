@@ -913,6 +913,26 @@
             return d ? `${d}/` : '';
         }
 
+        function _getWindowsLocationPath(item) {
+            if (!item || typeof item !== 'object') return '';
+            const explicit = _normalizeWinPath(item.path || '');
+            if (explicit) return explicit;
+            return _driveRoot(item.letter);
+        }
+
+        function _isPathSameOrChild(path0, basePath) {
+            const p = _normalizeWinPath(path0 || '');
+            const base = _normalizeWinPath(basePath || '');
+            if (!p || !base) return false;
+            return p === base || p.startsWith(`${base}/`);
+        }
+
+        function _getWindowsLocationIcon(item) {
+            if (item && (item.kind === 'desktop' || item.type === 'desktop')) return 'bi-house-door-fill';
+            if (item && item.type === 'network') return 'bi-globe2';
+            return 'bi-hdd-fill';
+        }
+
         function _normalizeWinPath(p) {
             let path0 = _normalizeSlashes(p).trim();
             if (!path0) return '';
@@ -976,22 +996,34 @@
                 if (data.success && Array.isArray(data.drives) && data.drives.length) {
                     downloadWinPicker.drives = data.drives;
                     data.drives.forEach(d => {
-                        const root = _driveRoot(d.letter);
-                        if (!root) return;
+                        const locationPath = _getWindowsLocationPath(d);
+                        if (!locationPath) return;
                         const opt = document.createElement('option');
-                        opt.value = root;
-                        opt.textContent = root;
+                        opt.value = locationPath;
+                        opt.textContent = d.name || locationPath;
+                        if (d && d.kind) {
+                            opt.dataset.kind = String(d.kind);
+                        } else if (d && d.type === 'desktop') {
+                            opt.dataset.kind = 'desktop';
+                        }
                         driveSelect.appendChild(opt);
                     });
                     driveSelect.disabled = false;
 
                     const cur = _normalizeWinPath(downloadWinPicker.path || '');
                     const curDrive = _normalizeDriveLetter((cur.split('/')[0] || ''));
-                    const prefer = data.drives.find(dd => _normalizeDriveLetter(dd.letter) === curDrive)
-                        || data.drives.find(dd => _normalizeDriveLetter(dd.letter) === 'C:')
+                    const desktopEntry = data.drives.find(dd =>
+                        (dd && (dd.kind === 'desktop' || dd.type === 'desktop')) &&
+                        _isPathSameOrChild(cur, _getWindowsLocationPath(dd))
+                    );
+                    const diskEntries = data.drives.filter(dd => _normalizeDriveLetter(dd && dd.letter));
+                    const prefer = desktopEntry
+                        || diskEntries.find(dd => _normalizeDriveLetter(dd.letter) === curDrive)
+                        || diskEntries.find(dd => _normalizeDriveLetter(dd.letter) === 'C:')
+                        || diskEntries[0]
                         || data.drives[0];
                     if (prefer) {
-                        driveSelect.value = _driveRoot(prefer.letter);
+                        driveSelect.value = _getWindowsLocationPath(prefer);
                     }
                 } else {
                     driveSelect.innerHTML = '<option value="">(无磁盘信息)</option>';
@@ -1131,9 +1163,19 @@
 
             const driveSelect = document.getElementById('downloadWindowsDriveSelect');
             if (driveSelect && !driveSelect.disabled) {
+                const options = Array.from(driveSelect.options || []);
+                const desktopOpt = options.find(opt =>
+                    String(opt.dataset.kind || '') === 'desktop' &&
+                    _isPathSameOrChild(path0, opt.value || '')
+                );
+                const exactOpt = options.find(opt => _normalizeWinPath(opt.value || '') === path0);
                 const drive = _normalizeDriveLetter((path0.split('/')[0] || ''));
-                const want = drive ? `${drive}/` : '';
-                if (want) driveSelect.value = want;
+                const driveRoot = drive ? `${drive}/` : '';
+                const driveOpt = options.find(opt => _normalizeWinPath(opt.value || '') === _normalizeWinPath(driveRoot));
+                const preferOpt = desktopOpt || exactOpt || driveOpt;
+                if (preferOpt) {
+                    driveSelect.value = preferOpt.value;
+                }
             }
 
             await downloadWinPickerLoadDirs();
@@ -1161,20 +1203,25 @@
             downloadWinPicker.server = serverIP;
 
             const isDestSource = downloadWindowsContext ? (downloadWindowsContext.destPanel === 'source') : false;
-            const remembered = getDefaultPathWithRemember(serverIP, isDestSource);
+            const remembered = getRememberedPath(serverIP, isDestSource);
             const fallback = (SERVERS_DATA && SERVERS_DATA[serverIP] && SERVERS_DATA[serverIP].default_path) ? SERVERS_DATA[serverIP].default_path : 'C:/';
 
-            const p = _normalizeWinPath(remembered || fallback);
+            await downloadWinPickerLoadDrives(serverIP);
+
+            const desktopEntry = (downloadWinPicker.drives || []).find(d =>
+                d && (d.kind === 'desktop' || d.type === 'desktop')
+            );
+            const desktopPath = _getWindowsLocationPath(desktopEntry);
+            const preferredPath = desktopPath || remembered || fallback;
+
+            const p = _normalizeWinPath(preferredPath || fallback);
             downloadWinPicker.path = p;
             downloadWinPicker.selectedPath = p;
 
             const input = document.getElementById('downloadWindowsPathInput');
             if (input) input.value = p;
 
-            await Promise.all([
-                downloadWinPickerLoadDrives(serverIP),
-                downloadWinPickerLoadDirs()
-            ]);
+            await downloadWinPickerEnterPath(p);
         }
 
         async function openDownloadToWindowsModal() {
@@ -3062,26 +3109,32 @@
                     const drive = parts[0];
                     const driveLetter = (drive || '').replace(':', '').toUpperCase();
                     const driveLabel = driveLetter ? `${driveLetter}盘` : drive;
+                    const normalizedCurrentPath = _normalizeWinPath(currentPath || '');
 
 
                     const drives = (isSource ? windowsDrivesSource : windowsDrivesTarget) || [];
                     if (drives.length > 0) {
-                        const currentDriveMeta = drives.find(d => {
+                        const currentDesktopMeta = drives.find(d =>
+                            d && (d.kind === 'desktop' || d.type === 'desktop') &&
+                            _isPathSameOrChild(normalizedCurrentPath, _getWindowsLocationPath(d))
+                        );
+                        const currentDriveMeta = currentDesktopMeta || drives.find(d => {
                             const letterRaw = (d.letter || '').toUpperCase();
                             const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
                             return letter === drive.toUpperCase();
                         });
-                        const driveIcon = currentDriveMeta && currentDriveMeta.type === 'network'
-                            ? 'bi-globe2'
-                            : 'bi-hdd-fill';
+                        const driveIcon = _getWindowsLocationIcon(currentDriveMeta);
                         const driveMenuItems = drives.map(d => {
-                            const letterRaw = (d.letter || '').toUpperCase();
-                            const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
-                            const iconHtml = d.type === 'network'
-                                ? '<i class="bi bi-globe2 me-2 text-secondary"></i>'
-                                : '<i class="bi bi-hdd-fill me-2 text-secondary"></i>';
-                            const active = letter === drive.toUpperCase() ? ' active' : '';
-                            return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive('${letter}', ${isSource}); return false;">${iconHtml}${d.name}</a></li>`;
+                            const locationPath = _getWindowsLocationPath(d);
+                            if (!locationPath) return '';
+                            const iconHtml = `<i class="bi ${_getWindowsLocationIcon(d)} me-2 text-secondary"></i>`;
+                            const isDesktop = Boolean(d && (d.kind === 'desktop' || d.type === 'desktop'));
+                            const active = isDesktop
+                                ? (_isPathSameOrChild(normalizedCurrentPath, locationPath) ? ' active' : '')
+                                : (!currentDesktopMeta && _normalizeDriveLetter(d.letter) === drive.toUpperCase() ? ' active' : '');
+                            const encodedPath = encodeURIComponent(locationPath);
+                            const displayName = d.name || locationPath;
+                            return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive(decodeURIComponent('${encodedPath}'), ${isSource}); return false;">${iconHtml}${displayName}</a></li>`;
                         }).join('');
                         segments.push({
                             html: `
@@ -3257,9 +3310,10 @@
 
 
 
-        function switchWindowsDrive(letter, isSource) {
-            const driveLetter = letter.endsWith(':') ? letter : (letter + ':');
-            const drivePath = driveLetter + '/';
+        function switchWindowsDrive(target, isSource) {
+            const normalizedTarget = _normalizeWinPath(target || '');
+            const drivePath = normalizedTarget || _driveRoot(target);
+            if (!drivePath) return;
             if (isSource) {
                 currentSourcePath = drivePath;
                 browseSourceInstant(currentSourcePath);
@@ -4542,10 +4596,11 @@
         }
 
 
-        async function loadWindowsDrives(serverIP, isSource) {
+        async function loadWindowsDrives(serverIP, isSource, options = {}) {
             try {
                 const response = await fetch(`/api/windows_drives/${serverIP}`);
                 const data = await response.json();
+                const preferDesktop = Boolean(options && options.preferDesktop);
 
                 const normalizeDrive = (letter) => {
                     if (!letter) return null;
@@ -4561,17 +4616,26 @@
                     }
 
                     const desiredPath = isSource ? currentSourcePath : currentTargetPath;
-                    const desiredDrive = normalizeDrive((desiredPath || '').split(/[\\/]/)[0]);
+                    const desiredPathNorm = _normalizeWinPath(desiredPath || '');
+                    const desiredDrive = normalizeDrive((desiredPathNorm || '').split('/')[0]);
+                    const diskEntries = data.drives.filter(d => normalizeDrive(d && d.letter));
 
-                    const preferred = data.drives.find(d => normalizeDrive(d.letter) === desiredDrive) ||
-                        data.drives.find(d => normalizeDrive(d.letter) === 'C:') ||
-                        data.drives[0];
+                    const desktopEntry = data.drives.find(d =>
+                        d && (d.kind === 'desktop' || d.type === 'desktop') && _getWindowsLocationPath(d)
+                    );
+                    const preferred = (preferDesktop ? desktopEntry : null) ||
+                        diskEntries.find(d => normalizeDrive(d.letter) === desiredDrive) ||
+                        diskEntries.find(d => normalizeDrive(d.letter) === 'C:') ||
+                        diskEntries[0] ||
+                        desktopEntry ||
+                        data.drives.find(d => _getWindowsLocationPath(d));
 
                     if (preferred) {
                         const driveLabel = normalizeDrive(preferred.letter);
-                        const driveRoot = driveLabel ? `${driveLabel}/` : '/';
+                        const preferredPath = _getWindowsLocationPath(preferred);
+                        const driveRoot = preferredPath || (driveLabel ? `${driveLabel}/` : '/');
                         const useDesiredPath = Boolean(desiredDrive && driveLabel === desiredDrive && desiredPath);
-                        const targetPath = useDesiredPath ? desiredPath : driveRoot;
+                        const targetPath = useDesiredPath ? desiredPathNorm : driveRoot;
 
                         if (isSource) {
                             if (currentSourcePath !== targetPath) {
@@ -4587,7 +4651,7 @@
                             updatePathNavigation(currentTargetPath, false);
                         }
                         if (!useDesiredPath) {
-                            addLogInfo(`💾 默认选择磁盘: ${preferred.letter}`);
+                            addLogInfo(`💾 默认选择位置: ${preferred.name || preferred.letter || driveRoot}`);
                         }
                     }
 
@@ -7188,7 +7252,8 @@
                     const isWindows = isWindowsServer(this.value);
 
 
-                    const defaultPath = getDefaultPathWithRemember(this.value, true);
+                    const rememberedPath = getRememberedPath(this.value, true);
+                    const defaultPath = rememberedPath || getDefaultPath(this.value);
                     if (!defaultPath) {
                         addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
                         return;
@@ -7198,7 +7263,7 @@
 
 
                     if (isWindows) {
-                        loadWindowsDrives(this.value, true);
+                        loadWindowsDrives(this.value, true, { preferDesktop: true });
                         addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     } else {
                         hideWindowsDriveSelector(true);
@@ -7211,7 +7276,8 @@
                     const isWindows = isWindowsServer(this.value);
 
 
-                    const defaultPath = getDefaultPathWithRemember(this.value, false);
+                    const rememberedPath = getRememberedPath(this.value, false);
+                    const defaultPath = rememberedPath || getDefaultPath(this.value);
                     if (!defaultPath) {
                         addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
                         return;
@@ -7221,7 +7287,7 @@
 
 
                     if (isWindows) {
-                        loadWindowsDrives(this.value, false);
+                        loadWindowsDrives(this.value, false, { preferDesktop: true });
                         addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     } else {
                         hideWindowsDriveSelector(false);

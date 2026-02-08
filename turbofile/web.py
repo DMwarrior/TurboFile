@@ -973,16 +973,39 @@ def get_windows_drives(server_ip):
                     continue
                 name = str(item.get('name', letter) or letter)
                 dtype = str(item.get('type', 'local') or 'local')
+                root = normalize_windows_path_for_transfer(f"{letter}/")  # noqa: F405
                 drives.append({
                     'letter': letter,
                     'name': name,
-                    'type': 'network' if dtype == 'network' else 'local'
+                    'type': 'network' if dtype == 'network' else 'local',
+                    'path': root
                 })
         except Exception:
             drives = []
 
         if not drives:
             raise RuntimeError('获取磁盘列表失败')
+
+        # Add a WinSCP-like quick entry to Desktop (put it first).
+        try:
+            desktop_cmd = (
+                "powershell -NoProfile -Command "
+                "\"[Environment]::GetFolderPath('Desktop')\""
+            )
+            desktop_out, _, _ = ssh_manager.execute_command(server_ip, desktop_cmd)
+            desktop_raw = str(desktop_out or '').strip()
+            desktop_path = normalize_windows_path_for_transfer(desktop_raw) if desktop_raw else ''  # noqa: F405
+            if desktop_path:
+                drives.insert(0, {
+                    'letter': '',
+                    'name': '桌面',
+                    'type': 'desktop',
+                    'kind': 'desktop',
+                    'path': desktop_path
+                })
+        except Exception:
+            # Best-effort only; keep drive list usable even if desktop query fails.
+            pass
 
         return jsonify({'success': True, 'drives': drives})
     except Exception as e:
