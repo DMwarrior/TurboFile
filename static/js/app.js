@@ -6724,6 +6724,7 @@
             const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
             const compressAction = contextMenu ? contextMenu.querySelector('[data-action="compress"]') : null;
             const extractAction = contextMenu ? contextMenu.querySelector('[data-action="extract"]') : null;
+            const copyPathAction = contextMenu ? contextMenu.querySelector('[data-action="copy-path"]') : null;
             const downloadWindowsAction = contextMenu ? contextMenu.querySelector('[data-action="download-windows"]') : null;
             let contextState = { isSource: true, targetRow: null };
 
@@ -7021,6 +7022,13 @@
                         extractAction.classList.add('disabled');
                     }
                 }
+                if (copyPathAction) {
+                    if (row) {
+                        copyPathAction.classList.remove('disabled');
+                    } else {
+                        copyPathAction.classList.add('disabled');
+                    }
+                }
 
                 if (downloadWindowsAction) {
                     const leftSelected = selectedSourceFiles.length > 0;
@@ -7154,6 +7162,25 @@
                 });
             }
 
+            if (copyPathAction) {
+                copyPathAction.addEventListener('click', () => {
+                    if (copyPathAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { targetRow } = contextState;
+                    const path = targetRow ? (targetRow.dataset.path || '') : '';
+                    if (!path) {
+                        addLogWarning('⚠️ 未找到可复制的路径');
+                        return;
+                    }
+                    copyTextToClipboard(path)
+                        .then(() => {
+                            addLogSuccess(`📋 已复制路径: ${path}`);
+                            showToast('📋 路径已复制', 'success');
+                        })
+                        .catch(() => addLogWarning('⚠️ 复制失败，请手动复制'));
+                });
+            }
+
 
             if (downloadWindowsAction) {
                 downloadWindowsAction.addEventListener('click', () => {
@@ -7251,20 +7278,31 @@
                 if (this.value) {
                     const isWindows = isWindowsServer(this.value);
 
-
                     const rememberedPath = getRememberedPath(this.value, true);
-                    const defaultPath = rememberedPath || getDefaultPath(this.value);
-                    if (!defaultPath) {
+                    const configDefaultPath = getDefaultPath(this.value);
+                    const hasRememberedPath = Boolean(rememberedPath);
+                    const hasConfigDefaultPath = Boolean(configDefaultPath);
+                    const initialPath = rememberedPath || configDefaultPath || '';
+
+                    if (initialPath) {
+                        currentSourcePath = initialPath;
+                        browseSourceInstant(currentSourcePath, { skipRemember: true });
+                    } else if (!isWindows) {
                         addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
                         return;
+                    } else {
+                        currentSourcePath = '';
                     }
-                    currentSourcePath = defaultPath;
-                    browseSourceInstant(currentSourcePath, { skipRemember: true });
 
 
                     if (isWindows) {
-                        loadWindowsDrives(this.value, true, { preferDesktop: true });
-                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                        const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                        loadWindowsDrives(this.value, true, { preferDesktop });
+                        if (preferDesktop) {
+                            addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
+                        } else {
+                            addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                        }
                     } else {
                         hideWindowsDriveSelector(true);
                     }
@@ -7275,20 +7313,31 @@
                 if (this.value) {
                     const isWindows = isWindowsServer(this.value);
 
-
                     const rememberedPath = getRememberedPath(this.value, false);
-                    const defaultPath = rememberedPath || getDefaultPath(this.value);
-                    if (!defaultPath) {
+                    const configDefaultPath = getDefaultPath(this.value);
+                    const hasRememberedPath = Boolean(rememberedPath);
+                    const hasConfigDefaultPath = Boolean(configDefaultPath);
+                    const initialPath = rememberedPath || configDefaultPath || '';
+
+                    if (initialPath) {
+                        currentTargetPath = initialPath;
+                        browseTargetInstant(currentTargetPath, { skipRemember: true });
+                    } else if (!isWindows) {
                         addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
                         return;
+                    } else {
+                        currentTargetPath = '';
                     }
-                    currentTargetPath = defaultPath;
-                    browseTargetInstant(currentTargetPath, { skipRemember: true });
 
 
                     if (isWindows) {
-                        loadWindowsDrives(this.value, false, { preferDesktop: true });
-                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                        const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                        loadWindowsDrives(this.value, false, { preferDesktop });
+                        if (preferDesktop) {
+                            addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
+                        } else {
+                            addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                        }
                     } else {
                         hideWindowsDriveSelector(false);
                     }
