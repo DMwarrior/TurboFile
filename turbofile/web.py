@@ -20,6 +20,53 @@ _REMOTE_WIN_IMAGE_TOOL_CACHE = {}
 _REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD = threading.Lock()
 _REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC = 300
 
+_SERVER_ACCESS_KEYS = ('server', 'source_server', 'target_server', 'server_a', 'server_b')
+
+
+def _collect_requested_server_ips():
+    requested = []
+    seen = set()
+
+    def _append(value):
+        if not isinstance(value, str):
+            return
+        server_ip = value.strip()
+        if not server_ip or server_ip in seen:
+            return
+        seen.add(server_ip)
+        requested.append(server_ip)
+
+    for key, value in (request.view_args or {}).items():
+        if 'server' in str(key).lower():
+            _append(value)
+
+    for key in _SERVER_ACCESS_KEYS:
+        _append(request.args.get(key))
+        _append(request.form.get(key))
+
+    json_body = request.get_json(silent=True)
+    if isinstance(json_body, dict):
+        for key in _SERVER_ACCESS_KEYS:
+            _append(json_body.get(key))
+
+    return requested
+
+
+def _server_access_denied_response(server_ip: str, client_ip: str):
+    return jsonify({
+        'success': False,
+        'error': f'客户端 {client_ip or "未知"} 无权访问服务器 {server_ip}'
+    }), 403
+
+
+@bp.before_request
+def enforce_server_visibility():
+    client_ip = extract_client_ipv4_from_request(request)
+    for server_ip in _collect_requested_server_ips():
+        if server_ip in SERVERS and not is_server_visible_to_client(server_ip, client_ip):
+            return _server_access_denied_response(server_ip, client_ip)
+    return None
+
 
 def _guess_image_mime_from_path(path: str):
     try:
@@ -447,15 +494,23 @@ def index():
 
     # Resolve the client IPv4 for front-end logging.
     client_ipv4 = extract_client_ipv4_from_request(request) or None
+    visible_servers = get_visible_servers_for_client(client_ipv4)
 
     # Determine whether the client is an admin (IP + config gate).
     is_admin_client = is_admin_client_ip(client_ipv4)
     with CLIENT_PATH_LOCK:
-        remembered_paths = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
+        remembered_paths_raw = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
+    remembered_paths = {
+        panel: panel_state
+        for panel, panel_state in remembered_paths_raw.items()
+        if not isinstance(panel_state, dict)
+        or not panel_state.get('server')
+        or panel_state.get('server') in visible_servers
+    }
 
     return render_template(
         'index.html',
-        servers=SERVERS,
+        servers=visible_servers,
         client_ipv4=client_ipv4,
         is_admin_client=is_admin_client,
         remembered_paths=remembered_paths,
@@ -930,7 +985,8 @@ def api_file_save():
 
 @bp.route('/api/servers')
 def get_servers():
-    return jsonify(SERVERS)
+    client_ip = extract_client_ipv4_from_request(request)
+    return jsonify(get_visible_servers_for_client(client_ip))
 
 @bp.route('/api/windows_drives/<server_ip>')
 def get_windows_drives(server_ip):
@@ -1239,6 +1295,13 @@ def handle_start_transfer(data):
     if not source_server or not target_server or not target_path:
         emit('transfer_cancelled', {'status': 'error', 'message': '参数不完整：请提供源/目标服务器与目标路径'})
         return
+    for server_ip in (source_server, target_server):
+        if server_ip in SERVERS and not is_server_visible_to_client(server_ip, client_ip):
+            emit('transfer_cancelled', {
+                'status': 'error',
+                'message': f'客户端 {client_ip or "未知"} 无权访问服务器 {server_ip}'
+            })
+            return
     if select_all and not source_dir:
         emit('transfer_cancelled', {'status': 'error', 'message': '全选传输缺少 source_dir'})
         return

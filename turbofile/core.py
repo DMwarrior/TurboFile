@@ -93,6 +93,47 @@ def is_admin_client_ip(ip: str) -> bool:
         return False
 
 
+def get_server_visible_client_ips(server_ip: str):
+    """Return a normalized client-IP allowlist for a server; empty means unrestricted."""
+    try:
+        server = SERVERS.get(server_ip) or {}
+        raw = server.get('visible_client_ips')
+        if not raw:
+            return set()
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, (list, tuple, set)):
+            return {str(ip).strip() for ip in raw if str(ip).strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def is_server_visible_to_client(server_ip: str, client_ip: str) -> bool:
+    """Return whether the given configured server should be visible to a client IP."""
+    try:
+        if server_ip not in SERVERS:
+            return False
+        allowed_client_ips = get_server_visible_client_ips(server_ip)
+        if not allowed_client_ips:
+            return True
+        return bool(client_ip and client_ip in allowed_client_ips)
+    except Exception:
+        return False
+
+
+def get_visible_servers_for_client(client_ip: str):
+    """Return the configured server map filtered by client-IP visibility rules."""
+    try:
+        return {
+            server_ip: server_cfg
+            for server_ip, server_cfg in SERVERS.items()
+            if is_server_visible_to_client(server_ip, client_ip)
+        }
+    except Exception:
+        return {}
+
+
 
 @lru_cache(maxsize=1)
 def get_current_host_ip():
