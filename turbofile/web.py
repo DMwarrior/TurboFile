@@ -488,6 +488,42 @@ def _read_windows_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) 
     raise last_err or FileNotFoundError(path)
 
 
+def _read_posix_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) -> bytes:
+    """
+    Read a POSIX file via SSH and return raw bytes.
+    This is a fallback when SFTP path resolution differs from the shell-visible path.
+    """
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import pathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())\" "
+            f"{quoted}"
+        ),
+        (
+            "python -c "
+            "\"import pathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())\" "
+            f"{quoted}"
+        ),
+        f"cat -- {quoted}",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
 @bp.route('/')
 def index():
     clear_log_if_too_large()
@@ -741,7 +777,8 @@ def api_image_stream():
                         data_in = _read_windows_file_bytes_via_ssh(ssh, path)
                         engine = 'windows-pwsh'
                     else:
-                        raise
+                        data_in = _read_posix_file_bytes_via_ssh(ssh, path)
+                        engine = 'posix-ssh'
                 resp = Response(data_in, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
                 resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
                 resp.headers['X-TurboFile-Image-Engine'] = engine if engine != 'unknown' else 'raw'
@@ -893,7 +930,8 @@ def api_image_stream():
                         data_in = _read_windows_file_bytes_via_ssh(ssh, path)
                         engine = 'windows-pwsh'
                     else:
-                        raise
+                        data_in = _read_posix_file_bytes_via_ssh(ssh, path)
+                        engine = 'posix-ssh'
 
                 img = _decode_image_bytes(data_in)
                 data, mime = _transform_cv_image(img)
@@ -901,9 +939,14 @@ def api_image_stream():
                 if not did_transform:
                     data = data_in
                     mime = _guess_image_mime_from_path(path)
-                    engine = 'raw'
+                    engine = 'raw' if engine == 'unknown' else engine
                 else:
-                    engine = 'opencv' if engine != 'windows-pwsh' else 'windows-pwsh+opencv'
+                    if engine == 'windows-pwsh':
+                        engine = 'windows-pwsh+opencv'
+                    elif engine == 'posix-ssh':
+                        engine = 'posix-ssh+opencv'
+                    else:
+                        engine = 'opencv'
 
         resp = Response(data, mimetype=mime or 'application/octet-stream')
         resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
