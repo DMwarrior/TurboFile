@@ -1,6 +1,7 @@
-from flask import Blueprint, render_template, request, jsonify, Response
+from flask import Blueprint, render_template, request, jsonify, Response, redirect, send_from_directory
 from flask_socketio import emit
 
+import codecs
 import os
 import re
 import threading
@@ -524,6 +525,82 @@ def _read_posix_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) ->
     raise last_err or FileNotFoundError(path)
 
 
+def _read_remote_file_bytes(server_ip: str, path: str, timeout_sec: float = 30.0) -> bytes:
+    """Read remote file bytes via SFTP first, then fall back to SSH shell reads."""
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+            with fobj as f:
+                data = f.read()
+                if isinstance(data, (bytes, bytearray)):
+                    return bytes(data)
+                return bytes(data)
+        except Exception:
+            if is_windows:
+                return _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+            return _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _decode_text_bytes(data: bytes):
+    """Decode text bytes with BOM detection and common Chinese encoding fallbacks."""
+    if data is None:
+        return '', 'utf-8'
+    if not isinstance(data, (bytes, bytearray)):
+        return str(data), 'text'
+
+    payload = bytes(data)
+    if payload.startswith(codecs.BOM_UTF8):
+        return payload.decode('utf-8-sig', errors='replace'), 'utf-8-sig'
+    if payload.startswith(codecs.BOM_UTF16_LE) or payload.startswith(codecs.BOM_UTF16_BE):
+        return payload.decode('utf-16', errors='replace'), 'utf-16'
+    if payload.startswith(codecs.BOM_UTF32_LE) or payload.startswith(codecs.BOM_UTF32_BE):
+        return payload.decode('utf-32', errors='replace'), 'utf-32'
+
+    for encoding in ('utf-8', 'gb18030', 'gbk', 'big5'):
+        try:
+            return payload.decode(encoding), encoding
+        except Exception:
+            continue
+    return payload.decode('utf-8', errors='replace'), 'utf-8'
+
+
+def _apply_netron_cors_headers(resp: Response):
+    try:
+        origin = (request.headers.get('Origin') or '').strip()
+        if origin in {'https://netron.app', 'https://www.netron.app'}:
+            resp.headers['Access-Control-Allow-Origin'] = origin
+            resp.headers['Vary'] = 'Origin'
+        resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
+    except Exception:
+        pass
+    return resp
+
+
+def _get_netron_package_dir():
+    try:
+        import netron
+        return os.path.dirname(netron.__file__)
+    except Exception:
+        return None
+
+
 @bp.route('/')
 def index():
     clear_log_if_too_large()
@@ -970,27 +1047,12 @@ def api_file_read():
         return jsonify({'success': False, 'error': '缺少参数'}), 400
     try:
         if is_local_server(server_ip):
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            return jsonify({'success': True, 'content': content})
+            with open(path, 'rb') as f:
+                data = f.read()
         else:
-            ssh = ssh_manager.get_connection(server_ip)
-            if not ssh:
-                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
-            sftp = ssh.open_sftp()
-            try:
-                with sftp.file(path, 'r') as f:
-                    data = f.read()
-                    if isinstance(data, (bytes, bytearray)):
-                        content = data.decode('utf-8', errors='ignore')
-                    else:
-                        content = str(data)
-                return jsonify({'success': True, 'content': content})
-            finally:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+            data = _read_remote_file_bytes(server_ip, path, timeout_sec=60.0)
+        content, encoding = _decode_text_bytes(data)
+        return jsonify({'success': True, 'content': content, 'encoding': encoding})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1000,12 +1062,16 @@ def api_file_save():
     server_ip = data.get('server')
     path = data.get('path')
     content = data.get('content', '')
+    encoding = (data.get('encoding') or 'utf-8').strip().lower()
+    if encoding not in {'utf-8', 'utf-8-sig', 'utf-16', 'utf-32', 'gb18030', 'gbk', 'big5'}:
+        encoding = 'utf-8'
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
     try:
+        data_bytes = content.encode(encoding) if isinstance(content, str) else bytes(content)
         if is_local_server(server_ip):
-            with open(path, 'w', encoding='utf-8', errors='ignore') as f:
-                f.write(content if isinstance(content, str) else str(content))
+            with open(path, 'wb') as f:
+                f.write(data_bytes)
             return jsonify({'success': True})
         else:
             ssh = ssh_manager.get_connection(server_ip)
@@ -1013,8 +1079,8 @@ def api_file_save():
                 return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
             sftp = ssh.open_sftp()
             try:
-                with sftp.file(path, 'w') as f:
-                    data_bytes = content.encode('utf-8') if isinstance(content, str) else bytes(content)
+                fobj, _ = _sftp_open_with_fallback(sftp, path, 'wb', is_windows_server(server_ip))
+                with fobj as f:
                     f.write(data_bytes)
                 return jsonify({'success': True})
             finally:
@@ -1024,6 +1090,77 @@ def api_file_save():
                     pass
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/netron/model', methods=['GET'])
+def api_netron_model():
+    server_ip = request.args.get('server')
+    path = request.args.get('path')
+
+    if not server_ip or not path:
+        return jsonify({'success': False, 'error': '缺少参数'}), 400
+    if not str(path).lower().endswith('.onnx'):
+        return jsonify({'success': False, 'error': '仅支持 ONNX 文件'}), 400
+
+    sftp = None
+    try:
+        if is_local_server(server_ip):
+            with open(path, 'rb') as f:
+                data = f.read()
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            try:
+                sftp = ssh.open_sftp()
+            except Exception:
+                sftp = None
+
+            try:
+                fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows_server(server_ip))
+                with fobj as f:
+                    data = f.read()
+                    if not isinstance(data, (bytes, bytearray)):
+                        data = bytes(data)
+            except Exception:
+                if is_windows_server(server_ip):
+                    data = _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=180.0)
+                else:
+                    data = _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=180.0)
+
+        resp = Response(data, mimetype='application/octet-stream')
+        resp.headers['Cache-Control'] = 'no-store'
+        resp.headers['X-Content-Type-Options'] = 'nosniff'
+        return _apply_netron_cors_headers(resp)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+@bp.route('/netron')
+def netron_redirect():
+    return redirect('/netron/', code=302)
+
+
+@bp.route('/netron/')
+def netron_index():
+    netron_dir = _get_netron_package_dir()
+    if not netron_dir:
+        return jsonify({'success': False, 'error': 'Netron 未安装'}), 500
+    return send_from_directory(netron_dir, 'index.html')
+
+
+@bp.route('/netron/<path:asset_path>')
+def netron_asset(asset_path):
+    netron_dir = _get_netron_package_dir()
+    if not netron_dir:
+        return jsonify({'success': False, 'error': 'Netron 未安装'}), 500
+    return send_from_directory(netron_dir, asset_path)
 
 
 @bp.route('/api/servers')
@@ -1999,23 +2136,12 @@ def compare_files():
 
         def read_text(server, path):
             if is_local_server(server):
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    return f.read()
-            ssh = ssh_manager.get_connection(server)
-            if not ssh:
-                raise RuntimeError('SSH连接失败')
-            sftp = ssh.open_sftp()
-            try:
-                with sftp.file(path, 'r') as f:
+                with open(path, 'rb') as f:
                     data_bytes = f.read()
-                if isinstance(data_bytes, (bytes, bytearray)):
-                    return data_bytes.decode('utf-8', errors='ignore')
-                return str(data_bytes)
-            finally:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+            else:
+                data_bytes = _read_remote_file_bytes(server, path, timeout_sec=60.0)
+            text, _ = _decode_text_bytes(data_bytes)
+            return text
 
         left_text = read_text(server_a, path_a).splitlines()
         right_text = read_text(server_b, path_b).splitlines()

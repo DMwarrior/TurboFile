@@ -4888,11 +4888,36 @@
         function isImageFile(name) {
             return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
         }
+        function isOnnxFile(name) {
+            return /\.onnx$/i.test(name || '');
+        }
         function isTextEditable(name) {
-            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp)$/i.test(name);
+            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp|csv|tsv)$/i.test(name);
         }
         function isArchiveFile(name) {
             return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i.test(name);
+        }
+
+        function openOnnxInNetron(server, path, name) {
+            try {
+                const modelUrl = new URL('/api/netron/model', window.location.origin);
+                modelUrl.searchParams.set('server', server);
+                modelUrl.searchParams.set('path', path);
+
+                const viewerUrl = new URL('/netron/', window.location.origin);
+                viewerUrl.searchParams.set('url', modelUrl.toString());
+                if (name) {
+                    viewerUrl.searchParams.set('identifier', name);
+                }
+
+                const opened = window.open(viewerUrl.toString(), '_blank', 'noopener');
+                if (!opened) {
+                    addLogWarning(`⚠️ Netron 页面被浏览器拦截，请允许弹出新页面: ${name || path}`);
+                }
+            } catch (e) {
+                addLogError('打开 Netron 失败: ' + (e.message || e));
+                console.error('openOnnxInNetron error:', e);
+            }
         }
 
             function buildImageViewer(server, path, name, isSource) {
@@ -5263,6 +5288,7 @@
                     const ta = document.querySelector('#editorModal textarea');
                     if (ta) {
                         ta.value = content;
+                        ta.dataset.encoding = data.encoding || 'utf-8';
                         updateEditorLineNumbers();
                         renderFindHighlights();
                         syncEditorScroll();
@@ -5288,6 +5314,8 @@
                     if (!server) return;
                     if (isImageFile(name)) {
                         previewImage(server, path, name, isSource);
+                    } else if (isOnnxFile(name)) {
+                        openOnnxInNetron(server, path, name);
                     } else if (isTextEditable(name)) {
                         editTextFile(server, path, name);
                     }
@@ -6172,6 +6200,7 @@
                 ta.value = content;
                 ta.dataset.server = server;
                 ta.dataset.path = path;
+                ta.dataset.encoding = 'utf-8';
                 const findInput = document.getElementById('findInput');
                 const replaceInput = document.getElementById('replaceInput');
                 if (findInput) findInput.value = '';
@@ -6370,12 +6399,13 @@
                 if (!ta) return;
                 const server = ta.dataset.server;
                 const path = ta.dataset.path;
+                const encoding = ta.dataset.encoding || 'utf-8';
                 const content = ta.value;
                 try {
                     const resp = await fetch('/api/file/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ server, path, content })
+                        body: JSON.stringify({ server, path, content, encoding })
                     });
                     const data = await resp.json();
                     if (data.success) {
