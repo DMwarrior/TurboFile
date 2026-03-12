@@ -41,7 +41,7 @@
         let transferRefreshOverride = null; // { refreshSource: boolean, refreshTarget: boolean } | null
 
 
-        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false };
+        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false, promptSelection: null };
 
         const DRAG_TRANSFER_TYPE = 'application/x-turbofile-transfer';
         let dragTransferPayload = null;
@@ -142,7 +142,12 @@
                 els.modal.addEventListener('shown.bs.modal', () => {
                     if (uiDialogState.type === 'prompt' && els.input) {
                         els.input.focus();
-                        els.input.select();
+                        const selection = uiDialogState.promptSelection;
+                        if (selection && Number.isInteger(selection.start) && Number.isInteger(selection.end)) {
+                            els.input.setSelectionRange(selection.start, selection.end);
+                        } else {
+                            els.input.select();
+                        }
                     } else if (els.confirmBtn) {
                         els.confirmBtn.focus();
                     }
@@ -203,10 +208,12 @@
                     els.inputRow.style.display = 'block';
                     els.input.value = options.defaultValue || '';
                     els.input.placeholder = options.placeholder || '';
+                    uiDialogState.promptSelection = options.promptSelection || null;
                 } else {
                     els.inputRow.style.display = 'none';
                     els.input.value = '';
                     els.input.placeholder = '';
+                    uiDialogState.promptSelection = null;
                 }
             }
 
@@ -271,6 +278,19 @@
             const normalized = String(path || '').replace(/\\/g, '/');
             const parts = normalized.split('/');
             return parts.length ? parts[parts.length - 1] : '';
+        }
+
+        function _getRenameSelectionRange(name, isDirectory = false) {
+            const text = String(name || '');
+            if (!text) return { start: 0, end: 0 };
+            if (isDirectory) return { start: 0, end: text.length };
+
+            const dotIndex = text.lastIndexOf('.');
+            if (dotIndex <= 0 || dotIndex === text.length - 1) {
+                return { start: 0, end: text.length };
+            }
+
+            return { start: 0, end: dotIndex };
         }
 
         function cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, files, mode) {
@@ -1917,7 +1937,8 @@
             const newName = await showPromptDialog(`请输入新名称\n原名称: ${oldName}`, {
                 title: '重命名',
                 defaultValue: oldName,
-                placeholder: oldName
+                placeholder: oldName,
+                promptSelection: _getRenameSelectionRange(oldName, !!file.is_directory)
             });
 
             if (!newName || newName.trim() === '') {
@@ -6819,7 +6840,8 @@
                 row.dataset.editing = 'true';
                 nameSpan.replaceWith(input);
                 input.focus();
-                input.select();
+                const selection = _getRenameSelectionRange(original, String(row.dataset.isDirectory).toLowerCase() === 'true');
+                input.setSelectionRange(selection.start, selection.end);
 
                 const cleanup = () => {
                     if (row.dataset.editing !== 'true') return;
