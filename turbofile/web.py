@@ -23,6 +23,12 @@ _REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC = 300
 
 _SERVER_ACCESS_KEYS = ('server', 'source_server', 'target_server', 'server_a', 'server_b')
 
+TEXT_EDITOR_FULL_READ_MAX_BYTES = 1024 * 1024
+TEXT_EDITOR_CHUNK_READ_BYTES = 256 * 1024
+TEXT_EDITOR_CHUNK_READ_MIN_BYTES = 4 * 1024
+TEXT_EDITOR_CHUNK_READ_MAX_BYTES = 1024 * 1024
+TEXT_EDITOR_SAMPLE_BYTES = 4096
+
 
 def _collect_requested_server_ips():
     requested = []
@@ -489,6 +495,55 @@ def _read_windows_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) 
     raise last_err or FileNotFoundError(path)
 
 
+def _read_windows_file_range_via_ssh(ssh, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a Windows file via PowerShell."""
+    if length is None:
+        return _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    offset = max(int(offset or 0), 0)
+    length = max(int(length or 0), 0)
+    if length <= 0:
+        return b''
+
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                f"$off=[int64]{offset};"
+                f"$len=[int]{length};"
+                "$fs=[System.IO.File]::Open($p,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite);"
+                "try {"
+                "$size=[int64]$fs.Length;"
+                "if($off -lt 0){$off=0};"
+                "if($off -gt $size){$off=$size};"
+                "$remain=[int64]($size-$off);"
+                "if($len -gt $remain){$len=[int]$remain};"
+                "if($len -lt 0){$len=0};"
+                "$null=$fs.Seek($off,[System.IO.SeekOrigin]::Begin);"
+                "$buf=New-Object byte[] $len;"
+                "$read=$fs.Read($buf,0,$len);"
+                "$o=[Console]::OpenStandardOutput();"
+                "if($read -gt 0){$o.Write($buf,0,$read)};"
+                "} finally {"
+                "$fs.Dispose();"
+                "}"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh range read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
 def _read_posix_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) -> bytes:
     """
     Read a POSIX file via SSH and return raw bytes.
@@ -519,6 +574,48 @@ def _read_posix_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) ->
             if exit_code == 0:
                 return out_b or b''
             last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _read_posix_file_range_via_ssh(ssh, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a POSIX file via SSH."""
+    if length is None:
+        return _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    offset = max(int(offset or 0), 0)
+    length = max(int(length or 0), 0)
+    if length <= 0:
+        return b''
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import pathlib,sys;f=pathlib.Path(sys.argv[1]).open('rb');"
+            "f.seek(int(sys.argv[2]));sys.stdout.buffer.write(f.read(int(sys.argv[3])));f.close()\" "
+            f"{quoted} {offset} {length}"
+        ),
+        (
+            "python -c "
+            "\"import pathlib,sys;f=pathlib.Path(sys.argv[1]).open('rb');"
+            "f.seek(int(sys.argv[2]));sys.stdout.buffer.write(f.read(int(sys.argv[3])));f.close()\" "
+            f"{quoted} {offset} {length}"
+        ),
+        f"dd if={quoted} bs=1 skip={offset} count={length} status=none",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix range read failed')
         except Exception as e:
             last_err = e
             continue
@@ -558,6 +655,49 @@ def _read_remote_file_bytes(server_ip: str, path: str, timeout_sec: float = 30.0
                 pass
 
 
+def _read_remote_file_range(server_ip: str, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a remote file via SFTP first, then SSH shell fallbacks."""
+    if offset <= 0 and length is None:
+        return _read_remote_file_bytes(server_ip, path, timeout_sec=timeout_sec)
+
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    offset = max(int(offset or 0), 0)
+    length = None if length is None else max(int(length or 0), 0)
+    if length == 0:
+        return b''
+
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+            with fobj as f:
+                if offset:
+                    f.seek(offset)
+                data = f.read() if length is None else f.read(length)
+                if isinstance(data, (bytes, bytearray)):
+                    return bytes(data)
+                return bytes(data)
+        except Exception:
+            if is_windows:
+                return _read_windows_file_range_via_ssh(ssh, path, offset=offset, length=length, timeout_sec=timeout_sec)
+            return _read_posix_file_range_via_ssh(ssh, path, offset=offset, length=length, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
 def _decode_text_bytes(data: bytes):
     """Decode text bytes with BOM detection and common Chinese encoding fallbacks."""
     if data is None:
@@ -579,6 +719,102 @@ def _decode_text_bytes(data: bytes):
         except Exception:
             continue
     return payload.decode('utf-8', errors='replace'), 'utf-8'
+
+
+def _decode_text_bytes_with_hint(data: bytes, encoding_hint: str = ''):
+    hint = str(encoding_hint or '').strip().lower()
+    if hint in {'utf-8', 'utf-8-sig', 'utf-16', 'utf-32', 'gb18030', 'gbk', 'big5'}:
+        try:
+            return bytes(data or b'').decode(hint, errors='replace'), hint
+        except Exception:
+            pass
+    return _decode_text_bytes(data)
+
+
+def _stat_posix_file_via_ssh(ssh, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a POSIX path via SSH."""
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import os,sys;st=os.stat(sys.argv[1]);print('%d %d' % (st.st_size, int(st.st_mtime)))\" "
+            f"{quoted}"
+        ),
+        (
+            "python -c "
+            "\"import os,sys;st=os.stat(sys.argv[1]);print('%d %d' % (st.st_size, int(st.st_mtime)))\" "
+            f"{quoted}"
+        ),
+        f"stat -c '%s %Y' -- {quoted}",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code != 0:
+                raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix stat failed')
+            text = (out_b or b'').decode('utf-8', errors='ignore').strip()
+            parts = text.split()
+            if len(parts) >= 2:
+                return int(parts[0]), int(parts[1])
+            raise RuntimeError(f"bad stat output: {text}")
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _stat_remote_file(server_ip: str, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a remote file."""
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            st, _ = _sftp_stat_with_fallback(sftp, path, is_windows)
+            return int(getattr(st, 'st_size', 0) or 0), int(getattr(st, 'st_mtime', 0) or 0)
+        except Exception:
+            if is_windows:
+                return _windows_file_stat_via_ssh(ssh, path, timeout_sec=timeout_sec)
+            return _stat_posix_file_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _stat_file(server_ip: str, path: str, timeout_sec: float = 12.0):
+    if is_local_server(server_ip):
+        st = os.stat(path)
+        return int(st.st_size), int(st.st_mtime)
+    return _stat_remote_file(server_ip, path, timeout_sec=timeout_sec)
+
+
+def _read_file_range(server_ip: str, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    offset = max(int(offset or 0), 0)
+    if is_local_server(server_ip):
+        with open(path, 'rb') as f:
+            if offset:
+                f.seek(offset)
+            data = f.read() if length is None else f.read(max(int(length or 0), 0))
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+            return bytes(data)
+    return _read_remote_file_range(server_ip, path, offset=offset, length=length, timeout_sec=timeout_sec)
 
 
 def _apply_netron_cors_headers(resp: Response):
@@ -1043,16 +1279,98 @@ def api_image_stream():
 def api_file_read():
     server_ip = request.args.get('server')
     path = request.args.get('path')
+    mode = (request.args.get('mode') or 'auto').strip().lower()
+    try:
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(request.args.get('limit', TEXT_EDITOR_CHUNK_READ_BYTES))
+    except (TypeError, ValueError):
+        limit = TEXT_EDITOR_CHUNK_READ_BYTES
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
+    if mode not in {'auto', 'head', 'tail', 'range'}:
+        mode = 'auto'
+
+    offset = max(offset, 0)
+    limit = max(TEXT_EDITOR_CHUNK_READ_MIN_BYTES, min(limit, TEXT_EDITOR_CHUNK_READ_MAX_BYTES))
     try:
-        if is_local_server(server_ip):
-            with open(path, 'rb') as f:
-                data = f.read()
-        else:
-            data = _read_remote_file_bytes(server_ip, path, timeout_sec=60.0)
-        content, encoding = _decode_text_bytes(data)
-        return jsonify({'success': True, 'content': content, 'encoding': encoding})
+        file_size, mtime = _stat_file(server_ip, path, timeout_sec=15.0)
+        read_mode = mode
+        start = 0
+        end = file_size
+        encoding_hint = ''
+
+        # Sample the file head to preserve BOM-based encoding detection for large partial reads.
+        if file_size > 0 and (mode != 'auto' or file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES):
+            sample = _read_file_range(
+                server_ip,
+                path,
+                offset=0,
+                length=min(TEXT_EDITOR_SAMPLE_BYTES, file_size),
+                timeout_sec=20.0
+            )
+            _, encoding_hint = _decode_text_bytes(sample)
+
+        if mode == 'auto':
+            if file_size <= TEXT_EDITOR_FULL_READ_MAX_BYTES:
+                read_mode = 'full'
+                start = 0
+                end = file_size
+            else:
+                read_mode = 'tail'
+                end = file_size
+                start = max(0, end - limit)
+        elif mode == 'head':
+            start = 0
+            end = min(file_size, limit)
+        elif mode == 'tail':
+            end = file_size
+            start = max(0, end - limit)
+        elif mode == 'range':
+            start = min(offset, file_size)
+            end = min(file_size, start + limit)
+
+        if encoding_hint == 'utf-16':
+            unit = 2
+            start = max(0, start - (start % unit))
+            if end < file_size and (end % unit):
+                end = min(file_size, end + (unit - (end % unit)))
+        elif encoding_hint == 'utf-32':
+            unit = 4
+            start = max(0, start - (start % unit))
+            if end < file_size and (end % unit):
+                end = min(file_size, end + (unit - (end % unit)))
+
+        length = None if read_mode == 'full' else max(0, end - start)
+        data = _read_file_range(server_ip, path, offset=start, length=length, timeout_sec=60.0)
+        actual_end = start + len(data or b'')
+        content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
+        read_only = bool(
+            file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES
+            or read_mode != 'full'
+            or start > 0
+            or actual_end < file_size
+        )
+        truncated = bool(start > 0 or actual_end < file_size)
+
+        return jsonify({
+            'success': True,
+            'content': content,
+            'encoding': encoding,
+            'mode': read_mode,
+            'file_size': file_size,
+            'mtime': mtime,
+            'read_offset': start,
+            'read_end': actual_end,
+            'chunk_size': limit,
+            'read_only': read_only,
+            'truncated': truncated,
+            'can_load_prev': start > 0,
+            'can_load_next': actual_end < file_size,
+            'editable': not read_only,
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

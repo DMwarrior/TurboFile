@@ -42,6 +42,26 @@
 
 
         const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false, promptSelection: null };
+        const EDITOR_LARGE_FILE_CHUNK_BYTES = 256 * 1024;
+        const EDITOR_FOLLOW_INTERVAL_MS = 2000;
+        const editorViewState = {
+            server: '',
+            path: '',
+            title: '',
+            fileSize: 0,
+            readOffset: 0,
+            readEnd: 0,
+            chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+            mode: 'full',
+            encoding: 'utf-8',
+            readOnly: false,
+            truncated: false,
+            followTail: false,
+            followTimer: 0,
+            loading: false,
+            requestToken: '',
+            lastContent: ''
+        };
 
         const DRAG_TRANSFER_TYPE = 'application/x-turbofile-transfer';
         let dragTransferPayload = null;
@@ -5296,37 +5316,34 @@
 
             async function editTextFile(server, path, name) {
                 try {
-
                     const cached = previewCacheGet(server, path, 'text');
-                    openEditorModal(server, path, name, cached ? cached.value : '正在加载...');
-                    if (cached) return;
-
-
-                    const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
-                    const resp = await fetch(url, { cache: 'no-store' });
-                    if (!resp.ok) {
-                        let msg = '';
-                        try { msg = await resp.text(); } catch(_) {}
-                        throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                    if (cached) {
+                        const content = cached.value || '';
+                        openEditorModal(server, path, name, content, {
+                            fileSize: content.length,
+                            readOffset: 0,
+                            readEnd: content.length,
+                            chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+                            mode: 'full',
+                            encoding: 'utf-8',
+                            readOnly: false,
+                            truncated: false,
+                            loading: false,
+                            resetSearch: true
+                        });
+                        return;
                     }
-                    const data = await resp.json();
-                    if (!data.success) throw new Error(data.error || '读取失败');
-                    const content = data.content || '';
-                    previewCacheSet(server, path, 'text', content);
 
-
-                    const ta = document.querySelector('#editorModal textarea');
-                    if (ta) {
-                        ta.value = content;
-                        ta.dataset.encoding = data.encoding || 'utf-8';
-                        updateEditorLineNumbers();
-                        renderFindHighlights();
-                        syncEditorScroll();
-                        startEditorScrollSync();
-                    }
+                    await loadEditorFileChunk('auto', {
+                        server,
+                        path,
+                        title: name,
+                        chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+                        resetSearch: true,
+                        placeholder: '正在加载文本内容...'
+                    });
                 } catch (e) {
                     addLogError('打开编辑器失败: ' + (e.message || e));
-
                     closeEditorModal();
                 }
             }
@@ -6221,31 +6238,274 @@
                 applyEditorTheme(next);
             }
 
-            function openEditorModal(server, path, title, content) {
+            function stopEditorFollowTail() {
+                editorViewState.followTail = false;
+                if (editorViewState.followTimer) {
+                    clearInterval(editorViewState.followTimer);
+                    editorViewState.followTimer = 0;
+                }
+                updateEditorStatusBar();
+            }
+
+            function startEditorFollowTail() {
+                if (!editorViewState.readOnly || editorViewState.mode === 'full') {
+                    stopEditorFollowTail();
+                    return;
+                }
+                editorViewState.followTail = true;
+                if (editorViewState.followTimer) {
+                    clearInterval(editorViewState.followTimer);
+                }
+                editorViewState.followTimer = window.setInterval(() => {
+                    const modal = document.getElementById('editorModal');
+                    if (!modal || modal.style.display === 'none') {
+                        stopEditorFollowTail();
+                        return;
+                    }
+                    if (!editorViewState.loading) {
+                        loadEditorFileChunk('tail', { silent: true, preserveFollow: true });
+                    }
+                }, EDITOR_FOLLOW_INTERVAL_MS);
+                updateEditorStatusBar();
+            }
+
+            function toggleEditorFollowTail() {
+                if (!editorViewState.readOnly || editorViewState.mode === 'full') return;
+                if (editorViewState.followTail) {
+                    stopEditorFollowTail();
+                } else {
+                    startEditorFollowTail();
+                    loadEditorFileChunk('tail', { silent: true, preserveFollow: true });
+                }
+            }
+
+            function updateEditorStatusBar() {
+                const bar = document.getElementById('editorStatusBar');
+                const textEl = document.getElementById('editorStatusText');
+                const saveBtn = document.getElementById('editorSaveBtn');
+                const replaceToggleBtn = document.getElementById('editorReplaceToggleBtn');
+                const findToggleBtn = document.getElementById('editorFindToggleBtn');
+                const headBtn = document.getElementById('editorHeadBtn');
+                const prevBtn = document.getElementById('editorPrevBtn');
+                const nextBtn = document.getElementById('editorNextBtn');
+                const tailBtn = document.getElementById('editorTailBtn');
+                const followBtn = document.getElementById('editorFollowBtn');
+                const showChunkControls = !!(editorViewState.readOnly || editorViewState.truncated || editorViewState.mode !== 'full');
+
+                if (bar) {
+                    bar.style.display = editorViewState.path ? 'flex' : 'none';
+                }
+
+                if (textEl) {
+                    if (!editorViewState.path) {
+                        textEl.textContent = '';
+                    } else if (editorViewState.loading && !editorViewState.lastContent) {
+                        textEl.textContent = '正在加载文本内容...';
+                    } else if (showChunkControls) {
+                        const startLabel = formatFileSize(editorViewState.readOffset || 0);
+                        const endLabel = formatFileSize(editorViewState.readEnd || 0);
+                        const totalLabel = formatFileSize(editorViewState.fileSize || 0);
+                        textEl.textContent = `大文件只读预览，当前范围 ${startLabel} - ${endLabel} / ${totalLabel}，编码 ${editorViewState.encoding || 'utf-8'}${editorViewState.followTail ? '，自动追尾中' : ''}`;
+                    } else {
+                        textEl.textContent = `完整加载 ${formatFileSize(editorViewState.fileSize || 0)}，编码 ${editorViewState.encoding || 'utf-8'}`;
+                    }
+                }
+
+                if (saveBtn) saveBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading);
+                if (replaceToggleBtn) replaceToggleBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading);
+                if (findToggleBtn) findToggleBtn.disabled = !!(editorViewState.loading && !editorViewState.lastContent);
+
+                [headBtn, prevBtn, nextBtn, tailBtn, followBtn].forEach(btn => {
+                    if (!btn) return;
+                    btn.style.display = showChunkControls ? 'inline-block' : 'none';
+                });
+
+                if (headBtn) headBtn.disabled = !!(editorViewState.loading || (editorViewState.readOffset || 0) <= 0);
+                if (prevBtn) prevBtn.disabled = !!(editorViewState.loading || (editorViewState.readOffset || 0) <= 0);
+                if (nextBtn) nextBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
+                if (tailBtn) tailBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
+                if (followBtn) {
+                    followBtn.disabled = !!editorViewState.loading;
+                    followBtn.textContent = editorViewState.followTail ? '停止追尾' : '自动追尾';
+                }
+            }
+
+            function openEditorModal(server, path, title, content, options = {}) {
                 const modal = document.getElementById('editorModal');
                 const savedTheme = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
                 applyEditorTheme(savedTheme);
                 modal.querySelector('.modal-title').textContent = title;
                 const ta = modal.querySelector('#editorTextarea');
-                ta.value = content;
+                ta.value = typeof content === 'string' ? content : '';
                 ta.dataset.server = server;
                 ta.dataset.path = path;
-                ta.dataset.encoding = 'utf-8';
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                if (findInput) findInput.value = '';
-                if (replaceInput) replaceInput.value = '';
-                const countEl = document.getElementById('findCount');
-                if (countEl) countEl.textContent = '';
+                ta.dataset.encoding = options.encoding || 'utf-8';
+                ta.dataset.readOnly = options.readOnly ? 'true' : 'false';
+                ta.readOnly = !!options.readOnly;
+
+                editorViewState.server = server;
+                editorViewState.path = path;
+                editorViewState.title = title;
+                editorViewState.fileSize = Number.isFinite(Number(options.fileSize)) ? Number(options.fileSize) : editorViewState.fileSize;
+                editorViewState.readOffset = Number.isFinite(Number(options.readOffset)) ? Number(options.readOffset) : 0;
+                editorViewState.readEnd = Number.isFinite(Number(options.readEnd)) ? Number(options.readEnd) : editorViewState.fileSize;
+                editorViewState.chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : editorViewState.chunkSize;
+                editorViewState.mode = options.mode || 'full';
+                editorViewState.encoding = options.encoding || 'utf-8';
+                editorViewState.readOnly = !!options.readOnly;
+                editorViewState.truncated = !!options.truncated;
+                editorViewState.loading = !!options.loading;
+                editorViewState.lastContent = options.loading ? '' : ta.value;
+
+                if (options.resetSearch !== false) {
+                    const findInput = document.getElementById('findInput');
+                    const replaceInput = document.getElementById('replaceInput');
+                    if (findInput) findInput.value = '';
+                    if (replaceInput) replaceInput.value = '';
+                    const countEl = document.getElementById('findCount');
+                    if (countEl) countEl.textContent = '';
+                }
+
+                if (!options.preserveFollow && (!editorViewState.readOnly || editorViewState.mode === 'full')) {
+                    stopEditorFollowTail();
+                }
+
                 syncMinimap();
                 updateEditorLineNumbers();
                 renderFindHighlights();
                 syncEditorScroll();
+                updateEditorStatusBar();
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
-                hideFindReplace();
+                if (options.hideFindBar !== false) {
+                    hideFindReplace();
+                }
                 startEditorScrollSync();
                 ta.focus();
+            }
+
+            async function loadEditorFileChunk(action = 'auto', options = {}) {
+                const server = options.server || editorViewState.server;
+                const path = options.path || editorViewState.path;
+                const title = options.title || editorViewState.title || '文本编辑器';
+                if (!server || !path) return;
+
+                const chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : (editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES);
+                const isNewFile = server !== editorViewState.server || path !== editorViewState.path;
+                const modal = document.getElementById('editorModal');
+                const silent = typeof options.silent === 'boolean'
+                    ? options.silent
+                    : !!(modal && modal.style.display !== 'none' && !isNewFile);
+                let mode = 'auto';
+                let offset = 0;
+
+                if (!options.preserveFollow && action !== 'tail') {
+                    stopEditorFollowTail();
+                }
+
+                if (isNewFile) {
+                    editorViewState.fileSize = 0;
+                    editorViewState.readOffset = 0;
+                    editorViewState.readEnd = 0;
+                    editorViewState.mode = 'full';
+                    editorViewState.encoding = 'utf-8';
+                    editorViewState.truncated = false;
+                    editorViewState.lastContent = '';
+                }
+
+                if (action === 'head') {
+                    mode = 'head';
+                } else if (action === 'tail') {
+                    mode = 'tail';
+                } else if (action === 'prev') {
+                    mode = 'range';
+                    offset = Math.max(0, (editorViewState.readOffset || 0) - chunkSize);
+                } else if (action === 'next') {
+                    mode = 'range';
+                    offset = Math.max(0, editorViewState.readEnd || 0);
+                } else if (action === 'range') {
+                    mode = 'range';
+                    offset = Math.max(0, Number(options.offset) || 0);
+                }
+
+                const requestToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                editorViewState.requestToken = requestToken;
+                editorViewState.loading = true;
+                updateEditorStatusBar();
+
+                if (!silent) {
+                    openEditorModal(server, path, title, options.placeholder || '正在加载...', {
+                        fileSize: editorViewState.fileSize || 0,
+                        readOffset: editorViewState.readOffset || 0,
+                        readEnd: editorViewState.readEnd || 0,
+                        chunkSize,
+                        mode: editorViewState.mode || 'full',
+                        encoding: editorViewState.encoding || 'utf-8',
+                        readOnly: true,
+                        truncated: editorViewState.truncated,
+                        loading: true,
+                        resetSearch: options.resetSearch === true,
+                        hideFindBar: options.resetSearch === true,
+                        preserveFollow: options.preserveFollow === true
+                    });
+                }
+
+                try {
+                    const url = new URL('/api/file/read', window.location.origin);
+                    url.searchParams.set('server', server);
+                    url.searchParams.set('path', path);
+                    url.searchParams.set('mode', mode);
+                    url.searchParams.set('limit', String(chunkSize));
+                    if (mode === 'range') {
+                        url.searchParams.set('offset', String(offset));
+                    }
+
+                    const resp = await fetch(url.toString(), { cache: 'no-store' });
+                    if (!resp.ok) {
+                        let msg = '';
+                        try { msg = await resp.text(); } catch (_) {}
+                        throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                    }
+                    const data = await resp.json();
+                    if (!data.success) throw new Error(data.error || '读取失败');
+                    if (editorViewState.requestToken !== requestToken) return;
+
+                    const content = data.content || '';
+                    const readOnly = !!data.read_only;
+                    editorViewState.loading = false;
+
+                    if (!readOnly && !data.truncated) {
+                        previewCacheSet(server, path, 'text', content);
+                    }
+
+                    openEditorModal(server, path, title, content, {
+                        fileSize: Number(data.file_size) || 0,
+                        readOffset: Number(data.read_offset) || 0,
+                        readEnd: Number(data.read_end) || 0,
+                        chunkSize: Number(data.chunk_size) || chunkSize,
+                        mode: data.mode || 'full',
+                        encoding: data.encoding || 'utf-8',
+                        readOnly,
+                        truncated: !!data.truncated,
+                        loading: false,
+                        resetSearch: options.resetSearch === true,
+                        hideFindBar: false,
+                        preserveFollow: options.preserveFollow === true
+                    });
+
+                    if (options.preserveFollow && editorViewState.followTail) {
+                        startEditorFollowTail();
+                    }
+                } catch (e) {
+                    if (editorViewState.requestToken === requestToken) {
+                        editorViewState.loading = false;
+                        updateEditorStatusBar();
+                    }
+                    if (!silent) {
+                        addLogError('打开编辑器失败: ' + (e.message || e));
+                        closeEditorModal();
+                    }
+                }
             }
 
             function compareFromSelection() {
@@ -6423,10 +6683,19 @@
                 if (modal) modal.style.display = 'none';
                 document.body.style.overflow = '';
                 stopEditorScrollSync();
+                stopEditorFollowTail();
+                editorViewState.loading = false;
+                editorViewState.requestToken = '';
             }
             async function saveEditorContent() {
                 const ta = document.querySelector('#editorModal textarea');
                 if (!ta) return;
+                if (ta.dataset.readOnly === 'true' || ta.readOnly) {
+                    await showAlertDialog('当前是大文件只读预览模式，不能直接保存。请改为打开较小文件，或后续提供专门的日志编辑方案。', {
+                        title: '只读预览'
+                    });
+                    return;
+                }
                 const server = ta.dataset.server;
                 const path = ta.dataset.path;
                 const encoding = ta.dataset.encoding || 'utf-8';
@@ -6441,6 +6710,7 @@
                     if (data.success) {
                         addLogInfo('💾 已保存: ' + path);
                         previewCacheSet(server, path, 'text', content);
+                        editorViewState.lastContent = content;
                         showToast('✅ 已保存', 'success');
                     } else {
                         addLogError('保存失败: ' + (data.error || '未知错误'));
@@ -6465,6 +6735,7 @@
                 const ta = document.getElementById('editorTextarea');
                 if (ta) {
                     ta.addEventListener('input', () => {
+                        editorViewState.lastContent = ta.value || '';
                         updateEditorLineNumbers();
                         renderFindHighlights();
                     });
@@ -6531,13 +6802,33 @@
                 editorScrollRaf = null;
             }
 
+            function countTextLines(text) {
+                let count = 1;
+                for (let i = 0; i < text.length; i++) {
+                    if (text.charCodeAt(i) === 10) count++;
+                }
+                return count;
+            }
+
+            function countTextOccurrences(text, query) {
+                if (!text || !query) return 0;
+                let count = 0;
+                let idx = 0;
+                while (idx <= text.length) {
+                    const found = text.indexOf(query, idx);
+                    if (found === -1) break;
+                    count++;
+                    idx = found + Math.max(query.length, 1);
+                }
+                return count;
+            }
+
             function updateEditorLineNumbers() {
                 const ta = document.getElementById('editorTextarea');
                 const lineBox = document.getElementById('editorLineNumbers');
                 if (!ta || !lineBox) return;
                 const text = ta.value || '';
-                const lines = text.split('\n');
-                const count = Math.max(1, lines.length);
+                const count = Math.max(1, countTextLines(text));
                 let nums = '';
                 for (let i = 1; i <= count; i++) {
                     nums += i + (i === count ? '' : '\n');
@@ -6566,17 +6857,13 @@
                 const countEl = document.getElementById('findCount');
                 if (!layer || !ta) return;
                 const text = ta.value || '';
+                layer.textContent = '';
                 if (!query) {
-                    layer.innerHTML = escapeHtml(text);
                     if (countEl) countEl.textContent = '';
                     syncEditorScroll();
                     return;
                 }
-                const safeQuery = query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
-                const regex = new RegExp(safeQuery, 'g');
-                let matchCount = 0;
-                text.replace(regex, () => { matchCount++; return ''; });
-                layer.innerHTML = escapeHtml(text);
+                const matchCount = countTextOccurrences(text, query);
                 if (countEl) {
                     countEl.textContent = matchCount > 0 ? `${matchCount} 条` : '0 条';
                 }
@@ -6590,7 +6877,11 @@
                 const replaceInput = document.getElementById('replaceInput');
                 const replaceBtn = document.getElementById('replaceBtn');
                 const replaceAllBtn = document.getElementById('replaceAllBtn');
+                const ta = document.getElementById('editorTextarea');
                 if (!bar) return;
+                if (withReplace && ta && ta.readOnly) {
+                    withReplace = false;
+                }
                 bar.style.display = 'flex';
                 if (withReplace) {
                     replaceInput.style.display = 'inline-block';
@@ -6675,7 +6966,7 @@
                 const ta = document.getElementById('editorTextarea');
                 const query = document.getElementById('findInput').value;
                 const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query) return;
+                if (!ta || !query || ta.readOnly) return;
                 const selText = ta.value.substring(ta.selectionStart, ta.selectionEnd);
                 if (selText === query) {
                     const before = ta.value.substring(0, ta.selectionStart);
@@ -6694,7 +6985,7 @@
                 const ta = document.getElementById('editorTextarea');
                 const query = document.getElementById('findInput').value;
                 const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query) return;
+                if (!ta || !query || ta.readOnly) return;
                 ta.value = ta.value.split(query).join(replacement);
                 updateEditorLineNumbers();
                 syncMinimap();

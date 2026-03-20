@@ -429,9 +429,9 @@
                 </div>
                 <div class="d-flex align-items-center gap-2">
                     <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorTheme()">切换背景</button>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(false)">查找</button>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(true)">替换</button>
-                    <button type="button" class="btn btn-primary btn-sm" onclick="saveEditorContent()">保存</button>
+                    <button id="editorFindToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(false)">查找</button>
+                    <button id="editorReplaceToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(true)">替换</button>
+                    <button id="editorSaveBtn" type="button" class="btn btn-primary btn-sm" onclick="saveEditorContent()">保存</button>
                     <button type="button" class="btn btn-danger btn-sm" onclick="closeEditorModal()">关闭</button>
                 </div>
             </div>
@@ -442,6 +442,16 @@
                 <div class="editor-text-wrapper">
                     <pre id="editorHighlightLayer" class="editor-highlight-layer"></pre>
                     <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
+                </div>
+            </div>
+            <div id="editorStatusBar" class="editor-statusbar" style="display: none;">
+                <div id="editorStatusText" class="editor-status-text"></div>
+                <div class="editor-status-actions">
+                    <button id="editorHeadBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('head')">文件开头</button>
+                    <button id="editorPrevBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('prev')">上一块</button>
+                    <button id="editorNextBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('next')">下一块</button>
+                    <button id="editorTailBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('tail')">文件结尾</button>
+                    <button id="editorFollowBtn" type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorFollowTail()">自动追尾</button>
                 </div>
             </div>
             <div id="findReplaceBar" class="find-replace-bar">
