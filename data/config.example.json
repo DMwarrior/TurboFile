@@ -25,6 +25,14 @@
       "visible_client_ips": [
         "192.168.1.100"
       ]
+    },
+    "linux-user-2": {
+      "name": "Second User On Same Host",
+      "host": "192.168.1.10",
+      "user": "developer",
+      "password": "your_password",
+      "port": 2222,
+      "default_path": "/home/developer"
     }
   }
 }

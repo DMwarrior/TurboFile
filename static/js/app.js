@@ -899,13 +899,22 @@
             }
         }
 
+        function getServerHost(serverIP) {
+            try {
+                const meta = SERVERS_DATA && SERVERS_DATA[serverIP];
+                return (meta && meta.host) ? String(meta.host) : String(serverIP || '');
+            } catch (_) {
+                return String(serverIP || '');
+            }
+        }
+
         function _suggestWindowsServer(windowsServers) {
             const list = Array.isArray(windowsServers) ? windowsServers : _listWindowsServers();
             if (!list.length) return '';
 
             const clientIp = (typeof window !== 'undefined' && window.CLIENT_IPV4) ? window.CLIENT_IPV4 : null;
             if (clientIp) {
-                const hit = list.find(s => s.ip === clientIp);
+                const hit = list.find(s => getServerHost(s.ip) === clientIp);
                 if (hit) return hit.ip;
             }
 
@@ -991,7 +1000,7 @@
                 const opt = document.createElement('option');
                 opt.value = ip;
                 const name = (meta && meta.name) ? meta.name : ip;
-                opt.textContent = `${name} (${ip})`;
+                opt.textContent = `${name} (${getServerHost(ip)})`;
                 selectEl.appendChild(opt);
             });
         }
@@ -4913,7 +4922,7 @@
             return /\.onnx$/i.test(name || '');
         }
         function isTextEditable(name) {
-            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp|csv|tsv)$/i.test(name);
+            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp|csv|tsv|toml|tomld)$/i.test(name);
         }
         function isArchiveFile(name) {
             return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i.test(name);

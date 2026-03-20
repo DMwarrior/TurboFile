@@ -73,8 +73,12 @@ cp data/config.example.json data/config.json
 - **host_ip**: Web 服务对外访问 IP（显示用）
 - **admin_mode_enabled** / **admin_client_ips**: 管理员模式开关与白名单 IP
 - **transfer_bytes_config**: “已传输”显示开关与刷新间隔
-- **servers**: 服务器列表（Linux/Windows），包含 `name/user/password/default_path/os_type`
+- **servers**: 服务器列表（Linux/Windows），键是内部唯一 ID；配置项包含 `name/host/user/password/default_path/os_type`
 - **visible_client_ips**: 可选，仅允许指定客户端 IP 看见该服务器；不配置则所有客户端可见
+
+> 如果同一台机器需要配置多个用户，请给它们不同的服务器键，并在每个条目里写同一个 `host`。例如：
+> `nas_algorithm -> host: 10.190.21.253`
+> `zyxk -> host: 10.190.21.253`
 
 > Windows 服务器需设置 `os_type: "windows"`，路径使用 `C:/` 形式。
 > 如需让某台服务器只对特定终端显示，可在该服务器配置下加入 `visible_client_ips: ["10.190.129.29"]`。

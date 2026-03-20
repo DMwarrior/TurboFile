@@ -43,6 +43,23 @@ def load_config():
         raise ValueError("配置文件格式无效，顶层应为对象")
     return cfg
 
+
+def _normalize_servers(raw_servers):
+    """Normalize configured servers into a stable server-id -> meta mapping."""
+    if not isinstance(raw_servers, dict) or not raw_servers:
+        raise RuntimeError("配置缺少 servers 列表")
+
+    normalized = {}
+    for server_id, server_cfg in raw_servers.items():
+        if not isinstance(server_cfg, dict):
+            raise ValueError(f"服务器配置格式无效: {server_id}")
+        entry = dict(server_cfg)
+        entry["host"] = str(entry.get("host") or server_id).strip() or str(server_id)
+        if not entry.get("name"):
+            entry["name"] = str(server_id)
+        normalized[str(server_id)] = entry
+    return normalized
+
 CONFIG = load_config()
 
 secret_key = CONFIG.get('secret_key')
@@ -53,9 +70,8 @@ TURBOFILE_HOST_IP = CONFIG.get('host_ip') or ''
 if not TURBOFILE_HOST_IP:
     raise RuntimeError("配置缺少 host_ip")
 
-SERVERS = CONFIG.get('servers')
-if not isinstance(SERVERS, dict) or not SERVERS:
-    raise RuntimeError("配置缺少 servers 列表")
+SERVERS = _normalize_servers(CONFIG.get('servers'))
+CONFIG['servers'] = SERVERS
 
 ADMIN_MODE_ENABLED = bool(CONFIG.get('admin_mode_enabled'))
 ADMIN_CLIENT_IPS = set(CONFIG.get('admin_client_ips') or [])
@@ -91,6 +107,21 @@ def is_admin_client_ip(ip: str) -> bool:
         return bool(ADMIN_MODE_ENABLED and ip and ip in ADMIN_CLIENT_IPS)
     except Exception:
         return False
+
+
+def get_server_host(server_ip: str) -> str:
+    """Return the real host/IP used to connect to a configured server."""
+    try:
+        server_cfg = SERVERS.get(server_ip) or {}
+        host = str(server_cfg.get('host') or server_ip).strip()
+        return host or str(server_ip)
+    except Exception:
+        return str(server_ip)
+
+
+def build_remote_spec(server_ip: str, user: str, remote_path: str) -> str:
+    """Build rsync/scp style user@host:path spec from server id + configured host."""
+    return f'{user}@{get_server_host(server_ip)}:{remote_path}'
 
 
 def get_server_visible_client_ips(server_ip: str):
@@ -158,13 +189,8 @@ def determine_transfer_mode(source_server, target_server):
     - 'remote_to_remote': from remote to another remote
     - 'remote_to_local': from remote to TurboFile host
     """
-    current_host = get_current_host_ip()
-
-
-    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
-
-    is_source_local = source_server in local_aliases
-    is_target_local = target_server in local_aliases
+    is_source_local = is_local_server(source_server)
+    is_target_local = is_local_server(target_server)
 
     if is_source_local and not is_target_local:
         return 'local_to_remote'
@@ -179,8 +205,9 @@ def determine_transfer_mode(source_server, target_server):
 def is_local_server(server_ip):
     """Return whether the server is the local TurboFile host."""
     current_host = get_current_host_ip()
-    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
-    return server_ip in local_aliases
+    local_aliases = {"localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP}
+    resolved_host = get_server_host(server_ip)
+    return server_ip in local_aliases or resolved_host in local_aliases
 
 
 def load_client_paths():
@@ -585,7 +612,7 @@ def clear_log_if_too_large(max_lines: int = None) -> bool:
 def _normalize_ip_for_log(server_ip: str) -> str:
     """Normalize local aliases to the real host IP; leave others unchanged."""
     try:
-        return TURBOFILE_HOST_IP if is_local_server(server_ip) else server_ip
+        return TURBOFILE_HOST_IP if is_local_server(server_ip) else get_server_host(server_ip)
     except Exception:
         return server_ip
 
@@ -980,7 +1007,7 @@ class SSHManager:
 
 
             connect_kwargs = {
-                'hostname': server_ip,
+                'hostname': get_server_host(server_ip),
                 'username': server_config["user"],
                 'port': server_config.get("port", 22),
                 'timeout': 5,
@@ -1173,6 +1200,7 @@ def normalize_windows_path_for_cmd(p: str) -> str:
 def get_default_path(server_ip):
     """Get the default server path."""
     server_config = SERVERS.get(server_ip, {})
+    configured_default = server_config.get("default_path")
 
 
     if is_windows_server(server_ip):
@@ -1188,12 +1216,11 @@ def get_default_path(server_ip):
             print(f"⚠️  无法获取Windows用户主目录: {e}")
 
 
-        return "C:/"
+        return configured_default or "C:/"
 
 
-    if server_ip == "10.190.21.253":
-        return "/var/services/homes/Algorithm"
-
+    if configured_default:
+        return configured_default
 
     user = server_config.get("user", "th")
     return f"/home/{user}"
@@ -2114,10 +2141,11 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
             if not sources:
                 return {'success': False, 'message': 'empty sources'}
 
+            target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
             if target_password:
-                cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+                cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [target_spec]
             else:
-                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [target_spec]
 
             part_id = f"rsync_{uuid.uuid4().hex}"
             return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
@@ -2140,7 +2168,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     continue
                 if source_is_windows:
                     src_path = convert_windows_path_to_cygwin(src_path)
-                sources.append(f'{source_user}@{source_server}:{src_path}')
+                sources.append(build_remote_spec(source_server, source_user, src_path))
 
             if not sources:
                 return {'success': False, 'message': 'empty sources'}
@@ -2176,7 +2204,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     if not src_path:
                         continue
                     src_path = convert_windows_path_to_cygwin(src_path)
-                    sources.append(f'{source_user}@{source_server}:{src_path}')
+                    sources.append(build_remote_spec(source_server, source_user, src_path))
 
                 if not sources:
                     return {'success': False, 'message': 'empty sources'}
@@ -2222,7 +2250,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     return {'success': False, 'message': 'empty sources'}
 
                 sources_arg = ' '.join([shlex.quote(s) for s in sources])
-                dest = shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')
+                dest = shlex.quote(build_remote_spec(target_server, target_user, f'{rsync_target_path}/'))
                 if target_password:
                     remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} {sources_arg} {dest}"
                 else:
@@ -2338,7 +2366,7 @@ def transfer_directory_contents_instant(transfer_id, source_server, source_dir, 
             if target_port != 22:
                 ssh_to_target = f"{ssh_to_target} -p {target_port}"
 
-            dest = shlex.quote(f"{target_user}@{target_server}:{tgt_with_slash}")
+            dest = shlex.quote(build_remote_spec(target_server, target_user, tgt_with_slash))
             if target_password:
                 sshpass_cmd = "sshpass"
                 remote_cmd = (
@@ -2884,15 +2912,17 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         ssh_cmd = f"{ssh_cmd} -p {target_port}"
 
     if is_directory:
+        target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', target_spec]
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', target_spec]
     else:
+        target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, target_spec]
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, target_spec]
 
 
     part_id = f"rsync_{uuid.uuid4().hex}"
@@ -2971,24 +3001,26 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
 
             if task['type'] == 'subdir':
 
+                target_spec = build_remote_spec(target_server, target_user, f"{remote_target_root}/{task['target_subpath']}/")
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        f"{task['source']}/", target_spec
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        f"{task['source']}/", target_spec
                     ]
             else:
 
                 file_paths = [os.path.join(task['source_dir'], f) for f in task['files']]
+                target_spec = build_remote_spec(target_server, target_user, f"{remote_target_root}/{task['target_subpath']}/")
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        target_spec
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        target_spec
                     ]
 
             try:
@@ -3077,15 +3109,17 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         ssh_cmd = f"{ssh_cmd} -p {source_port}"
 
     if is_directory:
+        source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/{file_name}/']
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/{file_name}/']
     else:
+        source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/']
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/']
 
 
     part_id = f"rsync_{uuid.uuid4().hex}"
@@ -3370,16 +3404,18 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         source_port = SERVERS[source_server].get('port', 22)
         if source_port != 22:
             ssh_to_source = f"{ssh_to_source} -p {source_port}"
+        directory_source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
+        file_source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
         if is_directory:
             if source_password:
-                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
         else:
             if source_password:
-                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
 
         print(f"🔄 目标服务器执行的拉取命令: {remote_cmd}")
 
@@ -3424,17 +3460,19 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     target_port = SERVERS[target_server].get('port', 22)
     if target_port != 22:
         ssh_to_target = f"{ssh_to_target} -p {target_port}"
+    directory_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
+    file_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
 
     if is_directory:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
     else:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
 
     print(f"🔄 远程rsync命令: {remote_cmd}")
 
@@ -3517,18 +3555,20 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
 
 
     sshpass_cmd = "sshpass"
+    directory_target_spec = build_remote_spec(target_server, target_user, f'{target_path}/{file_name}/')
+    file_target_spec = build_remote_spec(target_server, target_user, f'{target_path}/')
 
 
     if is_directory:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(directory_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(directory_target_spec)}"
     else:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(file_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(file_target_spec)}"
 
 
     ssh = ssh_manager.get_connection(source_server)
@@ -3706,16 +3746,18 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         print(f"🔧 源服务器使用自定义端口: {source_port}")
 
                     rsync_source_path = convert_windows_path_to_cygwin(source_path)
+                    directory_source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
+                    file_source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
                     if is_directory:
                         if source_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
                     else:
                         if source_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
 
 
                     ssh = ssh_manager.get_connection(target_server)
@@ -3729,17 +3771,19 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                     rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
                     rsync_source_path = convert_windows_path_to_cygwin(source_path) if source_is_windows else source_path
+                    directory_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
+                    file_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
 
                     if is_directory:
                         if target_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
                     else:
                         if target_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
 
 
                     ssh = ssh_manager.get_connection(source_server)
@@ -4177,14 +4221,14 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + [
                 '-e', ssh_opts_str,
                 source_with_slash,
-                f"{target_user}@{target_server}:{target_full_path}"
+                build_remote_spec(target_server, target_user, target_full_path)
             ]
         else:
 
             cmd = ['rsync'] + rsync_opts + [
                 '-e', ssh_opts_str,
                 source_with_slash,
-                f"{target_user}@{target_server}:{target_full_path}"
+                build_remote_spec(target_server, target_user, target_full_path)
             ]
 
 

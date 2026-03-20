@@ -42,8 +42,8 @@
                     <select id="sourceServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🔍 请选择源服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
-                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and info.get('host', ip) == client_ipv4) %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ info.get('host', ip) }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
@@ -57,8 +57,8 @@
                     <select id="targetServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🎯 请选择服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
-                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and info.get('host', ip) == client_ipv4) %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ info.get('host', ip) }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
