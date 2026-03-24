@@ -4949,7 +4949,20 @@
         }
 
         function openOnnxInNetron(server, path, name) {
+            let popup = null;
             try {
+                popup = window.open('', '_blank');
+                if (!popup) {
+                    addLogWarning(`⚠️ Netron 页面被浏览器拦截，请允许弹出新页面: ${name || path}`);
+                    return;
+                }
+
+                try { popup.opener = null; } catch (_) {}
+                try {
+                    popup.document.title = '正在打开 Netron...';
+                    popup.document.body.innerHTML = '<div style="font-family: Inter, sans-serif; padding: 24px; color: #1f2937;">正在打开 Netron...</div>';
+                } catch (_) {}
+
                 const modelUrl = new URL('/api/netron/model', window.location.origin);
                 modelUrl.searchParams.set('server', server);
                 modelUrl.searchParams.set('path', path);
@@ -4960,11 +4973,12 @@
                     viewerUrl.searchParams.set('identifier', name);
                 }
 
-                const opened = window.open(viewerUrl.toString(), '_blank', 'noopener');
-                if (!opened) {
-                    addLogWarning(`⚠️ Netron 页面被浏览器拦截，请允许弹出新页面: ${name || path}`);
-                }
+                popup.location.replace(viewerUrl.toString());
+                try { popup.focus(); } catch (_) {}
             } catch (e) {
+                if (popup && !popup.closed) {
+                    try { popup.close(); } catch (_) {}
+                }
                 addLogError('打开 Netron 失败: ' + (e.message || e));
                 console.error('openOnnxInNetron error:', e);
             }

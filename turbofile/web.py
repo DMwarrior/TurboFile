@@ -151,6 +151,48 @@ def _try_parse_jpeg_dimensions(data: bytes):
             i += seg_len - 2
     except Exception:
         return None
+
+
+def _try_parse_image_dimensions(data: bytes, path_hint: str = ''):
+    """Best-effort parser for common raster image dimensions as (width, height)."""
+    try:
+        if not isinstance(data, (bytes, bytearray)):
+            return None
+        buf = bytes(data)
+        if len(buf) < 10:
+            return None
+
+        dims = _try_parse_jpeg_dimensions(buf)
+        if dims:
+            return dims
+
+        if buf.startswith(b'\x89PNG\r\n\x1a\n') and len(buf) >= 24:
+            width = int.from_bytes(buf[16:20], 'big', signed=False)
+            height = int.from_bytes(buf[20:24], 'big', signed=False)
+            if width > 0 and height > 0:
+                return width, height
+
+        if buf[:6] in (b'GIF87a', b'GIF89a') and len(buf) >= 10:
+            width = int.from_bytes(buf[6:8], 'little', signed=False)
+            height = int.from_bytes(buf[8:10], 'little', signed=False)
+            if width > 0 and height > 0:
+                return width, height
+
+        if buf.startswith(b'BM') and len(buf) >= 26:
+            dib_header_size = int.from_bytes(buf[14:18], 'little', signed=False)
+            if dib_header_size >= 12:
+                width = int.from_bytes(buf[18:22], 'little', signed=True)
+                height = int.from_bytes(buf[22:26], 'little', signed=True)
+                width = abs(int(width))
+                height = abs(int(height))
+                if width > 0 and height > 0:
+                    return width, height
+
+        lower = (path_hint or '').lower()
+        if lower.endswith('.svg'):
+            return None
+    except Exception:
+        return None
     return None
 
 
@@ -870,6 +912,7 @@ def index():
 def api_image_stream():
     server_ip = request.args.get('server')
     path = request.args.get('path')
+    small_image_dim_limit = 100
     def _safe_int(value):
         try:
             return int(value)
@@ -947,6 +990,56 @@ def api_image_stream():
             except Exception:
                 return None
 
+        def _is_small_original_image(img) -> bool:
+            try:
+                if img is None:
+                    return False
+                h, w = img.shape[:2]
+                return int(w) > 0 and int(h) > 0 and int(w) < small_image_dim_limit and int(h) < small_image_dim_limit
+            except Exception:
+                return False
+
+        def _raw_image_payload(img_bytes: bytes):
+            return img_bytes, (_guess_image_mime_from_path(path) or 'application/octet-stream')
+
+        def _try_read_remote_small_original():
+            try:
+                head = _read_remote_file_range(server_ip, path, offset=0, length=131072, timeout_sec=8.0)
+                dims = _try_parse_image_dimensions(head, path)
+                if not dims:
+                    return None, None
+                width, height = dims
+                if int(width) <= 0 or int(height) <= 0:
+                    return None, None
+                if int(width) >= small_image_dim_limit or int(height) >= small_image_dim_limit:
+                    return None, None
+            except Exception:
+                return None, None
+
+            try:
+                raw_bytes = None
+                try:
+                    fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        raw_bytes = f.read()
+                        if not isinstance(raw_bytes, (bytes, bytearray)):
+                            raw_bytes = bytes(raw_bytes)
+                except Exception:
+                    if is_windows:
+                        raw_bytes = _read_windows_file_bytes_via_ssh(ssh, path)
+                    else:
+                        raw_bytes = _read_posix_file_bytes_via_ssh(ssh, path)
+
+                if not raw_bytes:
+                    return None, None
+
+                img = _decode_image_bytes(raw_bytes)
+                if _is_small_original_image(img):
+                    return _raw_image_payload(raw_bytes)
+            except Exception:
+                return None, None
+            return None, None
+
         def _transform_cv_image(img):
             if img is None:
                 return None, None
@@ -1011,6 +1104,24 @@ def api_image_stream():
                 resp.headers['X-TurboFile-Image-Engine'] = 'raw'
                 return resp
 
+            local_head = b''
+            local_dims = None
+            try:
+                with open(path, 'rb') as hf:
+                    local_head = hf.read(131072)
+                local_dims = _try_parse_image_dimensions(local_head, path)
+            except Exception:
+                local_head = b''
+                local_dims = None
+
+            if local_dims and int(local_dims[0]) < small_image_dim_limit and int(local_dims[1]) < small_image_dim_limit:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw-small-original'
+                return resp
+
             img_read_flag = cv2.IMREAD_UNCHANGED
             try:
                 lower = (path or '').lower()
@@ -1022,13 +1133,7 @@ def api_image_stream():
                     if desired_h and not desired_w:
                         desired_w = desired_h
                     if desired_w and desired_h:
-                        head = b''
-                        try:
-                            with open(path, 'rb') as hf:
-                                head = hf.read(131072)
-                        except Exception:
-                            head = b''
-                        dims = _try_parse_jpeg_dimensions(head)
+                        dims = _try_parse_jpeg_dimensions(local_head)
                         if dims:
                             orig_w, orig_h = dims
                             reduce_factor = 1
@@ -1058,14 +1163,20 @@ def api_image_stream():
                 resp.headers['X-TurboFile-Image-Engine'] = 'raw'
                 return resp
 
-            data, mime = _transform_cv_image(img)
-            did_transform = bool(data and mime)
-            engine = 'opencv' if did_transform else 'raw'
-            if not did_transform:
-                # Fallback to raw bytes when encode is bypassed/failed.
+            if _is_small_original_image(img):
                 with open(path, 'rb') as f:
                     data = f.read()
                 mime = _guess_image_mime_from_path(path)
+                engine = 'raw-small-original'
+            else:
+                data, mime = _transform_cv_image(img)
+                did_transform = bool(data and mime)
+                engine = 'opencv' if did_transform else 'raw'
+                if not did_transform:
+                    # Fallback to raw bytes when encode is bypassed/failed.
+                    with open(path, 'rb') as f:
+                        data = f.read()
+                    mime = _guess_image_mime_from_path(path)
         else:
             if not ssh:
                 ssh = ssh_manager.get_connection(server_ip)
@@ -1101,9 +1212,14 @@ def api_image_stream():
             data = None
             mime = None
 
+            data, mime = _try_read_remote_small_original()
+            if data and mime:
+                did_transform = True
+                engine = 'raw-small-original'
+
             # Windows: prefer SFTP read + local OpenCV transform first (fast path similar to older versions).
             # This avoids spawning a PowerShell/ImageMagick process per image when SFTP access works.
-            if is_windows:
+            if is_windows and (not did_transform):
                 try:
                     data_in = None
                     try:
@@ -1117,10 +1233,15 @@ def api_image_stream():
 
                     if data_in:
                         img = _decode_image_bytes(data_in)
-                        data, mime = _transform_cv_image(img)
-                        did_transform = bool(data and mime)
-                        if did_transform:
-                            engine = 'opencv'
+                        if _is_small_original_image(img):
+                            data, mime = _raw_image_payload(data_in)
+                            did_transform = True
+                            engine = 'raw-small-original'
+                        else:
+                            data, mime = _transform_cv_image(img)
+                            did_transform = bool(data and mime)
+                            if did_transform:
+                                engine = 'opencv'
                 except Exception:
                     did_transform = False
                     data = None
@@ -1247,19 +1368,24 @@ def api_image_stream():
                         engine = 'posix-ssh'
 
                 img = _decode_image_bytes(data_in)
-                data, mime = _transform_cv_image(img)
-                did_transform = bool(data and mime)
-                if not did_transform:
-                    data = data_in
-                    mime = _guess_image_mime_from_path(path)
-                    engine = 'raw' if engine == 'unknown' else engine
+                if _is_small_original_image(img):
+                    data, mime = _raw_image_payload(data_in)
+                    did_transform = True
+                    engine = 'raw-small-original'
                 else:
-                    if engine == 'windows-pwsh':
-                        engine = 'windows-pwsh+opencv'
-                    elif engine == 'posix-ssh':
-                        engine = 'posix-ssh+opencv'
+                    data, mime = _transform_cv_image(img)
+                    did_transform = bool(data and mime)
+                    if not did_transform:
+                        data = data_in
+                        mime = _guess_image_mime_from_path(path)
+                        engine = 'raw' if engine == 'unknown' else engine
                     else:
-                        engine = 'opencv'
+                        if engine == 'windows-pwsh':
+                            engine = 'windows-pwsh+opencv'
+                        elif engine == 'posix-ssh':
+                            engine = 'posix-ssh+opencv'
+                        else:
+                            engine = 'opencv'
 
         resp = Response(data, mimetype=mime or 'application/octet-stream')
         resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
