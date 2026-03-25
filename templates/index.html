@@ -21,7 +21,7 @@
 
 
         <!-- Header area -->
-        <div class="row flex-shrink-0" style="margin-bottom: 2px;">
+        <div id="appHeaderRow" class="row flex-shrink-0" style="margin-bottom: 2px;">
             <div class="col-12">
                 <div class="d-flex align-items-center justify-content-center">
                     <!-- Product title group -->
@@ -36,7 +36,7 @@
         </div>
 
         <!-- Server selection panel -->
-        <div class="row g-1 flex-shrink-0" style="margin-bottom: 3px;">
+        <div id="serverSelectionRow" class="row g-1 flex-shrink-0" style="margin-bottom: 3px;">
             <div class="col-md-6">
                 <div class="server-panel" style="padding: 4px 6px;">
                     <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
@@ -70,7 +70,7 @@
         </div>
 
         <!-- File browser -->
-        <div class="row flex-grow-1" style="min-height: 0;">
+        <div id="workspaceRow" class="row flex-grow-1" style="min-height: 0;">
             <div class="resizable-container" style="height: 100%;">
                 <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
                     <div id="sourcePanelHeader" class="d-flex justify-content-between align-items-center mb-1">
@@ -147,10 +147,18 @@
                                         <i class="bi bi-arrows-fullscreen"></i>
                                         <span>全屏</span>
                                     </button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="reopenTerminalForPanel('source')">重连</button>
                                     <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('source')">清屏</button>
                                     <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('source')">关闭</button>
                                 </div>
+                            </div>
+                            <div id="sourceTerminalSearchBar" class="terminal-searchbar" style="display: none;">
+                                <input id="sourceTerminalSearchInput" type="text" class="form-control form-control-sm terminal-search-input" placeholder="搜索终端内容" autocomplete="off" spellcheck="false" oninput="handleTerminalSearchInput('source')" onkeydown="handleTerminalSearchInputKeydown(event, 'source')">
+                                <span id="sourceTerminalSearchResults" class="terminal-search-results">0/0</span>
+                                <button type="button" id="sourceTerminalSearchCaseBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="区分大小写" onclick="toggleTerminalSearchCase('source')">Aa</button>
+                                <button type="button" id="sourceTerminalSearchRegexBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="正则表达式" onclick="toggleTerminalSearchRegex('source')">.*</button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="上一个结果" onclick="findPreviousTerminalSearch('source')"><i class="bi bi-chevron-up"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="下一个结果" onclick="findNextTerminalSearch('source')"><i class="bi bi-chevron-down"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="关闭搜索" onclick="closeTerminalSearch('source')"><i class="bi bi-x-lg"></i></button>
                             </div>
                             <div class="terminal-drawer-body">
                                 <div id="sourceTerminalHost" class="terminal-host"></div>
@@ -236,10 +244,18 @@
                                         <i class="bi bi-arrows-fullscreen"></i>
                                         <span>全屏</span>
                                     </button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="reopenTerminalForPanel('target')">重连</button>
                                     <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('target')">清屏</button>
                                     <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('target')">关闭</button>
                                 </div>
+                            </div>
+                            <div id="targetTerminalSearchBar" class="terminal-searchbar" style="display: none;">
+                                <input id="targetTerminalSearchInput" type="text" class="form-control form-control-sm terminal-search-input" placeholder="搜索终端内容" autocomplete="off" spellcheck="false" oninput="handleTerminalSearchInput('target')" onkeydown="handleTerminalSearchInputKeydown(event, 'target')">
+                                <span id="targetTerminalSearchResults" class="terminal-search-results">0/0</span>
+                                <button type="button" id="targetTerminalSearchCaseBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="区分大小写" onclick="toggleTerminalSearchCase('target')">Aa</button>
+                                <button type="button" id="targetTerminalSearchRegexBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="正则表达式" onclick="toggleTerminalSearchRegex('target')">.*</button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="上一个结果" onclick="findPreviousTerminalSearch('target')"><i class="bi bi-chevron-up"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="下一个结果" onclick="findNextTerminalSearch('target')"><i class="bi bi-chevron-down"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="关闭搜索" onclick="closeTerminalSearch('target')"><i class="bi bi-x-lg"></i></button>
                             </div>
                             <div class="terminal-drawer-body">
                                 <div id="targetTerminalHost" class="terminal-host"></div>
@@ -623,6 +639,7 @@
         <script src="{{ url_for('static', filename='vendor/xterm/xterm.js') }}"></script>
         <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-fit.js') }}"></script>
         <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-webgl.js') }}"></script>
-	    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-search.js') }}"></script>
+        <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 	</body>
 	</html>

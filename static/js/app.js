@@ -1,5 +1,13 @@
-
-        const socket = io();
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            rememberUpgrade: true,
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 250,
+            reconnectionDelayMax: 2000,
+            timeout: 10000
+        });
         let currentTransferId = null;
 	        let latestTransferredBytes = 0;
 	        let selectedSourceFiles = [];
@@ -1418,8 +1426,72 @@
         let imageOffsetX = 0;
         let imageOffsetY = 0;
         const terminalPanelState = {
-            source: { panel: 'source', term: null, fitAddon: null, webglAddon: null, resizeObserver: null, dataDisposable: null, terminalId: '', server: '', cwd: '', open: false, ready: false, fitTimers: [], needsInitialStabilize: false, drawerHeight: 280, maximized: false, fontSignature: '' },
-            target: { panel: 'target', term: null, fitAddon: null, webglAddon: null, resizeObserver: null, dataDisposable: null, terminalId: '', server: '', cwd: '', open: false, ready: false, fitTimers: [], needsInitialStabilize: false, drawerHeight: 280, maximized: false, fontSignature: '' }
+            source: {
+                panel: 'source',
+                term: null,
+                fitAddon: null,
+                webglAddon: null,
+                searchAddon: null,
+                searchDisposable: null,
+                resizeObserver: null,
+                dataDisposable: null,
+                terminalId: '',
+                server: '',
+                cwd: '',
+                profile: '',
+                open: false,
+                ready: false,
+                fitTimers: [],
+                needsInitialStabilize: false,
+                drawerHeight: 280,
+                maximized: false,
+                browserFullscreen: false,
+                fontSignature: '',
+                searchVisible: false,
+                searchQuery: '',
+                searchCaseSensitive: false,
+                searchRegex: false,
+                searchResultIndex: -1,
+                searchResultCount: 0,
+                localInputBuffer: '',
+                commandRunning: false,
+                lastExitCode: null,
+                recovering: false,
+                recoverTimer: null
+            },
+            target: {
+                panel: 'target',
+                term: null,
+                fitAddon: null,
+                webglAddon: null,
+                searchAddon: null,
+                searchDisposable: null,
+                resizeObserver: null,
+                dataDisposable: null,
+                terminalId: '',
+                server: '',
+                cwd: '',
+                profile: '',
+                open: false,
+                ready: false,
+                fitTimers: [],
+                needsInitialStabilize: false,
+                drawerHeight: 280,
+                maximized: false,
+                browserFullscreen: false,
+                fontSignature: '',
+                searchVisible: false,
+                searchQuery: '',
+                searchCaseSensitive: false,
+                searchRegex: false,
+                searchResultIndex: -1,
+                searchResultCount: 0,
+                localInputBuffer: '',
+                commandRunning: false,
+                lastExitCode: null,
+                recovering: false,
+                recoverTimer: null
+            }
         };
         const TERMINAL_THEME = {
             background: '#0d1117',
@@ -1444,6 +1516,8 @@
             brightWhite: '#f0f6fc'
         };
         const TERMINAL_FONT_FAMILY_FALLBACK = "'TurboFile Terminal Ubuntu', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace";
+        const TERMINAL_CLIENT_TOKEN_STORAGE_KEY = 'turbofile-terminal-client-token';
+        const SERVER_SWITCH_RELOAD_STORAGE_KEY = 'turbofile-server-switch-reload';
         const TERMINAL_RENDERER_STORAGE_KEY = 'turbofile-terminal-renderer';
         const TERMINAL_FONT_STORAGE_KEY = 'turbofile-terminal-font';
         const TERMINAL_FONT_SIZE_STORAGE_KEY = 'turbofile-terminal-font-size';
@@ -1486,6 +1560,56 @@
         let terminalFontReadyKey = '';
         let terminalWebglSupport = null;
         let activeTerminalResize = null;
+        let terminalRestorePromise = null;
+
+        let suppressServerSwitchReload = false;
+
+        function readServerSwitchReloadState() {
+            try {
+                if (!window.sessionStorage) return null;
+                const raw = window.sessionStorage.getItem(SERVER_SWITCH_RELOAD_STORAGE_KEY);
+                if (!raw) return null;
+                const data = JSON.parse(raw);
+                if (!data || typeof data !== 'object') return null;
+                return {
+                    sourceServer: String(data.sourceServer || '').trim(),
+                    targetServer: String(data.targetServer || '').trim()
+                };
+            } catch (_) {
+                return null;
+            }
+        }
+
+        let pendingServerSwitchReloadState = readServerSwitchReloadState();
+
+        function clearServerSwitchReloadState() {
+            pendingServerSwitchReloadState = null;
+            try {
+                if (window.sessionStorage) {
+                    window.sessionStorage.removeItem(SERVER_SWITCH_RELOAD_STORAGE_KEY);
+                }
+            } catch (_) {}
+        }
+
+        function scheduleServerSwitchReload(panel, server) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const sourceSelect = document.getElementById('sourceServer');
+            const targetSelect = document.getElementById('targetServer');
+            const payload = {
+                sourceServer: normalizedPanel === 'source'
+                    ? String(server || '').trim()
+                    : String(sourceSelect && sourceSelect.value ? sourceSelect.value : '').trim(),
+                targetServer: normalizedPanel === 'target'
+                    ? String(server || '').trim()
+                    : String(targetSelect && targetSelect.value ? targetSelect.value : '').trim()
+            };
+            try {
+                if (window.sessionStorage) {
+                    window.sessionStorage.setItem(SERVER_SWITCH_RELOAD_STORAGE_KEY, JSON.stringify(payload));
+                }
+            } catch (_) {}
+            window.location.reload();
+        }
 
         function readTerminalPreference(key) {
             try {
@@ -1501,6 +1625,22 @@
                     window.localStorage.setItem(key, value);
                 }
             } catch (_) {}
+        }
+
+        function getTerminalClientToken() {
+            try {
+                if (!window.localStorage) {
+                    return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                }
+                let token = window.localStorage.getItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY);
+                if (!token) {
+                    token = `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+                    window.localStorage.setItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY, token);
+                }
+                return token;
+            } catch (_) {
+                return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            }
         }
 
         function getClientPlatformName() {
@@ -1603,6 +1743,64 @@
 
         function sleep(ms) {
             return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        function getActiveSocketId() {
+            if (socket && socket.id) {
+                socketId = socket.id;
+            }
+            return socketId || '';
+        }
+
+        async function ensureTerminalSocketReady(timeoutMs = 5000) {
+            const activeSocketId = getActiveSocketId();
+            if (activeSocketId && socket && socket.connected) {
+                return activeSocketId;
+            }
+            if (!socket) {
+                return '';
+            }
+            return new Promise((resolve) => {
+                let settled = false;
+                let timeoutId = null;
+
+                const cleanup = () => {
+                    if (timeoutId) {
+                        try { clearTimeout(timeoutId); } catch (_) {}
+                        timeoutId = null;
+                    }
+                    try { socket.off('connect', onConnect); } catch (_) {}
+                    try { socket.off('connect_error', onError); } catch (_) {}
+                    try { socket.off('reconnect', onConnect); } catch (_) {}
+                    try { socket.off('reconnect_error', onError); } catch (_) {}
+                };
+
+                const finish = (value) => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    resolve(value || '');
+                };
+
+                const onConnect = () => {
+                    finish(getActiveSocketId());
+                };
+
+                const onError = () => {
+                    finish(getActiveSocketId());
+                };
+
+                timeoutId = window.setTimeout(() => finish(getActiveSocketId()), Math.max(500, timeoutMs));
+                try { socket.on('connect', onConnect); } catch (_) {}
+                try { socket.on('connect_error', onError); } catch (_) {}
+                try { socket.on('reconnect', onConnect); } catch (_) {}
+                try { socket.on('reconnect_error', onError); } catch (_) {}
+                try {
+                    if (!socket.connected && typeof socket.connect === 'function') {
+                        socket.connect();
+                    }
+                } catch (_) {}
+            });
         }
 
         async function ensureTerminalFontReady() {
@@ -1799,19 +1997,40 @@
                 label: document.getElementById(`${key}TerminalLabel`),
                 status: document.getElementById(`${key}TerminalStatus`),
                 maximizeButton: document.getElementById(`${key}TerminalMaximizeBtn`),
+                profileSelect: document.getElementById(`${key}TerminalProfileSelect`),
+                searchBar: document.getElementById(`${key}TerminalSearchBar`),
+                searchInput: document.getElementById(`${key}TerminalSearchInput`),
+                searchResults: document.getElementById(`${key}TerminalSearchResults`),
+                searchCaseButton: document.getElementById(`${key}TerminalSearchCaseBtn`),
+                searchRegexButton: document.getElementById(`${key}TerminalSearchRegexBtn`),
                 rendererSelect: document.getElementById(`${key}TerminalRendererSelect`),
                 fontSelect: document.getElementById(`${key}TerminalFontSelect`),
                 fontSizeSelect: document.getElementById(`${key}TerminalFontSizeSelect`)
             };
         }
 
+        function isTerminalUiVisible(panel) {
+            const els = getTerminalElements(panel);
+            if (!els.drawer) return false;
+            try {
+                return window.getComputedStyle(els.drawer).display !== 'none';
+            } catch (_) {
+                return els.drawer.style.display !== 'none';
+            }
+        }
+
         function hasAnyOpenTerminal() {
             return terminalPanelState.source.open || terminalPanelState.target.open;
+        }
+
+        function hasAnyBrowserFullscreenTerminal() {
+            return Boolean(terminalPanelState.source.browserFullscreen || terminalPanelState.target.browserFullscreen);
         }
 
         function updateGlobalTerminalLayoutState() {
             const hasOpenTerminal = hasAnyOpenTerminal();
             document.body.classList.toggle('terminal-open', hasOpenTerminal);
+            document.body.classList.toggle('terminal-page-fullscreen', hasAnyBrowserFullscreenTerminal());
             window.requestAnimationFrame(() => refreshTerminalLayoutOnViewportChange());
         }
 
@@ -1838,6 +2057,8 @@
                     els.fontSizeSelect.value = fontSize;
                     els.fontSizeSelect.title = '切换终端字号';
                 }
+                updateTerminalProfileControl(panel);
+                updateTerminalSearchUi(panel);
             });
         }
 
@@ -1901,6 +2122,325 @@
             return panel === 'target' ? (currentTargetPath || '') : (currentSourcePath || '');
         }
 
+        function getTerminalProfileOptionsForServer(server) {
+            if (!server) return [];
+            if (isWindowsServer(server)) {
+                return [
+                    { id: 'powershell', label: 'PowerShell' },
+                    { id: 'cmd', label: 'CMD' }
+                ];
+            }
+            return [
+                { id: 'bash', label: 'Bash' },
+                { id: 'login', label: '登录 Shell' },
+                { id: 'sh', label: 'Sh' }
+            ];
+        }
+
+        function getDefaultTerminalProfile(server) {
+            return isWindowsServer(server) ? 'powershell' : 'bash';
+        }
+
+        function getTerminalProfileForPanel(panel, server) {
+            const state = getTerminalState(panel);
+            const options = getTerminalProfileOptionsForServer(server);
+            const allowed = new Set(options.map((item) => item.id));
+            const candidate = String(state.profile || '').trim().toLowerCase();
+            if (candidate && allowed.has(candidate)) return candidate;
+            return getDefaultTerminalProfile(server);
+        }
+
+        function updateTerminalProfileControl(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.profileSelect) return;
+            const server = state.server || getPanelCurrentServer(panel);
+            const options = getTerminalProfileOptionsForServer(server);
+            els.profileSelect.innerHTML = options
+                .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`)
+                .join('');
+            const value = getTerminalProfileForPanel(panel, server);
+            state.profile = value;
+            els.profileSelect.value = value;
+            els.profileSelect.disabled = !server;
+        }
+
+        function updateTerminalLiveStatus(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.status) return;
+            if (!state.open && !state.terminalId) {
+                setTerminalStatus(panel, '未连接');
+                els.status.removeAttribute('title');
+                return;
+            }
+            if (!state.ready && !state.terminalId) {
+                setTerminalStatus(panel, '已断开', 'closed');
+                els.status.removeAttribute('title');
+                return;
+            }
+            if (state.commandRunning) {
+                setTerminalStatus(panel, '运行中', 'connected');
+            } else {
+                setTerminalStatus(panel, '已连接', 'connected');
+            }
+            if (typeof state.lastExitCode === 'number') {
+                els.status.title = state.lastExitCode === 0
+                    ? '上一条命令执行成功'
+                    : `上一条命令退出码: ${state.lastExitCode}`;
+            } else {
+                els.status.removeAttribute('title');
+            }
+        }
+
+        function updateTerminalSearchUi(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (els.searchBar) {
+                els.searchBar.style.display = state.searchVisible ? 'flex' : 'none';
+            }
+            if (els.searchResults) {
+                const total = Math.max(0, Number(state.searchResultCount) || 0);
+                const index = total > 0 ? Math.max(1, (Number(state.searchResultIndex) || 0) + 1) : 0;
+                els.searchResults.textContent = `${index}/${total}`;
+            }
+            if (els.searchCaseButton) {
+                els.searchCaseButton.classList.toggle('active', Boolean(state.searchCaseSensitive));
+            }
+            if (els.searchRegexButton) {
+                els.searchRegexButton.classList.toggle('active', Boolean(state.searchRegex));
+            }
+            if (els.searchInput && els.searchInput.value !== state.searchQuery) {
+                els.searchInput.value = state.searchQuery || '';
+            }
+        }
+
+        function getTerminalSearchOptions(panel) {
+            const state = getTerminalState(panel);
+            return {
+                caseSensitive: Boolean(state.searchCaseSensitive),
+                regex: Boolean(state.searchRegex),
+                decorations: {
+                    matchBackground: 'rgba(96, 165, 250, 0.22)',
+                    activeMatchBackground: 'rgba(37, 99, 235, 0.52)',
+                    matchBorder: '#60a5fa',
+                    activeMatchBorder: '#93c5fd',
+                    matchOverviewRuler: '#60a5fa',
+                    activeMatchColorOverviewRuler: '#93c5fd'
+                }
+            };
+        }
+
+        function resetTerminalSearchState(panel, clearDecorations = true) {
+            const state = getTerminalState(panel);
+            state.searchResultIndex = -1;
+            state.searchResultCount = 0;
+            if (clearDecorations && state.searchAddon && typeof state.searchAddon.clearDecorations === 'function') {
+                try { state.searchAddon.clearDecorations(); } catch (_) {}
+            }
+            updateTerminalSearchUi(panel);
+        }
+
+        function executeTerminalSearch(panel, direction = 'next', preserveFocus = true) {
+            const state = getTerminalState(panel);
+            if (!state.searchAddon || !state.searchQuery) {
+                resetTerminalSearchState(panel, true);
+                return false;
+            }
+            const query = state.searchQuery;
+            const options = getTerminalSearchOptions(panel);
+            try {
+                const found = direction === 'previous'
+                    ? state.searchAddon.findPrevious(query, options)
+                    : state.searchAddon.findNext(query, options);
+                if (!found) {
+                    state.searchResultIndex = -1;
+                    updateTerminalSearchUi(panel);
+                }
+                if (preserveFocus && state.term) {
+                    state.term.focus();
+                }
+                return found;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function handleTerminalSearchInput(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            state.searchQuery = (els.searchInput && els.searchInput.value) ? String(els.searchInput.value) : '';
+            if (!state.searchQuery) {
+                resetTerminalSearchState(panel, true);
+                return;
+            }
+            executeTerminalSearch(panel, 'next', false);
+        }
+
+        function openTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            state.searchVisible = true;
+            updateTerminalSearchUi(panel);
+            window.requestAnimationFrame(() => {
+                const els = getTerminalElements(panel);
+                if (els.searchInput) {
+                    els.searchInput.focus();
+                    els.searchInput.select();
+                }
+            });
+        }
+
+        function closeTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            state.searchVisible = false;
+            updateTerminalSearchUi(panel);
+            resetTerminalSearchState(panel, true);
+            if (state.term) {
+                state.term.focus();
+            }
+        }
+
+        function toggleTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            if (state.searchVisible) {
+                closeTerminalSearch(panel);
+            } else {
+                openTerminalSearch(panel);
+            }
+        }
+
+        function findNextTerminalSearch(panel) {
+            executeTerminalSearch(panel, 'next', false);
+        }
+
+        function findPreviousTerminalSearch(panel) {
+            executeTerminalSearch(panel, 'previous', false);
+        }
+
+        function toggleTerminalSearchCase(panel) {
+            const state = getTerminalState(panel);
+            state.searchCaseSensitive = !state.searchCaseSensitive;
+            updateTerminalSearchUi(panel);
+            if (state.searchQuery) {
+                executeTerminalSearch(panel, 'next', false);
+            }
+        }
+
+        function toggleTerminalSearchRegex(panel) {
+            const state = getTerminalState(panel);
+            state.searchRegex = !state.searchRegex;
+            updateTerminalSearchUi(panel);
+            if (state.searchQuery) {
+                executeTerminalSearch(panel, 'next', false);
+            }
+        }
+
+        function handleTerminalSearchInputKeydown(event, panel) {
+            if (!event) return;
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                executeTerminalSearch(panel, event.shiftKey ? 'previous' : 'next', false);
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeTerminalSearch(panel);
+            }
+        }
+
+        function handleTerminalProfileChange(panel, value) {
+            const state = getTerminalState(panel);
+            const server = state.server || getPanelCurrentServer(panel);
+            state.profile = value || getDefaultTerminalProfile(server);
+            updateTerminalProfileControl(panel);
+            if (state.open || state.terminalId) {
+                reopenTerminalForPanel(panel);
+            }
+        }
+
+        function trackTerminalLocalInput(panel, data) {
+            const state = getTerminalState(panel);
+            const chunk = typeof data === 'string' ? data : '';
+            if (!chunk) return;
+            for (const ch of chunk) {
+                if (ch === '\r') {
+                    const submitted = (state.localInputBuffer || '').trim();
+                    if (submitted) {
+                        state.commandRunning = true;
+                        updateTerminalLiveStatus(panel);
+                    }
+                    state.localInputBuffer = '';
+                    continue;
+                }
+                if (ch === '\u0003') {
+                    state.localInputBuffer = '';
+                    state.commandRunning = false;
+                    updateTerminalLiveStatus(panel);
+                    continue;
+                }
+                if (ch === '\u007f') {
+                    state.localInputBuffer = state.localInputBuffer.slice(0, -1);
+                    continue;
+                }
+                if (ch === '\u0015') {
+                    state.localInputBuffer = '';
+                    continue;
+                }
+                if (ch === '\t') {
+                    state.localInputBuffer += '\t';
+                    continue;
+                }
+                if (ch >= ' ' && ch !== '\u001b') {
+                    state.localInputBuffer += ch;
+                }
+            }
+        }
+
+        function stripTerminalControlMarkers(chunk) {
+            const text = typeof chunk === 'string' ? chunk : '';
+            const pattern = /\x1b]777;([a-z_]+)(?:=([\s\S]*?))?(?:\x07|\x1b\\)/gi;
+            const markers = [];
+            let clean = '';
+            let lastIndex = 0;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                clean += text.slice(lastIndex, match.index);
+                markers.push({
+                    key: String(match[1] || '').toLowerCase(),
+                    value: typeof match[2] === 'string' ? match[2] : ''
+                });
+                lastIndex = match.index + match[0].length;
+            }
+            clean += text.slice(lastIndex);
+            return { text: clean, markers };
+        }
+
+        function applyTerminalShellMarker(panel, marker) {
+            const state = getTerminalState(panel);
+            if (!marker || !marker.key) return;
+            if (marker.key === 'cwd') {
+                const nextCwd = String(marker.value || '').trim();
+                if (nextCwd) {
+                    state.cwd = nextCwd;
+                    updateTerminalHeader(panel);
+                }
+                state.commandRunning = false;
+                updateTerminalLiveStatus(panel);
+                return;
+            }
+            if (marker.key === 'status') {
+                const exitCode = Number.parseInt(String(marker.value || '').trim(), 10);
+                state.lastExitCode = Number.isFinite(exitCode) ? exitCode : null;
+                state.commandRunning = false;
+                updateTerminalLiveStatus(panel);
+                return;
+            }
+            if (marker.key === 'command_start') {
+                state.commandRunning = true;
+                updateTerminalLiveStatus(panel);
+            }
+        }
+
         function getServerDisplayLabel(server) {
             if (!server) return '';
             const meta = SERVERS_DATA && SERVERS_DATA[server];
@@ -1922,8 +2462,7 @@
             if (!els.label) return;
             const sideName = panel === 'target' ? '右侧终端' : '左侧终端';
             const serverLabel = state.server ? getServerDisplayLabel(state.server) : '';
-            const cwd = state.cwd ? ` · ${state.cwd}` : '';
-            els.label.textContent = serverLabel ? `${sideName} · ${serverLabel}${cwd}` : sideName;
+            els.label.textContent = serverLabel ? `${sideName} · ${serverLabel}` : sideName;
         }
 
         function getTerminalDrawerMaxHeight(panel) {
@@ -1949,9 +2488,9 @@
             const state = getTerminalState(panel);
             const els = getTerminalElements(panel);
             if (!els.maximizeButton) return;
-            els.maximizeButton.title = state.maximized ? '还原终端' : '全屏';
-            els.maximizeButton.innerHTML = state.maximized
-                ? '<i class="bi bi-fullscreen-exit"></i><span>还原</span>'
+            els.maximizeButton.title = state.browserFullscreen ? '切回半屏终端' : '切到全屏终端';
+            els.maximizeButton.innerHTML = state.browserFullscreen
+                ? '<i class="bi bi-fullscreen-exit"></i><span>半屏</span>'
                 : '<i class="bi bi-arrows-fullscreen"></i><span>全屏</span>';
         }
 
@@ -1964,6 +2503,7 @@
 
             if (els.panelRoot) {
                 els.panelRoot.classList.toggle('terminal-immersive', Boolean(state.maximized));
+                els.panelRoot.classList.toggle('terminal-browser-fullscreen', Boolean(state.browserFullscreen));
             }
             if (els.workspace) {
                 els.workspace.classList.toggle('terminal-maximized', Boolean(state.maximized));
@@ -1996,7 +2536,11 @@
         }
 
         function ensureTerminalLibraries() {
-            if (typeof window.Terminal !== 'function' || !window.FitAddon || typeof window.FitAddon.FitAddon !== 'function') {
+            if (
+                typeof window.Terminal !== 'function' ||
+                !window.FitAddon || typeof window.FitAddon.FitAddon !== 'function' ||
+                !window.SearchAddon || typeof window.SearchAddon.SearchAddon !== 'function'
+            ) {
                 addLogError('❌ 终端资源未加载成功');
                 showToast('❌ 终端资源未加载', 'error');
                 return false;
@@ -2030,6 +2574,10 @@
                     }
                     return false;
                 }
+                if (hasCtrlOrMeta && !event.shiftKey && key === 'f') {
+                    openTerminalSearch(panel);
+                    return false;
+                }
                 return true;
             });
         }
@@ -2041,6 +2589,63 @@
                 const timer = timers.pop();
                 try { clearTimeout(timer); } catch (_) {}
             }
+        }
+
+        function clearTerminalRecoverTimer(panel) {
+            const state = getTerminalState(panel);
+            if (state.recoverTimer) {
+                try { clearTimeout(state.recoverTimer); } catch (_) {}
+                state.recoverTimer = null;
+            }
+        }
+
+        async function attemptTerminalAutoRecover(panel, reason = '') {
+            const state = getTerminalState(panel);
+            if (!state.open) return false;
+            clearTerminalRecoverTimer(panel);
+            if (state.recovering) return false;
+            state.recovering = true;
+            state.ready = false;
+            state.commandRunning = false;
+            updateTerminalLiveStatus(panel);
+            setTerminalStatus(panel, '重连中');
+            try {
+                if (!socket || !socket.connected) {
+                    return false;
+                }
+                if (!socketId && socket.id) {
+                    socketId = socket.id;
+                }
+                await restoreTerminalSessionsForCurrentSocket();
+                if (state.terminalId && state.ready) {
+                    return true;
+                }
+                state.terminalId = '';
+                const reopened = await openTerminalForPanel(panel, { forceReconnect: true });
+                if (!reopened && reason) {
+                    console.warn(`Terminal auto recover failed [${panel}]: ${reason}`);
+                }
+                return reopened;
+            } catch (error) {
+                console.warn(`Terminal auto recover error [${panel}]:`, error);
+                return false;
+            } finally {
+                state.recovering = false;
+                updateTerminalLiveStatus(panel);
+            }
+        }
+
+        function scheduleTerminalAutoRecover(panel, reason = '', delay = 400) {
+            const state = getTerminalState(panel);
+            if (!state.open) return false;
+            clearTerminalRecoverTimer(panel);
+            if (state.recovering) return false;
+            setTerminalStatus(panel, '重连中');
+            state.recoverTimer = window.setTimeout(() => {
+                state.recoverTimer = null;
+                attemptTerminalAutoRecover(panel, reason);
+            }, Math.max(0, delay));
+            return true;
         }
 
         function stopTerminalResize() {
@@ -2096,6 +2701,11 @@
 
             const resizeHandle = els.resizeHandle;
             const currentHeight = els.drawer.getBoundingClientRect().height || state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            if (state.browserFullscreen) {
+                state.browserFullscreen = false;
+                updateGlobalTerminalLayoutState();
+                applyTerminalDrawerLayout(panel, { fit: 'direct', notifyServer: false });
+            }
             if (state.maximized) {
                 state.maximized = false;
                 state.drawerHeight = currentHeight;
@@ -2135,8 +2745,22 @@
         function toggleTerminalMaximize(panel) {
             const state = getTerminalState(panel);
             if (!state.open) return;
-            state.maximized = !state.maximized;
+            const nextFullscreen = !state.browserFullscreen;
+            if (nextFullscreen) {
+                ['source', 'target'].forEach((otherPanel) => {
+                    if (otherPanel !== panel) {
+                        getTerminalState(otherPanel).browserFullscreen = false;
+                    }
+                });
+            }
+            state.browserFullscreen = nextFullscreen;
             applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+            ['source', 'target'].forEach((otherPanel) => {
+                if (otherPanel !== panel) {
+                    applyTerminalDrawerLayout(otherPanel, { fit: 'schedule', notifyServer: true });
+                }
+            });
+            updateGlobalTerminalLayoutState();
             if (state.term) {
                 window.requestAnimationFrame(() => state.term.focus());
             }
@@ -2175,6 +2799,7 @@
         function disposeTerminalInstance(panel) {
             const state = getTerminalState(panel);
             clearTerminalFitTimers(panel);
+            clearTerminalRecoverTimer(panel);
             if (state.resizeObserver) {
                 try { state.resizeObserver.disconnect(); } catch (_) {}
                 state.resizeObserver = null;
@@ -2183,17 +2808,30 @@
                 try { state.dataDisposable.dispose(); } catch (_) {}
                 state.dataDisposable = null;
             }
+            if (state.searchDisposable) {
+                try { state.searchDisposable.dispose(); } catch (_) {}
+                state.searchDisposable = null;
+            }
             if (state.term) {
                 try { state.term.dispose(); } catch (_) {}
                 state.term = null;
             }
             state.fitAddon = null;
             state.webglAddon = null;
+            state.searchAddon = null;
             state.fontSignature = '';
+            state.searchVisible = false;
+            state.searchQuery = '';
+            state.searchResultIndex = -1;
+            state.searchResultCount = 0;
+            state.localInputBuffer = '';
+            state.commandRunning = false;
+            state.recovering = false;
             const els = getTerminalElements(panel);
             if (els.host) {
                 els.host.innerHTML = '';
             }
+            updateTerminalSearchUi(panel);
         }
 
         function ensureTerminalInstance(panel) {
@@ -2227,7 +2865,9 @@
                 ...terminalOptions
             });
             const fitAddon = new window.FitAddon.FitAddon();
+            const searchAddon = new window.SearchAddon.SearchAddon({ highlightLimit: 1500 });
             term.loadAddon(fitAddon);
+            term.loadAddon(searchAddon);
             let webglAddon = null;
             if (getTerminalRendererMode() === TERMINAL_RENDERER_WEBGL && supportsTerminalWebgl()) {
                 try {
@@ -2244,7 +2884,13 @@
             attachTerminalShortcutHandlers(panel, term);
             state.dataDisposable = term.onData((data) => {
                 if (!state.terminalId) return;
+                trackTerminalLocalInput(panel, data);
                 socket.emit('terminal_input', { terminal_id: state.terminalId, data: data || '' });
+            });
+            state.searchDisposable = searchAddon.onDidChangeResults((event) => {
+                state.searchResultIndex = typeof event?.resultIndex === 'number' ? event.resultIndex : -1;
+                state.searchResultCount = typeof event?.resultCount === 'number' ? event.resultCount : 0;
+                updateTerminalSearchUi(panel);
             });
 
             if (typeof ResizeObserver === 'function') {
@@ -2257,31 +2903,33 @@
             state.term = term;
             state.fitAddon = fitAddon;
             state.webglAddon = webglAddon;
+            state.searchAddon = searchAddon;
             state.needsInitialStabilize = true;
             state.fontSignature = fontSignature;
             updateTerminalHeader(panel);
-            setTerminalStatus(panel, '未连接');
+            updateTerminalProfileControl(panel);
+            updateTerminalLiveStatus(panel);
+            updateTerminalSearchUi(panel);
             return state;
         }
 
         async function openTerminalForPanel(panel, options = {}) {
             const state = getTerminalState(panel);
-            const server = getPanelCurrentServer(panel);
+            const server = String(options.server || getPanelCurrentServer(panel) || '').trim();
             if (!server) {
                 addLogWarning('⚠️ 请先选择服务器后再打开终端');
                 showToast('⚠️ 请先选择服务器', 'warning');
                 return false;
             }
-            if (!socketId && socket && socket.id) {
-                socketId = socket.id;
-            }
-            if (!socketId) {
+            const activeSocketId = await ensureTerminalSocketReady();
+            if (!activeSocketId) {
                 addLogWarning('⚠️ 终端连接尚未就绪，请稍后重试');
                 showToast('⚠️ 终端连接尚未就绪', 'warning');
                 return false;
             }
 
-            const currentPath = getPanelCurrentPath(panel) || getDefaultPath(server) || '';
+            const currentPath = String(options.cwd || getPanelCurrentPath(panel) || getDefaultPath(server) || '').trim();
+            const desiredProfile = String(options.profile || getTerminalProfileForPanel(panel, server) || '').trim();
             const els = getTerminalElements(panel);
             if (els.drawer) {
                 els.drawer.style.display = 'flex';
@@ -2318,14 +2966,22 @@
 
             state.server = server;
             state.cwd = currentPath;
+            state.profile = desiredProfile;
             state.open = true;
             state.ready = false;
+            state.recovering = false;
             state.needsInitialStabilize = true;
             state.maximized = true;
+            state.browserFullscreen = false;
+            state.localInputBuffer = '';
+            state.commandRunning = false;
+            state.searchVisible = false;
             updateGlobalTerminalLayoutState();
             updateTerminalHeader(panel);
+            updateTerminalProfileControl(panel);
             setTerminalStatus(panel, '连接中');
             applyTerminalDrawerLayout(panel, { fit: 'none' });
+            updateTerminalSearchUi(panel);
             state.term.reset();
             state.term.write(`\x1b[1;34m正在连接 ${getServerDisplayLabel(server)}...\x1b[0m\r\n`);
 
@@ -2341,8 +2997,10 @@
                     body: JSON.stringify({
                         server: server,
                         cwd: currentPath,
-                        sid: socketId,
+                        sid: activeSocketId,
+                        client_token: getTerminalClientToken(),
                         panel: panel,
+                        profile: desiredProfile,
                         cols: state.term.cols || 120,
                         rows: state.term.rows || 30
                     })
@@ -2359,9 +3017,11 @@
                 state.terminalId = result.terminal_id || '';
                 state.server = server;
                 state.cwd = result.cwd || currentPath;
+                state.profile = result.profile || desiredProfile;
                 state.ready = true;
                 updateTerminalHeader(panel);
-                setTerminalStatus(panel, '已连接', 'connected');
+                updateTerminalProfileControl(panel);
+                updateTerminalLiveStatus(panel);
                 window.requestAnimationFrame(() => {
                     scheduleTerminalStabilize(panel, true);
                     state.term.focus();
@@ -2385,34 +3045,57 @@
 
             state.ready = false;
             state.terminalId = '';
+            state.commandRunning = false;
+            state.localInputBuffer = '';
+            state.recovering = false;
+            clearTerminalRecoverTimer(panel);
             if (terminalId) {
                 socket.emit('terminal_close', { terminal_id: terminalId });
             }
             clearTerminalFitTimers(panel);
             stopTerminalResize();
+            closeTerminalSearch(panel);
+            disposeTerminalInstance(panel);
 
             if (!options.preserveDrawer) {
                 state.open = false;
                 state.maximized = false;
+                state.browserFullscreen = false;
                 applyTerminalDrawerLayout(panel, { fit: 'none' });
                 if (els.drawer) els.drawer.style.display = 'none';
+            } else {
+                state.open = true;
+                if (els.drawer) els.drawer.style.display = 'flex';
             }
             updateGlobalTerminalLayoutState();
-            setTerminalStatus(panel, '未连接', 'closed');
+            updateTerminalLiveStatus(panel);
             updateTerminalHeader(panel);
             return true;
         }
 
         async function reopenTerminalForPanel(panel) {
-            return openTerminalForPanel(panel, { forceReconnect: true });
+            const state = getTerminalState(panel);
+            const server = getPanelCurrentServer(panel) || state.server || '';
+            const cwd = getPanelCurrentPath(panel) || state.cwd || getDefaultPath(server) || '';
+            const profile = getTerminalProfileForPanel(panel, server) || state.profile || '';
+            state.server = server;
+            state.cwd = cwd;
+            state.profile = profile;
+            updateTerminalHeader(panel);
+            return openTerminalForPanel(panel, {
+                forceReconnect: true,
+                server,
+                cwd,
+                profile
+            });
         }
 
         function toggleTerminalForPanel(panel) {
             const state = getTerminalState(panel);
-            if (state.open) {
+            if (state.open || state.terminalId || isTerminalUiVisible(panel)) {
                 closeTerminalForPanel(panel);
             } else {
-                openTerminalForPanel(panel);
+                openTerminalForPanel(panel, { forceReconnect: true });
             }
         }
 
@@ -2421,6 +3104,147 @@
             if (!state.term) return;
             state.term.clear();
             state.term.focus();
+        }
+
+        function applyRestoredPanelServerState(panel, server, cwd) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const selectEl = document.getElementById(`${normalizedPanel}Server`);
+            if (selectEl && server && !selectEl.value) {
+                selectEl.value = server;
+            }
+            if (normalizedPanel === 'source') {
+                currentSourcePath = cwd || getDefaultPath(server) || '';
+                if (server && currentSourcePath) {
+                    browseSourceInstant(currentSourcePath, { skipRemember: true });
+                }
+                if (server && isWindowsServer(server)) {
+                    loadWindowsDrives(server, true, { preferDesktop: false });
+                } else {
+                    hideWindowsDriveSelector(true);
+                }
+            } else {
+                currentTargetPath = cwd || getDefaultPath(server) || '';
+                if (server && currentTargetPath) {
+                    browseTargetInstant(currentTargetPath, { skipRemember: true });
+                }
+                if (server && isWindowsServer(server)) {
+                    loadWindowsDrives(server, false, { preferDesktop: false });
+                } else {
+                    hideWindowsDriveSelector(false);
+                }
+            }
+        }
+
+        function shouldRestoreTerminalSessionForPanel(panel, server) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const pendingServer = pendingServerSwitchReloadState
+                ? String(normalizedPanel === 'target'
+                    ? pendingServerSwitchReloadState.targetServer
+                    : pendingServerSwitchReloadState.sourceServer)
+                : '';
+            if (pendingServer && server && pendingServer !== server) {
+                return false;
+            }
+            const selectEl = document.getElementById(`${normalizedPanel}Server`);
+            const selectedServer = String(selectEl && selectEl.value ? selectEl.value : '').trim();
+            if (selectedServer && server && selectedServer !== server) {
+                return false;
+            }
+            const state = getTerminalState(normalizedPanel);
+            const intendedServer = String(state.server || '').trim();
+            if (intendedServer && server && intendedServer !== server) {
+                return false;
+            }
+            return true;
+        }
+
+        async function attachRestoredTerminalSession(panel, session) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const state = getTerminalState(normalizedPanel);
+            const server = String(session?.server || '').trim();
+            if (!server) return false;
+            if (!shouldRestoreTerminalSessionForPanel(normalizedPanel, server)) {
+                return false;
+            }
+            const cwd = String(session?.cwd || getDefaultPath(server) || '').trim();
+            const restoredTerminalId = String(session?.terminal_id || '').trim();
+            const isRebindingExistingView = Boolean(state.term && state.open && state.terminalId && state.terminalId === restoredTerminalId);
+            state.server = server;
+            state.cwd = cwd;
+            state.profile = String(session?.profile || getDefaultTerminalProfile(server)).trim().toLowerCase();
+            state.open = true;
+            state.ready = true;
+            state.maximized = true;
+            state.browserFullscreen = false;
+            state.commandRunning = false;
+            state.localInputBuffer = '';
+            applyRestoredPanelServerState(normalizedPanel, server, cwd);
+
+            const els = getTerminalElements(normalizedPanel);
+            if (els.drawer) {
+                els.drawer.style.display = 'flex';
+            }
+            applyTerminalDrawerLayout(normalizedPanel, { fit: 'none' });
+            await waitForNextAnimationFrame();
+            await ensureTerminalFontReady();
+            await waitForNextAnimationFrame();
+            const instance = ensureTerminalInstance(normalizedPanel);
+            if (!instance || !state.term) {
+                return false;
+            }
+            state.terminalId = restoredTerminalId;
+            updateGlobalTerminalLayoutState();
+            updateTerminalHeader(normalizedPanel);
+            updateTerminalProfileControl(normalizedPanel);
+            updateTerminalLiveStatus(normalizedPanel);
+            if (!isRebindingExistingView) {
+                state.term.reset();
+                state.term.write(`\x1b[1;34m已恢复终端会话: ${getServerDisplayLabel(server)}\x1b[0m\r\n`);
+            }
+            window.requestAnimationFrame(() => {
+                scheduleTerminalStabilize(normalizedPanel, true);
+            });
+            return true;
+        }
+
+        async function restoreTerminalSessionsForCurrentSocket() {
+            const activeSocketId = await ensureTerminalSocketReady();
+            if (!activeSocketId) return false;
+            if (terminalRestorePromise) return terminalRestorePromise;
+            terminalRestorePromise = (async () => {
+                try {
+                    const resp = await fetch('/api/terminal/restore', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sid: activeSocketId,
+                            client_token: getTerminalClientToken()
+                        })
+                    });
+                    const result = await resp.json();
+                    if (!result.success || !Array.isArray(result.sessions) || result.sessions.length === 0) {
+                        return false;
+                    }
+                    for (const session of result.sessions) {
+                        const panel = String(session?.panel || '').trim();
+                        if (panel !== 'source' && panel !== 'target') continue;
+                        if (!shouldRestoreTerminalSessionForPanel(panel, String(session?.server || '').trim())) {
+                            if (socket && socket.connected && session?.terminal_id) {
+                                socket.emit('terminal_close', { terminal_id: String(session.terminal_id) });
+                            }
+                            continue;
+                        }
+                        await attachRestoredTerminalSession(panel, session);
+                    }
+                    addLogInfo('🖥️ 已恢复终端会话');
+                    return true;
+                } catch (_) {
+                    return false;
+                } finally {
+                    terminalRestorePromise = null;
+                }
+            })();
+            return terminalRestorePromise;
         }
 
         function refreshTerminalLayoutOnViewportChange() {
@@ -2434,10 +3258,12 @@
             });
         }
 
-        function handleTerminalServerChanged(panel) {
+        async function handleTerminalServerChanged(panel) {
             const state = getTerminalState(panel);
-            if (!state.open && !state.terminalId) return;
-            closeTerminalForPanel(panel, { silent: true });
+            const wasOpen = Boolean(state.open || state.terminalId);
+            if (!wasOpen) return false;
+            await closeTerminalForPanel(panel, { silent: true });
+            return true;
         }
 
 
@@ -5248,8 +6074,12 @@
             const state = states.find((item) => item && item.term && item.terminalId === terminalId);
             if (!state || !state.term) return;
             const chunk = data && typeof data.data === 'string' ? data.data : '';
-            if (chunk) {
-                state.term.write(chunk);
+            const parsed = stripTerminalControlMarkers(chunk);
+            if (Array.isArray(parsed.markers)) {
+                parsed.markers.forEach((marker) => applyTerminalShellMarker(state.panel, marker));
+            }
+            if (parsed.text) {
+                state.term.write(parsed.text);
                 if (state.needsInitialStabilize) {
                     state.needsInitialStabilize = false;
                     window.requestAnimationFrame(() => scheduleTerminalStabilize(state.panel, true));
@@ -5258,7 +6088,9 @@
             if (data && data.final === true) {
                 state.ready = false;
                 state.terminalId = '';
-                setTerminalStatus(state.panel, '已断开', 'closed');
+                state.commandRunning = false;
+                state.recovering = false;
+                updateTerminalLiveStatus(state.panel);
             }
         });
 
@@ -5272,8 +6104,10 @@
                     if (terminalId) state.terminalId = terminalId;
                     if (data.server) state.server = data.server;
                     if (data.cwd) state.cwd = data.cwd;
+                    if (data.profile) state.profile = data.profile;
                     updateTerminalHeader(state.panel);
-                    setTerminalStatus(state.panel, '已连接', 'connected');
+                    updateTerminalProfileControl(state.panel);
+                    updateTerminalLiveStatus(state.panel);
                 }
                 return;
             }
@@ -5282,14 +6116,26 @@
                 .find((item) => item && item.term && item.terminalId === terminalId);
             if (!state) return;
             if (status === 'error') {
+                const message = data && data.message ? String(data.message) : '';
+                const isRecoverableSessionError = /终端会话不存在或已结束|无权访问该终端会话/.test(message);
+                if (isRecoverableSessionError) {
+                    state.ready = false;
+                    state.terminalId = '';
+                    state.commandRunning = false;
+                    updateTerminalLiveStatus(state.panel);
+                    scheduleTerminalAutoRecover(state.panel, message, 250);
+                    return;
+                }
                 setTerminalStatus(state.panel, '异常', 'error');
-                if (data && data.message) {
-                    state.term.write(`\r\n\x1b[1;31m${data.message}\x1b[0m\r\n`);
+                if (message) {
+                    state.term.write(`\r\n\x1b[1;31m${message}\x1b[0m\r\n`);
                 }
             } else if (status === 'closed') {
                 state.ready = false;
                 state.terminalId = '';
-                setTerminalStatus(state.panel, '已断开', 'closed');
+                state.commandRunning = false;
+                state.recovering = false;
+                updateTerminalLiveStatus(state.panel);
             }
         });
 
@@ -8531,16 +9377,41 @@
                 if (CLIENT_IPV4) {
                     socket.emit('register_client', { client_ip: CLIENT_IPV4 });
                 }
-            socket.on('connect', () => {
-                socketId = socket.id;
+                socket.on('connect', async () => {
+                    socketId = socket.id || null;
+                    updateRunControls();
+                    await restoreTerminalSessionsForCurrentSocket();
+                    for (const panel of ['source', 'target']) {
+                        const state = getTerminalState(panel);
+                        if (state.open && (!state.terminalId || !state.ready)) {
+                            scheduleTerminalAutoRecover(panel, 'socket reconnect', 120);
+                        }
+                    }
+                });
+                socket.on('disconnect', () => {
+                    socketId = null;
+                    for (const panel of ['source', 'target']) {
+                        const state = getTerminalState(panel);
+                        if (!state.open) continue;
+                        state.ready = false;
+                        state.commandRunning = false;
+                        updateTerminalLiveStatus(panel);
+                        setTerminalStatus(panel, '重连中');
+                    }
+                });
                 updateRunControls();
-            });
-            updateRunControls();
-            socket.on('connect', () => {
-                socketId = socket.id;
-                updateRunControls();
-            });
-            updateRunControls();
+                if (socket && socket.connected) {
+                    socketId = socket.id || null;
+                    updateRunControls();
+                    restoreTerminalSessionsForCurrentSocket().then(() => {
+                        for (const panel of ['source', 'target']) {
+                            const state = getTerminalState(panel);
+                            if (state.open && (!state.terminalId || !state.ready)) {
+                                scheduleTerminalAutoRecover(panel, 'socket bootstrap', 120);
+                            }
+                        }
+                    });
+                }
 
 
             switchLogoDisplay('header');
@@ -8565,79 +9436,140 @@
 
 
             document.getElementById('sourceServer').addEventListener('change', async function() {
-                handleTerminalServerChanged('source');
-                if (this.value) {
-                    const isWindows = isWindowsServer(this.value);
+                const nextServer = this.value || '';
+                if (!suppressServerSwitchReload) {
+                    scheduleServerSwitchReload('source', nextServer);
+                    return;
+                }
+                const shouldReopenTerminal = await handleTerminalServerChanged('source');
+                terminalPanelState.source.server = nextServer;
+                terminalPanelState.source.profile = getDefaultTerminalProfile(nextServer);
+                updateTerminalProfileControl('source');
+                if (!nextServer) {
+                    currentSourcePath = '';
+                    hideWindowsDriveSelector(true);
+                    return;
+                }
 
-                    const rememberedPath = getRememberedPath(this.value, true);
-                    const configDefaultPath = getDefaultPath(this.value);
-                    const hasRememberedPath = Boolean(rememberedPath);
-                    const hasConfigDefaultPath = Boolean(configDefaultPath);
-                    const initialPath = rememberedPath || configDefaultPath || '';
+                const isWindows = isWindowsServer(nextServer);
+                const rememberedPath = getRememberedPath(nextServer, true);
+                const configDefaultPath = getDefaultPath(nextServer);
+                const hasRememberedPath = Boolean(rememberedPath);
+                const hasConfigDefaultPath = Boolean(configDefaultPath);
+                const initialPath = rememberedPath || configDefaultPath || '';
 
-                    if (initialPath) {
-                        currentSourcePath = initialPath;
-                        browseSourceInstant(currentSourcePath, { skipRemember: true });
-                    } else if (!isWindows) {
-                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
-                        return;
+                if (initialPath) {
+                    currentSourcePath = initialPath;
+                    browseSourceInstant(currentSourcePath, { skipRemember: true });
+                } else if (!isWindows) {
+                    addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                    return;
+                } else {
+                    currentSourcePath = '';
+                }
+
+                if (isWindows) {
+                    const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                    await loadWindowsDrives(nextServer, true, { preferDesktop });
+                    if (preferDesktop) {
+                        addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
                     } else {
-                        currentSourcePath = '';
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     }
+                } else {
+                    hideWindowsDriveSelector(true);
+                }
 
-
-                    if (isWindows) {
-                        const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
-                        loadWindowsDrives(this.value, true, { preferDesktop });
-                        if (preferDesktop) {
-                            addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
-                        } else {
-                            addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
-                        }
-                    } else {
-                        hideWindowsDriveSelector(true);
-                    }
+                if (shouldReopenTerminal) {
+                    await openTerminalForPanel('source', {
+                        forceReconnect: true,
+                        server: nextServer,
+                        cwd: currentSourcePath,
+                        profile: terminalPanelState.source.profile
+                    });
                 }
             });
 
             document.getElementById('targetServer').addEventListener('change', async function() {
-                handleTerminalServerChanged('target');
-                if (this.value) {
-                    const isWindows = isWindowsServer(this.value);
+                const nextServer = this.value || '';
+                if (!suppressServerSwitchReload) {
+                    scheduleServerSwitchReload('target', nextServer);
+                    return;
+                }
+                const shouldReopenTerminal = await handleTerminalServerChanged('target');
+                terminalPanelState.target.server = nextServer;
+                terminalPanelState.target.profile = getDefaultTerminalProfile(nextServer);
+                updateTerminalProfileControl('target');
+                if (!nextServer) {
+                    currentTargetPath = '';
+                    hideWindowsDriveSelector(false);
+                    return;
+                }
 
-                    const rememberedPath = getRememberedPath(this.value, false);
-                    const configDefaultPath = getDefaultPath(this.value);
-                    const hasRememberedPath = Boolean(rememberedPath);
-                    const hasConfigDefaultPath = Boolean(configDefaultPath);
-                    const initialPath = rememberedPath || configDefaultPath || '';
+                const isWindows = isWindowsServer(nextServer);
+                const rememberedPath = getRememberedPath(nextServer, false);
+                const configDefaultPath = getDefaultPath(nextServer);
+                const hasRememberedPath = Boolean(rememberedPath);
+                const hasConfigDefaultPath = Boolean(configDefaultPath);
+                const initialPath = rememberedPath || configDefaultPath || '';
 
-                    if (initialPath) {
-                        currentTargetPath = initialPath;
-                        browseTargetInstant(currentTargetPath, { skipRemember: true });
-                    } else if (!isWindows) {
-                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
-                        return;
+                if (initialPath) {
+                    currentTargetPath = initialPath;
+                    browseTargetInstant(currentTargetPath, { skipRemember: true });
+                } else if (!isWindows) {
+                    addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                    return;
+                } else {
+                    currentTargetPath = '';
+                }
+
+                if (isWindows) {
+                    const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                    await loadWindowsDrives(nextServer, false, { preferDesktop });
+                    if (preferDesktop) {
+                        addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
                     } else {
-                        currentTargetPath = '';
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     }
+                } else {
+                    hideWindowsDriveSelector(false);
+                }
 
-
-                    if (isWindows) {
-                        const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
-                        loadWindowsDrives(this.value, false, { preferDesktop });
-                        if (preferDesktop) {
-                            addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
-                        } else {
-                            addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
-                        }
-                    } else {
-                        hideWindowsDriveSelector(false);
-                    }
+                if (shouldReopenTerminal) {
+                    await openTerminalForPanel('target', {
+                        forceReconnect: true,
+                        server: nextServer,
+                        cwd: currentTargetPath,
+                        profile: terminalPanelState.target.profile
+                    });
                 }
             });
 
-
-                applyRememberedSelections();
+                if (pendingServerSwitchReloadState) {
+                    const pendingState = pendingServerSwitchReloadState;
+                    suppressServerSwitchReload = true;
+                    try {
+                        const sourceSelect = document.getElementById('sourceServer');
+                        const targetSelect = document.getElementById('targetServer');
+                        if (sourceSelect && pendingState.sourceServer && sourceSelect.value !== pendingState.sourceServer) {
+                            sourceSelect.value = pendingState.sourceServer;
+                        }
+                        if (targetSelect && pendingState.targetServer && targetSelect.value !== pendingState.targetServer) {
+                            targetSelect.value = pendingState.targetServer;
+                        }
+                        if (sourceSelect && pendingState.sourceServer) {
+                            sourceSelect.dispatchEvent(new Event('change'));
+                        }
+                        if (targetSelect && pendingState.targetServer) {
+                            targetSelect.dispatchEvent(new Event('change'));
+                        }
+                    } finally {
+                        clearServerSwitchReloadState();
+                        suppressServerSwitchReload = false;
+                    }
+                } else {
+                    applyRememberedSelections();
+                }
 
 
         });

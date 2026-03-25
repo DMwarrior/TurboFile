@@ -161,18 +161,19 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 10px;
-            padding: 8px 12px;
+            gap: 8px;
+            padding: 5px 10px;
             background: #161b22;
             border-bottom: 1px solid #1f2937;
             color: #e5e7eb;
-            font-size: 12px;
+            font-size: 11px;
+            line-height: 1.1;
         }
 
         .terminal-drawer-title {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             min-width: 0;
             font-weight: 600;
         }
@@ -186,14 +187,15 @@
         .terminal-drawer-actions {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 4px;
             flex-wrap: wrap;
             justify-content: flex-end;
         }
 
         .terminal-drawer-actions .btn {
-            font-size: 11px;
-            padding: 2px 8px;
+            font-size: 10px;
+            line-height: 1;
+            padding: 2px 6px;
         }
 
         .terminal-action-btn {
@@ -228,6 +230,53 @@
         .terminal-font-size-select {
             min-width: 84px;
             max-width: 84px;
+        }
+
+        .terminal-profile-select {
+            min-width: 116px;
+            max-width: 140px;
+        }
+
+        .terminal-searchbar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            background: #111827;
+            border-bottom: 1px solid #1f2937;
+        }
+
+        .terminal-search-input {
+            min-width: 0;
+            flex: 1 1 auto;
+            background: #0f172a;
+            color: #e5e7eb;
+            border-color: #334155;
+            box-shadow: none !important;
+        }
+
+        .terminal-search-input:focus {
+            background: #0f172a;
+            color: #e5e7eb;
+            border-color: #60a5fa;
+        }
+
+        .terminal-search-results {
+            flex: 0 0 auto;
+            min-width: 44px;
+            font-size: 11px;
+            color: #94a3b8;
+            text-align: center;
+        }
+
+        .terminal-search-option {
+            min-width: 38px;
+        }
+
+        .terminal-search-option.active {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #eff6ff;
         }
 
         .terminal-drawer-body {
@@ -286,11 +335,14 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
-            padding: 2px 8px;
+            padding: 2px 7px;
             border-radius: 999px;
             background: rgba(59, 130, 246, 0.16);
             color: #93c5fd;
             font-weight: 500;
+            line-height: 1;
+            white-space: nowrap;
+            flex: 0 0 auto;
         }
 
         .terminal-status-pill.connected {
@@ -311,6 +363,60 @@
         }
 
         body.terminal-open #transferControlRow {
+            display: none !important;
+        }
+
+        body.terminal-page-fullscreen {
+            overflow: hidden;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen {
+            position: fixed !important;
+            inset: 0 !important;
+            z-index: 5000;
+            width: 100vw !important;
+            height: 100vh !important;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #0d1117;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen #sourcePanelHeader,
+        .resizable-panel.terminal-browser-fullscreen #targetPanelHeader,
+        .resizable-panel.terminal-browser-fullscreen #sourcePathNav,
+        .resizable-panel.terminal-browser-fullscreen #targetPathNav {
+            display: none !important;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen .panel-workspace {
+            height: 100%;
+            min-height: 0;
+            gap: 0;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen .terminal-drawer {
+            flex: 1 1 auto !important;
+            height: 100% !important;
+            min-height: 0;
+            border-radius: 0;
+            border: none;
+            box-shadow: none;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen .terminal-drawer-resizer {
+            margin-top: 0;
+        }
+
+        body.terminal-page-fullscreen #appHeaderRow,
+        body.terminal-page-fullscreen #serverSelectionRow,
+        body.terminal-page-fullscreen #transferControlRow,
+        body.terminal-page-fullscreen #verticalResizer,
+        body.terminal-page-fullscreen .resizable-panel:not(.terminal-browser-fullscreen) {
             display: none !important;
         }
 

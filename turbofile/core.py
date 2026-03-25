@@ -989,6 +989,10 @@ class SSHManager:
         pool = self.connection_pools[server_ip]
         for i, ssh in enumerate(pool):
             if ssh and ssh.get_transport() and ssh.get_transport().is_active():
+                try:
+                    ssh.get_transport().set_keepalive(TERMINAL_SSH_KEEPALIVE_SECONDS)
+                except Exception:
+                    pass
 
                 pool.append(pool.pop(i))
                 return ssh
@@ -1036,6 +1040,13 @@ class SSHManager:
                 connect_kwargs['password'] = server_config["password"]
                 ssh.connect(**connect_kwargs)
                 print(f"✅ 使用密码连接到服务器 {server_ip}")
+
+            try:
+                transport = ssh.get_transport()
+                if transport:
+                    transport.set_keepalive(TERMINAL_SSH_KEEPALIVE_SECONDS)
+            except Exception:
+                pass
 
 
             if len(pool) >= self.connection_pool_size:
@@ -1105,6 +1116,24 @@ RUN_TASKS = {}
 RUN_TASKS_LOCK = threading.Lock()
 TERMINAL_TASKS = {}
 TERMINAL_TASKS_LOCK = threading.Lock()
+TERMINAL_DETACH_GRACE_SECONDS = 43200
+TERMINAL_REAPER_INTERVAL_SECONDS = 30
+TERMINAL_SSH_KEEPALIVE_SECONDS = 15
+TERMINAL_LOCAL_POLL_INTERVAL_SECONDS = 0.015
+TERMINAL_REMOTE_IDLE_SLEEP_SECONDS = 0.01
+_TERMINAL_REAPER_STARTED = False
+_TERMINAL_REAPER_LOCK = threading.Lock()
+
+TERMINAL_PROFILE_OPTIONS_POSIX = (
+    {'id': 'bash', 'label': 'Bash'},
+    {'id': 'login', 'label': '登录 Shell'},
+    {'id': 'sh', 'label': 'Sh'},
+)
+
+TERMINAL_PROFILE_OPTIONS_WINDOWS = (
+    {'id': 'powershell', 'label': 'PowerShell'},
+    {'id': 'cmd', 'label': 'CMD'},
+)
 
 def get_ssh_command_with_port(server_ip, fast_ssh=True):
     """Build an SSH command string with custom port support."""
@@ -4044,27 +4073,96 @@ def _resolve_local_terminal_cwd(cwd: str) -> str:
         pass
     return os.path.expanduser('~')
 
-def _build_linux_terminal_command(cwd: str) -> str:
-    target_dir = shlex.quote(cwd or '~')
+def get_terminal_profile_options(server_ip: str):
+    return list(TERMINAL_PROFILE_OPTIONS_WINDOWS if is_windows_server(server_ip) else TERMINAL_PROFILE_OPTIONS_POSIX)
+
+def _normalize_terminal_profile_by_platform(is_windows: bool, profile: str = '') -> str:
+    options = TERMINAL_PROFILE_OPTIONS_WINDOWS if is_windows else TERMINAL_PROFILE_OPTIONS_POSIX
+    default_profile = 'powershell' if is_windows else 'bash'
+    allowed = {str(option.get('id') or '').strip() for option in options}
+    candidate = str(profile or '').strip().lower()
+    return candidate if candidate in allowed else default_profile
+
+def normalize_terminal_profile(server_ip: str, profile: str = '') -> str:
+    return _normalize_terminal_profile_by_platform(is_windows_server(server_ip), profile)
+
+def _build_bash_integration_rcfile_payload() -> str:
     return (
-        f'export TERM=xterm-256color COLORTERM=truecolor; '
-        f'cd {target_dir} 2>/dev/null || cd ~; '
-        f'exec ${{SHELL:-/bin/bash}} -il'
+        "if [ -f /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi\n"
+        "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n"
+        "__turbofile_prompt(){\n"
+        "  local _tf_ec=$?;\n"
+        "  printf '\\033]777;cwd=%s\\007' \"$PWD\";\n"
+        "  printf '\\033]777;status=%s\\007' \"$_tf_ec\";\n"
+        "}\n"
+        "if [ -n \"${PROMPT_COMMAND-}\" ]; then\n"
+        "  PROMPT_COMMAND=\"__turbofile_prompt;${PROMPT_COMMAND}\"\n"
+        "else\n"
+        "  PROMPT_COMMAND=\"__turbofile_prompt\"\n"
+        "fi\n"
+        "PS0=$'\\033]777;command_start\\007'\n"
+        "rm -f -- \"${BASH_SOURCE[0]}\" 2>/dev/null || true\n"
     )
 
-def _build_windows_terminal_command(cwd: str) -> str:
-    target_dir = _escape_pwsh_literal(normalize_windows_path_for_cmd(cwd or ''))
+def _build_linux_terminal_command(cwd: str, profile: str = 'bash') -> str:
+    profile = _normalize_terminal_profile_by_platform(False, profile)
+    target_dir = shlex.quote(cwd or '~')
+    if profile == 'login':
+        return (
+            f'export TERM=xterm-256color COLORTERM=truecolor; '
+            f'cd {target_dir} 2>/dev/null || cd ~; '
+            f'exec ${{SHELL:-/bin/bash}} -il'
+        )
+    if profile == 'sh':
+        return (
+            f'export TERM=xterm-256color COLORTERM=truecolor; '
+            f'cd {target_dir} 2>/dev/null || cd ~; '
+            f'exec /bin/sh -i'
+        )
+    rc_payload = _build_bash_integration_rcfile_payload()
+    script = (
+        "rcfile=$(mktemp /tmp/turbofile-bashrc.XXXXXX 2>/dev/null || mktemp); "
+        "cat > \"$rcfile\" <<'__TURBOFILE_BASH_RC__'\n"
+        f"{rc_payload}"
+        "__TURBOFILE_BASH_RC__\n"
+        f"export TERM=xterm-256color COLORTERM=truecolor; "
+        f"cd {target_dir} 2>/dev/null || cd ~; "
+        f"exec bash --rcfile \"$rcfile\" -i"
+    )
+    return script
+
+def _build_windows_shell_integration_prompt() -> str:
     return (
-        "powershell.exe -NoLogo -NoExit -NoProfile -ExecutionPolicy Bypass "
-        "-Command "
-        "\""
+        "$global:__TurboFileOriginalPrompt = $function:prompt; "
+        "function global:prompt { "
+        "$tfCode = if ($?) { 0 } elseif ($LASTEXITCODE -is [int]) { [int]$LASTEXITCODE } else { 1 }; "
+        "[Console]::Out.Write(\"`e]777;cwd=$($PWD.Path)`a\"); "
+        "[Console]::Out.Write(\"`e]777;status=$tfCode`a\"); "
+        "if ($global:__TurboFileOriginalPrompt) { & $global:__TurboFileOriginalPrompt } "
+        "else { \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" } "
+        "}; "
+    )
+
+def _build_windows_terminal_command(cwd: str, profile: str = 'powershell') -> str:
+    profile = _normalize_terminal_profile_by_platform(True, profile)
+    if profile == 'cmd':
+        target_dir = normalize_windows_path_for_cmd(cwd or '').replace('"', '""')
+        return f'cmd.exe /Q /K "chcp 65001>nul && cd /d \\"{target_dir}\\""'
+
+    target_dir = _escape_pwsh_literal(normalize_windows_path_for_cmd(cwd or ''))
+    script = (
         "$PSStyle.OutputRendering = 'PlainText' 2>$null; "
         "[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); "
         "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); "
         "$OutputEncoding = [Console]::OutputEncoding; "
         f"try {{ Set-Location -LiteralPath '{target_dir}' }} catch {{ Set-Location -LiteralPath $HOME }}; "
+        f"{_build_windows_shell_integration_prompt()}"
         "Clear-Host"
-        "\""
+    )
+    escaped_script = script.replace('"', '`"')
+    return (
+        "powershell.exe -NoLogo -NoExit -NoProfile -ExecutionPolicy Bypass "
+        f"-Command \"{escaped_script}\""
     )
 
 def emit_terminal_output(terminal_id, data, final=False, exit_code=None, sid=None):
@@ -4084,8 +4182,6 @@ def emit_terminal_output(terminal_id, data, final=False, exit_code=None, sid=Non
                     target_room = task.get('sid')
         if target_room:
             socketio.emit('terminal_output', payload, room=target_room)
-        else:
-            socketio.emit('terminal_output', payload)
     except Exception as e:
         print(f"❌ 发送终端输出失败: {e}")
 
@@ -4107,8 +4203,6 @@ def emit_terminal_status(terminal_id, status, message='', sid=None, extra=None):
                     target_room = task.get('sid')
         if target_room:
             socketio.emit('terminal_status', payload, room=target_room)
-        else:
-            socketio.emit('terminal_status', payload)
     except Exception as e:
         print(f"❌ 发送终端状态失败: {e}")
 
@@ -4120,7 +4214,117 @@ def _pop_terminal_task(terminal_id):
     with TERMINAL_TASKS_LOCK:
         return TERMINAL_TASKS.pop(terminal_id, None)
 
-def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
+def _terminal_session_payload(terminal_id, task):
+    if not terminal_id or not isinstance(task, dict):
+        return None
+    detached_at = task.get('detached_at')
+    detached_seconds = None
+    if isinstance(detached_at, (int, float)):
+        detached_seconds = max(0, int(time.time() - detached_at))
+    return {
+        'terminal_id': terminal_id,
+        'server': task.get('server') or '',
+        'host': task.get('host') or '',
+        'panel': task.get('panel') or '',
+        'cwd': task.get('cwd') or '',
+        'profile': task.get('profile') or '',
+        'client_token': task.get('client_token') or '',
+        'detached': bool(task.get('sid') is None),
+        'detached_seconds': detached_seconds,
+        'opened_at': task.get('opened_at') or 0,
+    }
+
+def list_terminal_sessions_for_client(client_token: str):
+    token = str(client_token or '').strip()
+    if not token:
+        return []
+    sessions = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('client_token') != token:
+                continue
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                sessions.append(payload)
+    sessions.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return sessions
+
+def close_terminal_sessions_for_client_panel(client_token: str, panel: str):
+    token = str(client_token or '').strip()
+    panel_name = str(panel or '').strip()
+    if not token or not panel_name:
+        return
+    with TERMINAL_TASKS_LOCK:
+        terminal_ids = [
+            terminal_id
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('client_token') == token and task.get('panel') == panel_name
+        ]
+    for terminal_id in terminal_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def mark_terminal_sessions_detached_for_sid(sid):
+    if not sid:
+        return 0
+    detached = 0
+    now = time.time()
+    with TERMINAL_TASKS_LOCK:
+        for task in TERMINAL_TASKS.values():
+            if task.get('sid') != sid:
+                continue
+            task['sid'] = None
+            task['detached_at'] = now
+            detached += 1
+    return detached
+
+def rebind_terminal_sessions(client_token: str, sid: str):
+    token = str(client_token or '').strip()
+    new_sid = str(sid or '').strip()
+    if not token or not new_sid:
+        return []
+    rebound = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('client_token') != token:
+                continue
+            task['sid'] = new_sid
+            task['detached_at'] = None
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                rebound.append(payload)
+    rebound.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return rebound
+
+def _reap_detached_terminal_sessions():
+    now = time.time()
+    with TERMINAL_TASKS_LOCK:
+        stale_ids = [
+            terminal_id
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('sid') is None
+            and isinstance(task.get('detached_at'), (int, float))
+            and (now - float(task.get('detached_at') or 0)) >= TERMINAL_DETACH_GRACE_SECONDS
+        ]
+    for terminal_id in stale_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def _terminal_reaper_loop():
+    while True:
+        try:
+            _reap_detached_terminal_sessions()
+        except Exception:
+            pass
+        time.sleep(TERMINAL_REAPER_INTERVAL_SECONDS)
+
+def ensure_terminal_reaper_started():
+    global _TERMINAL_REAPER_STARTED
+    with _TERMINAL_REAPER_LOCK:
+        if _TERMINAL_REAPER_STARTED:
+            return
+        threading.Thread(target=_terminal_reaper_loop, daemon=True, name='turbofile-terminal-reaper').start()
+        _TERMINAL_REAPER_STARTED = True
+
+def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, client_token=None, profile=None):
     """Create a terminal session and start background streaming."""
     terminal_id = f"term_{uuid.uuid4().hex}"
     rows = _clamp_terminal_rows(rows)
@@ -4128,18 +4332,20 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
     is_local = is_local_server(server_ip)
     is_windows = is_windows_server(server_ip)
     host = get_server_host(server_ip)
+    profile = normalize_terminal_profile(server_ip, profile)
 
     try:
+        ensure_terminal_reaper_started()
         if is_local:
             work_dir = _resolve_local_terminal_cwd(cwd)
-            shell = os.environ.get('SHELL') or '/bin/bash'
             master_fd, slave_fd = pty.openpty()
             _set_local_terminal_size(slave_fd, rows, cols)
             env = os.environ.copy()
             env['TERM'] = 'xterm-256color'
             env['COLORTERM'] = 'truecolor'
+            local_command = _build_windows_terminal_command(work_dir, profile) if is_windows else _build_linux_terminal_command(work_dir, profile)
             proc = subprocess.Popen(
-                [shell, '-il'],
+                ['/bin/bash', '-lc', local_command],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -4156,6 +4362,10 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
                 'sid': sid,
                 'panel': panel,
                 'cwd': work_dir,
+                'profile': profile,
+                'client_token': str(client_token or '').strip(),
+                'opened_at': time.time(),
+                'detached_at': None,
                 'fd': master_fd,
                 'process': proc,
                 'encoding': 'utf-8',
@@ -4170,7 +4380,7 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
                 return None, f'服务器 {server_ip} 的 SSH 连接不可用'
             channel = transport.open_session(timeout=5)
             channel.get_pty(term='xterm-256color', width=cols, height=rows)
-            command = _build_windows_terminal_command(cwd) if is_windows else _build_linux_terminal_command(cwd)
+            command = _build_windows_terminal_command(cwd, profile) if is_windows else _build_linux_terminal_command(cwd, profile)
             channel.exec_command(command)
             session = {
                 'type': 'remote',
@@ -4179,6 +4389,10 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
                 'sid': sid,
                 'panel': panel,
                 'cwd': cwd or get_default_path(server_ip),
+                'profile': profile,
+                'client_token': str(client_token or '').strip(),
+                'opened_at': time.time(),
+                'detached_at': None,
                 'channel': channel,
                 'encoding': 'utf-8',
                 'closing': False,
@@ -4196,7 +4410,8 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
                 'server': server_ip,
                 'host': host,
                 'panel': panel,
-                'cwd': session.get('cwd') or ''
+                'cwd': session.get('cwd') or '',
+                'profile': profile
             }
         )
         return terminal_id, None
@@ -4294,7 +4509,6 @@ def stream_terminal_output(terminal_id):
     if not session:
         return
 
-    sid = session.get('sid')
     exit_code = 0
     final_note = '\r\n[终端已断开]\r\n'
 
@@ -4305,23 +4519,42 @@ def stream_terminal_output(terminal_id):
             while True:
                 if fd is None:
                     break
-                rlist, _, _ = select.select([fd], [], [], 0.1)
+                rlist, _, _ = select.select([fd], [], [], TERMINAL_LOCAL_POLL_INTERVAL_SECONDS)
                 if fd in rlist:
-                    try:
-                        data = os.read(fd, 4096)
-                    except OSError:
-                        data = b''
-                    if data:
-                        emit_terminal_output(terminal_id, data.decode('utf-8', errors='replace'), sid=sid)
+                    chunks = []
+                    while True:
+                        try:
+                            data = os.read(fd, 65536)
+                        except OSError:
+                            data = b''
+                        if not data:
+                            break
+                        chunks.append(data)
+                        more_ready, _, _ = select.select([fd], [], [], 0)
+                        if fd not in more_ready:
+                            break
+                    if chunks:
+                        emit_terminal_output(
+                            terminal_id,
+                            b''.join(chunks).decode('utf-8', errors='replace'),
+                            sid=session.get('sid')
+                        )
                     elif proc is None or proc.poll() is not None:
                         break
                 if proc is not None and proc.poll() is not None:
                     try:
+                        tail_chunks = []
                         while True:
                             tail = os.read(fd, 4096)
                             if not tail:
                                 break
-                            emit_terminal_output(terminal_id, tail.decode('utf-8', errors='replace'), sid=sid)
+                            tail_chunks.append(tail)
+                        if tail_chunks:
+                            emit_terminal_output(
+                                terminal_id,
+                                b''.join(tail_chunks).decode('utf-8', errors='replace'),
+                                sid=session.get('sid')
+                            )
                     except Exception:
                         pass
                     break
@@ -4333,20 +4566,36 @@ def stream_terminal_output(terminal_id):
             channel = session.get('channel')
             while channel is not None:
                 had_data = False
-                if channel.recv_ready():
-                    data = channel.recv(4096)
-                    if data:
-                        emit_terminal_output(terminal_id, data.decode(session.get('encoding') or 'utf-8', errors='replace'), sid=sid)
-                        had_data = True
-                if channel.recv_stderr_ready():
-                    data = channel.recv_stderr(4096)
-                    if data:
-                        emit_terminal_output(terminal_id, data.decode(session.get('encoding') or 'utf-8', errors='replace'), sid=sid)
-                        had_data = True
+                stdout_chunks = []
+                stderr_chunks = []
+                while channel.recv_ready():
+                    data = channel.recv(65536)
+                    if not data:
+                        break
+                    stdout_chunks.append(data)
+                while channel.recv_stderr_ready():
+                    data = channel.recv_stderr(65536)
+                    if not data:
+                        break
+                    stderr_chunks.append(data)
+                if stdout_chunks:
+                    emit_terminal_output(
+                        terminal_id,
+                        b''.join(stdout_chunks).decode(session.get('encoding') or 'utf-8', errors='replace'),
+                        sid=session.get('sid')
+                    )
+                    had_data = True
+                if stderr_chunks:
+                    emit_terminal_output(
+                        terminal_id,
+                        b''.join(stderr_chunks).decode(session.get('encoding') or 'utf-8', errors='replace'),
+                        sid=session.get('sid')
+                    )
+                    had_data = True
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                     break
                 if not had_data:
-                    time.sleep(0.03)
+                    time.sleep(TERMINAL_REMOTE_IDLE_SLEEP_SECONDS)
             if channel is not None:
                 try:
                     exit_code = channel.recv_exit_status()
@@ -4359,8 +4608,8 @@ def stream_terminal_output(terminal_id):
     finally:
         with TERMINAL_TASKS_LOCK:
             TERMINAL_TASKS.pop(terminal_id, None)
-        emit_terminal_output(terminal_id, final_note, final=True, exit_code=exit_code, sid=sid)
-        emit_terminal_status(terminal_id, 'closed', sid=sid, extra={'exit_code': exit_code})
+        emit_terminal_output(terminal_id, final_note, final=True, exit_code=exit_code, sid=session.get('sid'))
+        emit_terminal_status(terminal_id, 'closed', extra={'exit_code': exit_code}, sid=session.get('sid'))
 
 def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None, sid=None):
     """Push runtime output to the requesting client only."""

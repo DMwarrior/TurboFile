@@ -2800,8 +2800,10 @@ def open_terminal():
         data = request.get_json(silent=True) or {}
         server_ip = str(data.get('server') or '').strip()
         client_sid = str(data.get('sid') or '').strip()
+        client_token = str(data.get('client_token') or '').strip()
         cwd = str(data.get('cwd') or '').strip()
         panel = str(data.get('panel') or '').strip()
+        profile = str(data.get('profile') or '').strip()
         rows = data.get('rows')
         cols = data.get('cols')
 
@@ -2811,6 +2813,11 @@ def open_terminal():
             return jsonify({'success': False, 'error': f'未知服务器: {server_ip}'})
         if not client_sid:
             return jsonify({'success': False, 'error': '终端连接缺少客户端会话标识'})
+        if not client_token:
+            return jsonify({'success': False, 'error': '终端连接缺少浏览器会话标识'})
+
+        if panel:
+            close_terminal_sessions_for_client_panel(client_token, panel)
 
         terminal_id, error = open_terminal_session(
             server_ip,
@@ -2818,7 +2825,9 @@ def open_terminal():
             rows,
             cols,
             sid=client_sid,
-            panel=panel
+            panel=panel,
+            client_token=client_token,
+            profile=profile
         )
         if not terminal_id:
             return jsonify({'success': False, 'error': error or '终端创建失败'})
@@ -2831,7 +2840,43 @@ def open_terminal():
             'host': server_cfg.get('host') or server_ip,
             'name': server_cfg.get('name') or server_ip,
             'panel': panel,
-            'cwd': cwd or get_default_path(server_ip) or ''
+            'cwd': cwd or get_default_path(server_ip) or '',
+            'profile': normalize_terminal_profile(server_ip, profile)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@bp.route('/api/terminal/restore', methods=['POST'])
+def restore_terminal_sessions():
+    """Rebind detached terminal sessions to the current socket after page refresh/reconnect."""
+    try:
+        data = request.get_json(silent=True) or {}
+        client_sid = str(data.get('sid') or '').strip()
+        client_token = str(data.get('client_token') or '').strip()
+        if not client_sid:
+            return jsonify({'success': False, 'error': '缺少客户端 socket 会话标识'})
+        if not client_token:
+            return jsonify({'success': False, 'error': '缺少浏览器会话标识'})
+
+        client_ip = extract_client_ipv4_from_request(request)
+        sessions = []
+        for item in rebind_terminal_sessions(client_token, client_sid):
+            server_ip = str(item.get('server') or '').strip()
+            if not server_ip or server_ip not in SERVERS:
+                continue
+            if not is_server_visible_to_client(server_ip, client_ip):
+                continue
+            server_cfg = SERVERS.get(server_ip) or {}
+            sessions.append({
+                **item,
+                'name': server_cfg.get('name') or server_ip,
+                'host': server_cfg.get('host') or server_ip,
+                'profiles': get_terminal_profile_options(server_ip)
+            })
+
+        return jsonify({
+            'success': True,
+            'sessions': sessions
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -3184,7 +3229,7 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     try:
-        close_terminal_sessions_for_sid(request.sid)
+        mark_terminal_sessions_detached_for_sid(request.sid)
     except Exception:
         pass
     print('客户端已断开连接')
