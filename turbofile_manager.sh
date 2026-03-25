@@ -34,6 +34,18 @@ resolve_public_service_url() {
 SERVICE_URL_PUBLIC="$(resolve_public_service_url)"
 SERVICE_URL="${SERVICE_URL_PUBLIC}"
 
+curl_bypass_proxy() {
+    # Service self-checks should never depend on user-level proxy settings.
+    # Force curl to connect directly so localhost/LAN health checks remain stable
+    # even when a global proxy is enabled.
+    curl --noproxy "*" "$@"
+}
+
+service_http_ok() {
+    local url="$1"
+    curl_bypass_proxy -s -f "$url" > /dev/null 2>&1
+}
+
 show_status() {
     echo -e "${BLUE}📊 TurboFile服务状态${NC}"
     echo "=" * 40
@@ -60,7 +72,9 @@ show_status() {
     fi
     
     # Check web access.
-    if curl -s -f $SERVICE_URL > /dev/null; then
+    if service_http_ok "${SERVICE_URL_LOCAL}/"; then
+        echo -e "Web访问: ${GREEN}✅ 正常${NC}"
+    elif service_http_ok "${SERVICE_URL_PUBLIC}/"; then
         echo -e "Web访问: ${GREEN}✅ 正常${NC}"
     else
         echo -e "Web访问: ${RED}❌ 无法访问${NC}"
@@ -102,17 +116,17 @@ check_active_transfers() {
 
     # Prefer loopback; fall back to configured URL.
     api_base="${SERVICE_URL_LOCAL}"
-    if ! curl -s -f "${api_base}/" > /dev/null 2>&1; then
+    if ! service_http_ok "${api_base}/"; then
         api_base="${SERVICE_URL_PUBLIC}"
     fi
 
-    if ! curl -s -f "${api_base}/" > /dev/null 2>&1; then
+    if ! service_http_ok "${api_base}/"; then
         # Service is not running; nothing to check.
         return 0
     fi
 
     # Query active transfers via API.
-    response=$(curl -s "${api_base}/api/active_transfers" 2>/dev/null)
+    response=$(curl_bypass_proxy -s "${api_base}/api/active_transfers" 2>/dev/null)
     if [ -z "$response" ]; then
         echo -e "${YELLOW}⚠️  无法获取活跃传输信息（接口无响应），将按“未知状态”处理。${NC}"
         return 2

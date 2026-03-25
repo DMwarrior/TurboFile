@@ -11,6 +11,9 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-400.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-700.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm/xterm.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
@@ -70,7 +73,7 @@
         <div class="row flex-grow-1" style="min-height: 0;">
             <div class="resizable-container" style="height: 100%;">
                 <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
+                    <div id="sourcePanelHeader" class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-files text-info"></i> 左侧文件浏览
                         </h6>
@@ -114,12 +117,44 @@
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-grid-3x3-gap text-info" style="font-size: 0.9rem;"></i>
                             </button>
+                            <button type="button" class="btn btn-sm" title="打开终端"
+                                    onclick="toggleTerminalForPanel('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-terminal text-primary" style="font-size: 0.9rem;"></i>
+                            </button>
                         </div>
                     </div>
-                    <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
-                        <div class="text-center text-muted p-3">
-                            <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
-                            <p class="mb-0" style="font-size: 0.85rem;">请先选择服务器</p>
+                    <div class="panel-workspace">
+                        <div id="sourceFileBrowser" class="file-browser panel-browser" style="padding-bottom: 10px;">
+                            <div class="text-center text-muted p-3">
+                                <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
+                                <p class="mb-0" style="font-size: 0.85rem;">请先选择服务器</p>
+                            </div>
+                        </div>
+                        <div id="sourceTerminalDrawer" class="terminal-drawer" style="display: none;">
+                            <div class="terminal-drawer-resizer"
+                                 title="拖动调整终端高度，双击恢复默认高度"
+                                 onpointerdown="startTerminalResize(event, 'source')"
+                                 ondblclick="resetTerminalDrawerHeight('source')"></div>
+                            <div class="terminal-drawer-header">
+                                <div class="terminal-drawer-title">
+                                    <i class="bi bi-terminal"></i>
+                                    <span id="sourceTerminalLabel">左侧终端</span>
+                                    <span id="sourceTerminalStatus" class="terminal-status-pill">未连接</span>
+                                </div>
+                                <div class="terminal-drawer-actions">
+                                    <button type="button" id="sourceTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn" title="全屏" onclick="toggleTerminalMaximize('source')">
+                                        <i class="bi bi-arrows-fullscreen"></i>
+                                        <span>全屏</span>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="reopenTerminalForPanel('source')">重连</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('source')">清屏</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('source')">关闭</button>
+                                </div>
+                            </div>
+                            <div class="terminal-drawer-body">
+                                <div id="sourceTerminalHost" class="terminal-host"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -127,7 +162,7 @@
                 <div class="resizer" id="verticalResizer"></div>
 
                 <div class="resizable-panel" id="targetPanel" style="width: 50%; height: 100%;">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
+                    <div id="targetPanelHeader" class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-folder-check text-success"></i> 右侧文件浏览
                         </h6>
@@ -171,12 +206,44 @@
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-grid-3x3-gap text-success" style="font-size: 0.9rem;"></i>
                             </button>
+                            <button type="button" class="btn btn-sm" title="打开终端"
+                                    onclick="toggleTerminalForPanel('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-terminal text-success" style="font-size: 0.9rem;"></i>
+                            </button>
                         </div>
                     </div>
-                    <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
-                        <div class="text-center text-muted p-3">
-                            <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
-                            <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
+                    <div class="panel-workspace">
+                        <div id="targetFileBrowser" class="file-browser panel-browser" style="padding-bottom: 10px;">
+                            <div class="text-center text-muted p-3">
+                                <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
+                                <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
+                            </div>
+                        </div>
+                        <div id="targetTerminalDrawer" class="terminal-drawer" style="display: none;">
+                            <div class="terminal-drawer-resizer"
+                                 title="拖动调整终端高度，双击恢复默认高度"
+                                 onpointerdown="startTerminalResize(event, 'target')"
+                                 ondblclick="resetTerminalDrawerHeight('target')"></div>
+                            <div class="terminal-drawer-header">
+                                <div class="terminal-drawer-title">
+                                    <i class="bi bi-terminal"></i>
+                                    <span id="targetTerminalLabel">右侧终端</span>
+                                    <span id="targetTerminalStatus" class="terminal-status-pill">未连接</span>
+                                </div>
+                                <div class="terminal-drawer-actions">
+                                    <button type="button" id="targetTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn" title="全屏" onclick="toggleTerminalMaximize('target')">
+                                        <i class="bi bi-arrows-fullscreen"></i>
+                                        <span>全屏</span>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="reopenTerminalForPanel('target')">重连</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('target')">清屏</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('target')">关闭</button>
+                                </div>
+                            </div>
+                            <div class="terminal-drawer-body">
+                                <div id="targetTerminalHost" class="terminal-host"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -184,7 +251,7 @@
         </div>
 
         <!-- Transfer control panel -->
-        <div class="row flex-shrink-0">
+        <div id="transferControlRow" class="row flex-shrink-0">
             <div class="col-12">
                 <div class="card">
                     <div class="card-body" style="padding: 8px 12px;">
@@ -553,6 +620,9 @@
 	        }
 	      })();
 	    </script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-fit.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-webgl.js') }}"></script>
 	    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 	</body>
 	</html>

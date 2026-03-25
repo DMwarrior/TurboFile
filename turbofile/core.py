@@ -26,6 +26,9 @@ import uuid
 import signal
 import select
 import pty
+import fcntl
+import termios
+import struct
 from difflib import SequenceMatcher
 
 from .extensions import socketio
@@ -1100,6 +1103,8 @@ class SSHManager:
 ssh_manager = SSHManager()
 RUN_TASKS = {}
 RUN_TASKS_LOCK = threading.Lock()
+TERMINAL_TASKS = {}
+TERMINAL_TASKS_LOCK = threading.Lock()
 
 def get_ssh_command_with_port(server_ip, fast_ssh=True):
     """Build an SSH command string with custom port support."""
@@ -4006,6 +4011,356 @@ def _escape_pwsh_literal(path: str) -> str:
 
 def _human_timestamp():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+def _clamp_terminal_cols(cols):
+    try:
+        cols = int(cols)
+    except Exception:
+        cols = 120
+    return max(40, min(cols, 400))
+
+def _clamp_terminal_rows(rows):
+    try:
+        rows = int(rows)
+    except Exception:
+        rows = 30
+    return max(10, min(rows, 200))
+
+def _set_local_terminal_size(fd, rows, cols):
+    try:
+        if fd is None:
+            return
+        winsize = struct.pack('HHHH', _clamp_terminal_rows(rows), _clamp_terminal_cols(cols), 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+    except Exception:
+        pass
+
+def _resolve_local_terminal_cwd(cwd: str) -> str:
+    try:
+        candidate = os.path.abspath(os.path.expanduser(cwd or ''))
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    except Exception:
+        pass
+    return os.path.expanduser('~')
+
+def _build_linux_terminal_command(cwd: str) -> str:
+    target_dir = shlex.quote(cwd or '~')
+    return (
+        f'export TERM=xterm-256color COLORTERM=truecolor; '
+        f'cd {target_dir} 2>/dev/null || cd ~; '
+        f'exec ${{SHELL:-/bin/bash}} -il'
+    )
+
+def _build_windows_terminal_command(cwd: str) -> str:
+    target_dir = _escape_pwsh_literal(normalize_windows_path_for_cmd(cwd or ''))
+    return (
+        "powershell.exe -NoLogo -NoExit -NoProfile -ExecutionPolicy Bypass "
+        "-Command "
+        "\""
+        "$PSStyle.OutputRendering = 'PlainText' 2>$null; "
+        "[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); "
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        f"try {{ Set-Location -LiteralPath '{target_dir}' }} catch {{ Set-Location -LiteralPath $HOME }}; "
+        "Clear-Host"
+        "\""
+    )
+
+def emit_terminal_output(terminal_id, data, final=False, exit_code=None, sid=None):
+    """Push terminal output to the requesting client only."""
+    try:
+        payload = {
+            'terminal_id': terminal_id,
+            'data': data,
+            'final': bool(final),
+            'exit_code': exit_code
+        }
+        target_room = sid
+        if not target_room:
+            with TERMINAL_TASKS_LOCK:
+                task = TERMINAL_TASKS.get(terminal_id)
+                if task:
+                    target_room = task.get('sid')
+        if target_room:
+            socketio.emit('terminal_output', payload, room=target_room)
+        else:
+            socketio.emit('terminal_output', payload)
+    except Exception as e:
+        print(f"❌ 发送终端输出失败: {e}")
+
+def emit_terminal_status(terminal_id, status, message='', sid=None, extra=None):
+    """Push terminal status updates to the requesting client only."""
+    try:
+        payload = {
+            'terminal_id': terminal_id,
+            'status': status,
+            'message': message or ''
+        }
+        if isinstance(extra, dict):
+            payload.update(extra)
+        target_room = sid
+        if not target_room:
+            with TERMINAL_TASKS_LOCK:
+                task = TERMINAL_TASKS.get(terminal_id)
+                if task:
+                    target_room = task.get('sid')
+        if target_room:
+            socketio.emit('terminal_status', payload, room=target_room)
+        else:
+            socketio.emit('terminal_status', payload)
+    except Exception as e:
+        print(f"❌ 发送终端状态失败: {e}")
+
+def _get_terminal_task(terminal_id):
+    with TERMINAL_TASKS_LOCK:
+        return TERMINAL_TASKS.get(terminal_id)
+
+def _pop_terminal_task(terminal_id):
+    with TERMINAL_TASKS_LOCK:
+        return TERMINAL_TASKS.pop(terminal_id, None)
+
+def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None):
+    """Create a terminal session and start background streaming."""
+    terminal_id = f"term_{uuid.uuid4().hex}"
+    rows = _clamp_terminal_rows(rows)
+    cols = _clamp_terminal_cols(cols)
+    is_local = is_local_server(server_ip)
+    is_windows = is_windows_server(server_ip)
+    host = get_server_host(server_ip)
+
+    try:
+        if is_local:
+            work_dir = _resolve_local_terminal_cwd(cwd)
+            shell = os.environ.get('SHELL') or '/bin/bash'
+            master_fd, slave_fd = pty.openpty()
+            _set_local_terminal_size(slave_fd, rows, cols)
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            proc = subprocess.Popen(
+                [shell, '-il'],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=work_dir,
+                env=env,
+                preexec_fn=os.setsid,
+                close_fds=True
+            )
+            os.close(slave_fd)
+            session = {
+                'type': 'local',
+                'server': server_ip,
+                'host': host,
+                'sid': sid,
+                'panel': panel,
+                'cwd': work_dir,
+                'fd': master_fd,
+                'process': proc,
+                'encoding': 'utf-8',
+                'closing': False,
+            }
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return None, f'无法连接到服务器 {server_ip}'
+            transport = ssh.get_transport()
+            if not transport or not transport.is_active():
+                return None, f'服务器 {server_ip} 的 SSH 连接不可用'
+            channel = transport.open_session(timeout=5)
+            channel.get_pty(term='xterm-256color', width=cols, height=rows)
+            command = _build_windows_terminal_command(cwd) if is_windows else _build_linux_terminal_command(cwd)
+            channel.exec_command(command)
+            session = {
+                'type': 'remote',
+                'server': server_ip,
+                'host': host,
+                'sid': sid,
+                'panel': panel,
+                'cwd': cwd or get_default_path(server_ip),
+                'channel': channel,
+                'encoding': 'utf-8',
+                'closing': False,
+            }
+
+        with TERMINAL_TASKS_LOCK:
+            TERMINAL_TASKS[terminal_id] = session
+
+        socketio.start_background_task(stream_terminal_output, terminal_id)
+        emit_terminal_status(
+            terminal_id,
+            'opened',
+            sid=sid,
+            extra={
+                'server': server_ip,
+                'host': host,
+                'panel': panel,
+                'cwd': session.get('cwd') or ''
+            }
+        )
+        return terminal_id, None
+    except Exception as e:
+        return None, str(e)
+
+def resize_terminal_session(terminal_id, rows, cols):
+    """Resize a running terminal session."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+    rows = _clamp_terminal_rows(rows)
+    cols = _clamp_terminal_cols(cols)
+    try:
+        if session['type'] == 'local':
+            _set_local_terminal_size(session.get('fd'), rows, cols)
+        else:
+            channel = session.get('channel')
+            if channel:
+                channel.resize_pty(width=cols, height=rows)
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def send_terminal_input(terminal_id, data):
+    """Send raw terminal input bytes to a running session."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+    payload = data or ''
+    try:
+        if session['type'] == 'local':
+            fd = session.get('fd')
+            if fd is None:
+                return False, '本地终端不可写'
+            os.write(fd, payload.encode('utf-8', errors='ignore'))
+        else:
+            channel = session.get('channel')
+            if not channel:
+                return False, '远程终端不可写'
+            channel.send(payload)
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def close_terminal_session(terminal_id, emit_status=True):
+    """Close a running terminal session."""
+    session = _pop_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+
+    session['closing'] = True
+    try:
+        if session['type'] == 'local':
+            proc = session.get('process')
+            fd = session.get('fd')
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            if proc and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    time.sleep(0.2)
+                    if proc.poll() is None:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+        else:
+            channel = session.get('channel')
+            if channel:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+        if emit_status:
+            emit_terminal_status(terminal_id, 'closed', sid=session.get('sid'))
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def close_terminal_sessions_for_sid(sid):
+    """Close all terminal sessions owned by the given socket id."""
+    if not sid:
+        return
+    with TERMINAL_TASKS_LOCK:
+        terminal_ids = [terminal_id for terminal_id, task in TERMINAL_TASKS.items() if task.get('sid') == sid]
+    for terminal_id in terminal_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def stream_terminal_output(terminal_id):
+    """Background thread: stream raw terminal output."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return
+
+    sid = session.get('sid')
+    exit_code = 0
+    final_note = '\r\n[终端已断开]\r\n'
+
+    try:
+        if session['type'] == 'local':
+            proc = session.get('process')
+            fd = session.get('fd')
+            while True:
+                if fd is None:
+                    break
+                rlist, _, _ = select.select([fd], [], [], 0.1)
+                if fd in rlist:
+                    try:
+                        data = os.read(fd, 4096)
+                    except OSError:
+                        data = b''
+                    if data:
+                        emit_terminal_output(terminal_id, data.decode('utf-8', errors='replace'), sid=sid)
+                    elif proc is None or proc.poll() is not None:
+                        break
+                if proc is not None and proc.poll() is not None:
+                    try:
+                        while True:
+                            tail = os.read(fd, 4096)
+                            if not tail:
+                                break
+                            emit_terminal_output(terminal_id, tail.decode('utf-8', errors='replace'), sid=sid)
+                    except Exception:
+                        pass
+                    break
+            if proc is not None:
+                proc.wait(timeout=1)
+                exit_code = proc.returncode
+                final_note = f'\r\n[终端已结束，退出码 {exit_code}]\r\n'
+        else:
+            channel = session.get('channel')
+            while channel is not None:
+                had_data = False
+                if channel.recv_ready():
+                    data = channel.recv(4096)
+                    if data:
+                        emit_terminal_output(terminal_id, data.decode(session.get('encoding') or 'utf-8', errors='replace'), sid=sid)
+                        had_data = True
+                if channel.recv_stderr_ready():
+                    data = channel.recv_stderr(4096)
+                    if data:
+                        emit_terminal_output(terminal_id, data.decode(session.get('encoding') or 'utf-8', errors='replace'), sid=sid)
+                        had_data = True
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                if not had_data:
+                    time.sleep(0.03)
+            if channel is not None:
+                try:
+                    exit_code = channel.recv_exit_status()
+                    final_note = f'\r\n[终端已结束，退出码 {exit_code}]\r\n'
+                except Exception:
+                    final_note = '\r\n[终端已断开]\r\n'
+    except Exception as e:
+        final_note = f'\r\n[终端异常: {e}]\r\n'
+        exit_code = -1
+    finally:
+        with TERMINAL_TASKS_LOCK:
+            TERMINAL_TASKS.pop(terminal_id, None)
+        emit_terminal_output(terminal_id, final_note, final=True, exit_code=exit_code, sid=sid)
+        emit_terminal_status(terminal_id, 'closed', sid=sid, extra={'exit_code': exit_code})
 
 def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None, sid=None):
     """Push runtime output to the requesting client only."""

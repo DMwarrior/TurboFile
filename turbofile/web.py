@@ -2792,6 +2792,50 @@ def run_file():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+
+@bp.route('/api/terminal/open', methods=['POST'])
+def open_terminal():
+    """Open an interactive terminal bound to the selected server and current path."""
+    try:
+        data = request.get_json(silent=True) or {}
+        server_ip = str(data.get('server') or '').strip()
+        client_sid = str(data.get('sid') or '').strip()
+        cwd = str(data.get('cwd') or '').strip()
+        panel = str(data.get('panel') or '').strip()
+        rows = data.get('rows')
+        cols = data.get('cols')
+
+        if not server_ip:
+            return jsonify({'success': False, 'error': '缺少服务器参数'})
+        if server_ip not in SERVERS:
+            return jsonify({'success': False, 'error': f'未知服务器: {server_ip}'})
+        if not client_sid:
+            return jsonify({'success': False, 'error': '终端连接缺少客户端会话标识'})
+
+        terminal_id, error = open_terminal_session(
+            server_ip,
+            cwd or get_default_path(server_ip),
+            rows,
+            cols,
+            sid=client_sid,
+            panel=panel
+        )
+        if not terminal_id:
+            return jsonify({'success': False, 'error': error or '终端创建失败'})
+
+        server_cfg = SERVERS.get(server_ip) or {}
+        return jsonify({
+            'success': True,
+            'terminal_id': terminal_id,
+            'server': server_ip,
+            'host': server_cfg.get('host') or server_ip,
+            'name': server_cfg.get('name') or server_ip,
+            'panel': panel,
+            'cwd': cwd or get_default_path(server_ip) or ''
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 @bp.route('/api/compute_size', methods=['POST'])
 def compute_size():
     """Compute file/folder size."""
@@ -3083,6 +3127,19 @@ def send_run_input():
         return jsonify({'success': False, 'error': str(e)})
 
 
+def _get_socket_owned_terminal(data):
+    terminal_id = str((data or {}).get('terminal_id') or '').strip()
+    if not terminal_id:
+        return None, '缺少 terminal_id'
+    with TERMINAL_TASKS_LOCK:
+        task = TERMINAL_TASKS.get(terminal_id)
+    if not task:
+        return None, '终端会话不存在或已结束'
+    if task.get('sid') != request.sid:
+        return None, '无权访问该终端会话'
+    return task, ''
+
+
 @bp.route('/api/active_transfers', methods=['GET'])
 def get_active_transfers():
     """Return active transfer tasks."""
@@ -3126,4 +3183,69 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    try:
+        close_terminal_sessions_for_sid(request.sid)
+    except Exception:
+        pass
     print('客户端已断开连接')
+
+
+@socketio.on('terminal_input')
+def handle_terminal_input(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = send_terminal_input(str((data or {}).get('terminal_id') or ''), (data or {}).get('data', ''))
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端输入失败'
+        })
+
+
+@socketio.on('terminal_resize')
+def handle_terminal_resize(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = resize_terminal_session(
+        str((data or {}).get('terminal_id') or ''),
+        (data or {}).get('rows'),
+        (data or {}).get('cols')
+    )
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端缩放失败'
+        })
+
+
+@socketio.on('terminal_close')
+def handle_terminal_close(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = close_terminal_session(str((data or {}).get('terminal_id') or ''))
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端关闭失败'
+        })

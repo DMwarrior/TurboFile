@@ -1417,6 +1417,216 @@
         let imageZoom = 1;
         let imageOffsetX = 0;
         let imageOffsetY = 0;
+        const terminalPanelState = {
+            source: { panel: 'source', term: null, fitAddon: null, webglAddon: null, resizeObserver: null, dataDisposable: null, terminalId: '', server: '', cwd: '', open: false, ready: false, fitTimers: [], needsInitialStabilize: false, drawerHeight: 280, maximized: false, fontSignature: '' },
+            target: { panel: 'target', term: null, fitAddon: null, webglAddon: null, resizeObserver: null, dataDisposable: null, terminalId: '', server: '', cwd: '', open: false, ready: false, fitTimers: [], needsInitialStabilize: false, drawerHeight: 280, maximized: false, fontSignature: '' }
+        };
+        const TERMINAL_THEME = {
+            background: '#0d1117',
+            foreground: '#e6edf3',
+            cursor: '#58a6ff',
+            selectionBackground: 'rgba(88, 166, 255, 0.28)',
+            black: '#0d1117',
+            red: '#ff7b72',
+            green: '#3fb950',
+            yellow: '#d29922',
+            blue: '#58a6ff',
+            magenta: '#bc8cff',
+            cyan: '#39c5cf',
+            white: '#c9d1d9',
+            brightBlack: '#484f58',
+            brightRed: '#ffa198',
+            brightGreen: '#56d364',
+            brightYellow: '#e3b341',
+            brightBlue: '#79c0ff',
+            brightMagenta: '#d2a8ff',
+            brightCyan: '#56d4dd',
+            brightWhite: '#f0f6fc'
+        };
+        const TERMINAL_FONT_FAMILY_FALLBACK = "'TurboFile Terminal Ubuntu', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace";
+        const TERMINAL_RENDERER_STORAGE_KEY = 'turbofile-terminal-renderer';
+        const TERMINAL_FONT_STORAGE_KEY = 'turbofile-terminal-font';
+        const TERMINAL_FONT_SIZE_STORAGE_KEY = 'turbofile-terminal-font-size';
+        const TERMINAL_RENDERER_STANDARD = 'standard';
+        const TERMINAL_RENDERER_WEBGL = 'webgl';
+        const TERMINAL_FONT_SIZE_CHOICES = [12, 13, 14, 15, 16, 18];
+        const TERMINAL_FONT_PRESETS = {
+            consolas: {
+                id: 'consolas',
+                label: 'Consolas',
+                family: "Consolas, 'Courier New', monospace"
+            },
+            'cascadia-mono': {
+                id: 'cascadia-mono',
+                label: 'Cascadia Mono',
+                family: "'Cascadia Mono', Consolas, 'Courier New', monospace"
+            },
+            'cascadia-code': {
+                id: 'cascadia-code',
+                label: 'Cascadia Code',
+                family: "'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
+            },
+            ubuntu: {
+                id: 'ubuntu',
+                label: 'Ubuntu Mono',
+                family: TERMINAL_FONT_FAMILY_FALLBACK,
+                requiresWebFont: true
+            },
+            menlo: {
+                id: 'menlo',
+                label: 'Menlo',
+                family: "Menlo, Monaco, 'Courier New', monospace"
+            }
+        };
+        const DEFAULT_TERMINAL_DRAWER_HEIGHT = 280;
+        const MIN_TERMINAL_DRAWER_HEIGHT = 180;
+        const MIN_TERMINAL_BROWSER_HEIGHT = 120;
+        const TERMINAL_DRAWER_GAP = 8;
+        let terminalFontReadyPromise = null;
+        let terminalFontReadyKey = '';
+        let terminalWebglSupport = null;
+        let activeTerminalResize = null;
+
+        function readTerminalPreference(key) {
+            try {
+                return window.localStorage ? window.localStorage.getItem(key) : null;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function writeTerminalPreference(key, value) {
+            try {
+                if (window.localStorage) {
+                    window.localStorage.setItem(key, value);
+                }
+            } catch (_) {}
+        }
+
+        function getClientPlatformName() {
+            try {
+                const uaPlatform = (navigator.userAgentData && navigator.userAgentData.platform)
+                    ? String(navigator.userAgentData.platform)
+                    : '';
+                const legacyPlatform = navigator.platform ? String(navigator.platform) : '';
+                const source = (uaPlatform || legacyPlatform || '').toLowerCase();
+                if (source.includes('win')) return 'windows';
+                if (source.includes('mac')) return 'mac';
+                return 'linux';
+            } catch (_) {
+                return 'linux';
+            }
+        }
+
+        function getDefaultTerminalFontPresetId() {
+            const platform = getClientPlatformName();
+            if (platform === 'windows') return 'consolas';
+            if (platform === 'mac') return 'menlo';
+            return 'ubuntu';
+        }
+
+        function getTerminalFontPresetId() {
+            return getDefaultTerminalFontPresetId();
+        }
+
+        function getTerminalFontPreset() {
+            return TERMINAL_FONT_PRESETS[getTerminalFontPresetId()] || TERMINAL_FONT_PRESETS[getDefaultTerminalFontPresetId()];
+        }
+
+        function getDefaultTerminalFontSize() {
+            return getClientPlatformName() === 'windows' ? 14 : 13;
+        }
+
+        function getTerminalFontSize() {
+            return getDefaultTerminalFontSize();
+        }
+
+        function supportsTerminalWebgl() {
+            if (terminalWebglSupport !== null) return terminalWebglSupport;
+            if (!window.WebglAddon || typeof window.WebglAddon.WebglAddon !== 'function') {
+                terminalWebglSupport = false;
+                return terminalWebglSupport;
+            }
+            try {
+                const canvas = document.createElement('canvas');
+                terminalWebglSupport = Boolean(
+                    canvas.getContext('webgl2', { antialias: true }) ||
+                    canvas.getContext('webgl', { antialias: true })
+                );
+            } catch (_) {
+                terminalWebglSupport = false;
+            }
+            return terminalWebglSupport;
+        }
+
+        function getDefaultTerminalRendererMode() {
+            return getClientPlatformName() === 'windows' && supportsTerminalWebgl()
+                ? TERMINAL_RENDERER_WEBGL
+                : TERMINAL_RENDERER_STANDARD;
+        }
+
+        function getTerminalRendererMode() {
+            return getDefaultTerminalRendererMode();
+        }
+
+        function getVSCodeLikeTerminalFontFamily() {
+            return getTerminalFontPreset().family;
+        }
+
+        function getVSCodeLikeTerminalOptions() {
+            return {
+                fontFamily: getVSCodeLikeTerminalFontFamily(),
+                fontSize: getTerminalFontSize(),
+                lineHeight: 1,
+                letterSpacing: 0,
+                fontWeight: 'normal',
+                fontWeightBold: 'bold',
+                rescaleOverlappingGlyphs: true
+            };
+        }
+
+        function getTerminalFontSignature(options) {
+            return [
+                getTerminalRendererMode(),
+                options.fontFamily || '',
+                options.fontSize || '',
+                options.fontWeight || '',
+                options.fontWeightBold || '',
+                options.lineHeight || '',
+                options.letterSpacing || ''
+            ].join('|');
+        }
+
+        function waitForNextAnimationFrame() {
+            return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
+
+        function sleep(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        async function ensureTerminalFontReady() {
+            const fontPreset = getTerminalFontPreset();
+            const fontKey = fontPreset.id;
+            if (terminalFontReadyPromise && terminalFontReadyKey === fontKey) return terminalFontReadyPromise;
+            terminalFontReadyKey = fontKey;
+            terminalFontReadyPromise = (async () => {
+                if (!fontPreset.requiresWebFont) {
+                    return;
+                }
+                if (!document.fonts || typeof document.fonts.load !== 'function') {
+                    return;
+                }
+                const deadline = sleep(1200);
+                const loadFonts = Promise.all([
+                    document.fonts.load(`${getTerminalFontSize()}px "TurboFile Terminal Ubuntu"`),
+                    document.fonts.load(`700 ${getTerminalFontSize()}px "TurboFile Terminal Ubuntu"`),
+                    document.fonts.ready.catch(() => {})
+                ]).catch(() => {});
+                await Promise.race([loadFonts, deadline]);
+            })();
+            return terminalFontReadyPromise;
+        }
 
 
         function addLog(message, type = 'info') {
@@ -1569,6 +1779,665 @@
             setTimeout(() => {
                 if (item.parentNode) item.parentNode.removeChild(item);
             }, toastConfig.duration);
+        }
+
+        function getTerminalState(panel) {
+            return terminalPanelState[panel === 'target' ? 'target' : 'source'];
+        }
+
+        function getTerminalElements(panel) {
+            const key = panel === 'target' ? 'target' : 'source';
+            return {
+                panelRoot: document.getElementById(`${key}Panel`),
+                panelHeader: document.getElementById(`${key}PanelHeader`),
+                pathNav: document.getElementById(`${key}PathNav`),
+                workspace: document.getElementById(`${key}Panel`)?.querySelector('.panel-workspace') || null,
+                browser: document.getElementById(`${key}FileBrowser`),
+                drawer: document.getElementById(`${key}TerminalDrawer`),
+                resizeHandle: document.querySelector(`#${key}TerminalDrawer .terminal-drawer-resizer`),
+                host: document.getElementById(`${key}TerminalHost`),
+                label: document.getElementById(`${key}TerminalLabel`),
+                status: document.getElementById(`${key}TerminalStatus`),
+                maximizeButton: document.getElementById(`${key}TerminalMaximizeBtn`),
+                rendererSelect: document.getElementById(`${key}TerminalRendererSelect`),
+                fontSelect: document.getElementById(`${key}TerminalFontSelect`),
+                fontSizeSelect: document.getElementById(`${key}TerminalFontSizeSelect`)
+            };
+        }
+
+        function hasAnyOpenTerminal() {
+            return terminalPanelState.source.open || terminalPanelState.target.open;
+        }
+
+        function updateGlobalTerminalLayoutState() {
+            const hasOpenTerminal = hasAnyOpenTerminal();
+            document.body.classList.toggle('terminal-open', hasOpenTerminal);
+            window.requestAnimationFrame(() => refreshTerminalLayoutOnViewportChange());
+        }
+
+        function syncTerminalPreferenceControls() {
+            const rendererMode = getTerminalRendererMode();
+            const fontPresetId = getTerminalFontPresetId();
+            const fontSize = String(getTerminalFontSize());
+            const webglSupported = supportsTerminalWebgl();
+            ['source', 'target'].forEach((panel) => {
+                const els = getTerminalElements(panel);
+                if (els.rendererSelect) {
+                    const webglOption = els.rendererSelect.querySelector(`option[value="${TERMINAL_RENDERER_WEBGL}"]`);
+                    if (webglOption) {
+                        webglOption.disabled = !webglSupported;
+                    }
+                    els.rendererSelect.value = rendererMode;
+                    els.rendererSelect.title = webglSupported ? '切换终端渲染模式' : '当前浏览器不支持 WebGL 终端渲染';
+                }
+                if (els.fontSelect) {
+                    els.fontSelect.value = fontPresetId;
+                    els.fontSelect.title = '切换终端字体';
+                }
+                if (els.fontSizeSelect) {
+                    els.fontSizeSelect.value = fontSize;
+                    els.fontSizeSelect.title = '切换终端字号';
+                }
+            });
+        }
+
+        async function refreshOpenTerminalsForAppearanceChange(reason) {
+            let reopened = 0;
+            for (const panel of ['source', 'target']) {
+                const state = getTerminalState(panel);
+                if (state.open) {
+                    reopened += 1;
+                    await reopenTerminalForPanel(panel);
+                } else if (state.term) {
+                    disposeTerminalInstance(panel);
+                }
+            }
+            if (reopened > 0 && reason) {
+                addLogInfo(`🖥️ 终端已重连以应用${reason}`);
+                showToast(`终端已应用${reason}`, 'info');
+            }
+        }
+
+        async function handleTerminalRendererChange(value) {
+            const nextValue = value === TERMINAL_RENDERER_WEBGL ? TERMINAL_RENDERER_WEBGL : TERMINAL_RENDERER_STANDARD;
+            if (nextValue === TERMINAL_RENDERER_WEBGL && !supportsTerminalWebgl()) {
+                syncTerminalPreferenceControls();
+                showToast('⚠️ 当前浏览器不支持 WebGL 终端渲染', 'warning');
+                return;
+            }
+            writeTerminalPreference(TERMINAL_RENDERER_STORAGE_KEY, nextValue);
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`渲染模式: ${nextValue === TERMINAL_RENDERER_WEBGL ? 'WebGL' : '标准'}`);
+        }
+
+        async function handleTerminalFontChange(value) {
+            const nextValue = Object.prototype.hasOwnProperty.call(TERMINAL_FONT_PRESETS, value)
+                ? value
+                : getDefaultTerminalFontPresetId();
+            writeTerminalPreference(TERMINAL_FONT_STORAGE_KEY, nextValue);
+            terminalFontReadyPromise = null;
+            terminalFontReadyKey = '';
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`字体: ${TERMINAL_FONT_PRESETS[nextValue].label}`);
+        }
+
+        async function handleTerminalFontSizeChange(value) {
+            const nextValue = parseInt(value, 10);
+            const fontSize = TERMINAL_FONT_SIZE_CHOICES.includes(nextValue) ? nextValue : getDefaultTerminalFontSize();
+            writeTerminalPreference(TERMINAL_FONT_SIZE_STORAGE_KEY, String(fontSize));
+            terminalFontReadyPromise = null;
+            terminalFontReadyKey = '';
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`字号: ${fontSize}`);
+        }
+
+        function getPanelCurrentServer(panel) {
+            return panel === 'target'
+                ? ((document.getElementById('targetServer') || {}).value || '')
+                : ((document.getElementById('sourceServer') || {}).value || '');
+        }
+
+        function getPanelCurrentPath(panel) {
+            return panel === 'target' ? (currentTargetPath || '') : (currentSourcePath || '');
+        }
+
+        function getServerDisplayLabel(server) {
+            if (!server) return '';
+            const meta = SERVERS_DATA && SERVERS_DATA[server];
+            const name = (meta && meta.name) ? String(meta.name) : String(server);
+            const host = getServerHost(server);
+            return `${name} (${host})`;
+        }
+
+        function setTerminalStatus(panel, text, statusClass = '') {
+            const els = getTerminalElements(panel);
+            if (!els.status) return;
+            els.status.textContent = text || '未连接';
+            els.status.className = `terminal-status-pill${statusClass ? ` ${statusClass}` : ''}`;
+        }
+
+        function updateTerminalHeader(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.label) return;
+            const sideName = panel === 'target' ? '右侧终端' : '左侧终端';
+            const serverLabel = state.server ? getServerDisplayLabel(state.server) : '';
+            const cwd = state.cwd ? ` · ${state.cwd}` : '';
+            els.label.textContent = serverLabel ? `${sideName} · ${serverLabel}${cwd}` : sideName;
+        }
+
+        function getTerminalDrawerMaxHeight(panel) {
+            const els = getTerminalElements(panel);
+            if (!els.workspace) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            const availableHeight = Math.max(0, els.workspace.clientHeight || 0);
+            if (!availableHeight) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            return Math.max(
+                MIN_TERMINAL_DRAWER_HEIGHT,
+                availableHeight - MIN_TERMINAL_BROWSER_HEIGHT - TERMINAL_DRAWER_GAP
+            );
+        }
+
+        function clampTerminalDrawerHeight(panel, height) {
+            const numericHeight = Number(height);
+            if (!Number.isFinite(numericHeight)) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            const boundedMin = Math.max(MIN_TERMINAL_DRAWER_HEIGHT, numericHeight);
+            const boundedMax = getTerminalDrawerMaxHeight(panel);
+            return Math.min(boundedMin, boundedMax);
+        }
+
+        function updateTerminalMaximizeButton(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.maximizeButton) return;
+            els.maximizeButton.title = state.maximized ? '还原终端' : '全屏';
+            els.maximizeButton.innerHTML = state.maximized
+                ? '<i class="bi bi-fullscreen-exit"></i><span>还原</span>'
+                : '<i class="bi bi-arrows-fullscreen"></i><span>全屏</span>';
+        }
+
+        function applyTerminalDrawerLayout(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.drawer) return;
+
+            state.drawerHeight = clampTerminalDrawerHeight(panel, state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT);
+
+            if (els.panelRoot) {
+                els.panelRoot.classList.toggle('terminal-immersive', Boolean(state.maximized));
+            }
+            if (els.workspace) {
+                els.workspace.classList.toggle('terminal-maximized', Boolean(state.maximized));
+            }
+            if (els.resizeHandle) {
+                els.resizeHandle.classList.toggle('active', Boolean(activeTerminalResize && activeTerminalResize.panel === panel));
+            }
+
+            if (state.maximized) {
+                els.drawer.style.flex = '1 1 auto';
+                els.drawer.style.height = 'auto';
+            } else {
+                els.drawer.style.flex = `0 0 ${state.drawerHeight}px`;
+                els.drawer.style.height = `${state.drawerHeight}px`;
+            }
+
+            updateTerminalMaximizeButton(panel);
+
+            if (options.fit === 'direct') {
+                fitTerminalToContainer(panel, options.notifyServer !== false);
+            } else if (options.fit === 'schedule') {
+                scheduleTerminalStabilize(panel, options.notifyServer !== false);
+            }
+        }
+
+        function setTerminalDrawerHeight(panel, height, options = {}) {
+            const state = getTerminalState(panel);
+            state.drawerHeight = clampTerminalDrawerHeight(panel, height);
+            applyTerminalDrawerLayout(panel, options);
+        }
+
+        function ensureTerminalLibraries() {
+            if (typeof window.Terminal !== 'function' || !window.FitAddon || typeof window.FitAddon.FitAddon !== 'function') {
+                addLogError('❌ 终端资源未加载成功');
+                showToast('❌ 终端资源未加载', 'error');
+                return false;
+            }
+            return true;
+        }
+
+        function attachTerminalShortcutHandlers(panel, term) {
+            if (!term || typeof term.attachCustomKeyEventHandler !== 'function') return;
+            term.attachCustomKeyEventHandler((event) => {
+                const key = String(event.key || '').toLowerCase();
+                const hasCtrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
+                if (hasCtrlOrMeta && event.shiftKey && key === 'c') {
+                    const selection = typeof term.getSelection === 'function' ? term.getSelection() : '';
+                    if (selection) {
+                        copyTextToClipboard(selection).catch(() => {});
+                    }
+                    return false;
+                }
+                if (hasCtrlOrMeta && event.shiftKey && key === 'v') {
+                    if (navigator.clipboard && navigator.clipboard.readText) {
+                        navigator.clipboard.readText()
+                            .then((text) => {
+                                if (!text) return;
+                                const state = getTerminalState(panel);
+                                if (state.terminalId) {
+                                    socket.emit('terminal_input', { terminal_id: state.terminalId, data: text });
+                                }
+                            })
+                            .catch(() => {});
+                    }
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        function clearTerminalFitTimers(panel) {
+            const state = getTerminalState(panel);
+            const timers = Array.isArray(state.fitTimers) ? state.fitTimers : [];
+            while (timers.length) {
+                const timer = timers.pop();
+                try { clearTimeout(timer); } catch (_) {}
+            }
+        }
+
+        function stopTerminalResize() {
+            if (!activeTerminalResize) return;
+            const resizeState = activeTerminalResize;
+            activeTerminalResize = null;
+            if (resizeState.rafId) {
+                try { window.cancelAnimationFrame(resizeState.rafId); } catch (_) {}
+            }
+            window.removeEventListener('pointermove', handleTerminalResizePointerMove, true);
+            window.removeEventListener('pointerup', stopTerminalResize, true);
+            window.removeEventListener('pointercancel', stopTerminalResize, true);
+            document.body.classList.remove('terminal-resizing');
+            const els = getTerminalElements(resizeState.panel);
+            if (els.resizeHandle) {
+                els.resizeHandle.classList.remove('active');
+                if (typeof els.resizeHandle.releasePointerCapture === 'function' && resizeState.pointerId != null) {
+                    try { els.resizeHandle.releasePointerCapture(resizeState.pointerId); } catch (_) {}
+                }
+            }
+            if (resizeState.panel) {
+                applyTerminalDrawerLayout(resizeState.panel, { fit: 'schedule', notifyServer: true });
+                const state = getTerminalState(resizeState.panel);
+                if (state.term) state.term.focus();
+            }
+        }
+
+        function handleTerminalResizePointerMove(event) {
+            if (!activeTerminalResize) return;
+            if (activeTerminalResize.pointerId != null && event.pointerId !== activeTerminalResize.pointerId) return;
+            event.preventDefault();
+            const nextHeight = clampTerminalDrawerHeight(
+                activeTerminalResize.panel,
+                activeTerminalResize.startHeight + (activeTerminalResize.startY - event.clientY)
+            );
+            activeTerminalResize.pendingHeight = nextHeight;
+            if (activeTerminalResize.rafId) return;
+            activeTerminalResize.rafId = window.requestAnimationFrame(() => {
+                if (!activeTerminalResize) return;
+                const pendingHeight = activeTerminalResize.pendingHeight;
+                activeTerminalResize.rafId = 0;
+                setTerminalDrawerHeight(activeTerminalResize.panel, pendingHeight, { fit: 'direct', notifyServer: true });
+            });
+        }
+
+        function startTerminalResize(event, panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!state.open || !els.drawer || els.drawer.style.display === 'none') return;
+            if (event.button !== undefined && event.button !== 0) return;
+            stopTerminalResize();
+            event.preventDefault();
+
+            const resizeHandle = els.resizeHandle;
+            const currentHeight = els.drawer.getBoundingClientRect().height || state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            if (state.maximized) {
+                state.maximized = false;
+                state.drawerHeight = currentHeight;
+                applyTerminalDrawerLayout(panel, { fit: 'direct', notifyServer: false });
+            }
+            activeTerminalResize = {
+                panel: panel,
+                pointerId: typeof event.pointerId === 'number' ? event.pointerId : null,
+                startY: event.clientY,
+                startHeight: currentHeight,
+                pendingHeight: currentHeight,
+                rafId: 0
+            };
+
+            document.body.classList.add('terminal-resizing');
+            if (resizeHandle) {
+                resizeHandle.classList.add('active');
+                if (typeof resizeHandle.setPointerCapture === 'function' && activeTerminalResize.pointerId != null) {
+                    try { resizeHandle.setPointerCapture(activeTerminalResize.pointerId); } catch (_) {}
+                }
+            }
+            window.addEventListener('pointermove', handleTerminalResizePointerMove, true);
+            window.addEventListener('pointerup', stopTerminalResize, true);
+            window.addEventListener('pointercancel', stopTerminalResize, true);
+        }
+
+        function resetTerminalDrawerHeight(panel) {
+            const state = getTerminalState(panel);
+            if (state.maximized) {
+                state.maximized = false;
+            }
+            state.drawerHeight = DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+            if (state.term) state.term.focus();
+        }
+
+        function toggleTerminalMaximize(panel) {
+            const state = getTerminalState(panel);
+            if (!state.open) return;
+            state.maximized = !state.maximized;
+            applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+            if (state.term) {
+                window.requestAnimationFrame(() => state.term.focus());
+            }
+        }
+
+        function fitTerminalToContainer(panel, notifyServer = true) {
+            const state = getTerminalState(panel);
+            if (!state.term || !state.fitAddon || !state.open) return;
+            const els = getTerminalElements(panel);
+            if (!els.drawer || els.drawer.style.display === 'none') return;
+            try {
+                state.fitAddon.fit();
+                state.term.refresh(0, Math.max(0, state.term.rows - 1));
+                if (notifyServer && state.terminalId && state.term.cols > 0 && state.term.rows > 0) {
+                    socket.emit('terminal_resize', {
+                        terminal_id: state.terminalId,
+                        cols: state.term.cols,
+                        rows: state.term.rows
+                    });
+                }
+            } catch (_) {}
+        }
+
+        function scheduleTerminalStabilize(panel, notifyServer = true) {
+            const state = getTerminalState(panel);
+            if (!state.term || !state.fitAddon || !state.open) return;
+            clearTerminalFitTimers(panel);
+            [0, 80, 180, 360, 700].forEach((delay) => {
+                const timer = window.setTimeout(() => {
+                    fitTerminalToContainer(panel, notifyServer);
+                }, delay);
+                state.fitTimers.push(timer);
+            });
+        }
+
+        function disposeTerminalInstance(panel) {
+            const state = getTerminalState(panel);
+            clearTerminalFitTimers(panel);
+            if (state.resizeObserver) {
+                try { state.resizeObserver.disconnect(); } catch (_) {}
+                state.resizeObserver = null;
+            }
+            if (state.dataDisposable) {
+                try { state.dataDisposable.dispose(); } catch (_) {}
+                state.dataDisposable = null;
+            }
+            if (state.term) {
+                try { state.term.dispose(); } catch (_) {}
+                state.term = null;
+            }
+            state.fitAddon = null;
+            state.webglAddon = null;
+            state.fontSignature = '';
+            const els = getTerminalElements(panel);
+            if (els.host) {
+                els.host.innerHTML = '';
+            }
+        }
+
+        function ensureTerminalInstance(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.host) return null;
+            const terminalOptions = getVSCodeLikeTerminalOptions();
+            const fontSignature = getTerminalFontSignature(terminalOptions);
+            els.host.style.setProperty('--terminal-font-family', terminalOptions.fontFamily);
+            if (state.term && state.fontSignature === fontSignature) {
+                state.term.options = {
+                    ...state.term.options,
+                    ...terminalOptions
+                };
+                if (typeof state.term.clearTextureAtlas === 'function') {
+                    try { state.term.clearTextureAtlas(); } catch (_) {}
+                }
+                return state;
+            }
+            if (state.term) {
+                disposeTerminalInstance(panel);
+            }
+            if (!ensureTerminalLibraries()) return null;
+
+            const term = new window.Terminal({
+                cursorBlink: true,
+                convertEol: false,
+                scrollback: 5000,
+                theme: TERMINAL_THEME,
+                allowTransparency: false,
+                ...terminalOptions
+            });
+            const fitAddon = new window.FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            let webglAddon = null;
+            if (getTerminalRendererMode() === TERMINAL_RENDERER_WEBGL && supportsTerminalWebgl()) {
+                try {
+                    webglAddon = new window.WebglAddon.WebglAddon();
+                    term.loadAddon(webglAddon);
+                } catch (error) {
+                    console.warn('WebGL terminal renderer unavailable:', error);
+                }
+            }
+            term.open(els.host);
+            if (typeof term.clearTextureAtlas === 'function') {
+                try { term.clearTextureAtlas(); } catch (_) {}
+            }
+            attachTerminalShortcutHandlers(panel, term);
+            state.dataDisposable = term.onData((data) => {
+                if (!state.terminalId) return;
+                socket.emit('terminal_input', { terminal_id: state.terminalId, data: data || '' });
+            });
+
+            if (typeof ResizeObserver === 'function') {
+                state.resizeObserver = new ResizeObserver(() => {
+                    window.requestAnimationFrame(() => fitTerminalToContainer(panel, true));
+                });
+                state.resizeObserver.observe(els.host);
+            }
+
+            state.term = term;
+            state.fitAddon = fitAddon;
+            state.webglAddon = webglAddon;
+            state.needsInitialStabilize = true;
+            state.fontSignature = fontSignature;
+            updateTerminalHeader(panel);
+            setTerminalStatus(panel, '未连接');
+            return state;
+        }
+
+        async function openTerminalForPanel(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const server = getPanelCurrentServer(panel);
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器后再打开终端');
+                showToast('⚠️ 请先选择服务器', 'warning');
+                return false;
+            }
+            if (!socketId && socket && socket.id) {
+                socketId = socket.id;
+            }
+            if (!socketId) {
+                addLogWarning('⚠️ 终端连接尚未就绪，请稍后重试');
+                showToast('⚠️ 终端连接尚未就绪', 'warning');
+                return false;
+            }
+
+            const currentPath = getPanelCurrentPath(panel) || getDefaultPath(server) || '';
+            const els = getTerminalElements(panel);
+            if (els.drawer) {
+                els.drawer.style.display = 'flex';
+            }
+            applyTerminalDrawerLayout(panel, { fit: 'none' });
+            await waitForNextAnimationFrame();
+            await ensureTerminalFontReady();
+            await waitForNextAnimationFrame();
+
+            const instance = ensureTerminalInstance(panel);
+            if (!instance) {
+                if (els.drawer && !state.terminalId) {
+                    els.drawer.style.display = 'none';
+                }
+                return false;
+            }
+
+            if (state.terminalId && !options.forceReconnect && state.server === server) {
+                state.open = true;
+                updateGlobalTerminalLayoutState();
+                updateTerminalHeader(panel);
+                setTerminalStatus(panel, '已连接', 'connected');
+                applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+                window.requestAnimationFrame(() => {
+                    fitTerminalToContainer(panel, true);
+                    state.term.focus();
+                });
+                return true;
+            }
+
+            if (state.terminalId) {
+                await closeTerminalForPanel(panel, { preserveDrawer: true, silent: true });
+            }
+
+            state.server = server;
+            state.cwd = currentPath;
+            state.open = true;
+            state.ready = false;
+            state.needsInitialStabilize = true;
+            state.maximized = true;
+            updateGlobalTerminalLayoutState();
+            updateTerminalHeader(panel);
+            setTerminalStatus(panel, '连接中');
+            applyTerminalDrawerLayout(panel, { fit: 'none' });
+            state.term.reset();
+            state.term.write(`\x1b[1;34m正在连接 ${getServerDisplayLabel(server)}...\x1b[0m\r\n`);
+
+            window.requestAnimationFrame(() => {
+                scheduleTerminalStabilize(panel, false);
+                state.term.focus();
+            });
+
+            try {
+                const resp = await fetch('/api/terminal/open', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        cwd: currentPath,
+                        sid: socketId,
+                        panel: panel,
+                        cols: state.term.cols || 120,
+                        rows: state.term.rows || 30
+                    })
+                });
+                const result = await resp.json();
+                if (!result.success) {
+                    state.ready = false;
+                    setTerminalStatus(panel, '连接失败', 'error');
+                    state.term.write(`\x1b[1;31m终端创建失败: ${result.error || '未知错误'}\x1b[0m\r\n`);
+                    addLogError(`❌ 终端创建失败: ${result.error || '未知错误'}`);
+                    showToast('❌ 终端创建失败', 'error');
+                    return false;
+                }
+                state.terminalId = result.terminal_id || '';
+                state.server = server;
+                state.cwd = result.cwd || currentPath;
+                state.ready = true;
+                updateTerminalHeader(panel);
+                setTerminalStatus(panel, '已连接', 'connected');
+                window.requestAnimationFrame(() => {
+                    scheduleTerminalStabilize(panel, true);
+                    state.term.focus();
+                });
+                addLogSuccess(`🖥️ 已打开${panel === 'target' ? '右侧' : '左侧'}终端: ${getServerDisplayLabel(server)}`);
+                return true;
+            } catch (error) {
+                state.ready = false;
+                setTerminalStatus(panel, '连接失败', 'error');
+                state.term.write(`\x1b[1;31m终端创建异常: ${error.message}\x1b[0m\r\n`);
+                addLogError(`❌ 终端创建异常: ${error.message}`);
+                showToast('❌ 终端创建异常', 'error');
+                return false;
+            }
+        }
+
+        async function closeTerminalForPanel(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            const terminalId = state.terminalId;
+
+            state.ready = false;
+            state.terminalId = '';
+            if (terminalId) {
+                socket.emit('terminal_close', { terminal_id: terminalId });
+            }
+            clearTerminalFitTimers(panel);
+            stopTerminalResize();
+
+            if (!options.preserveDrawer) {
+                state.open = false;
+                state.maximized = false;
+                applyTerminalDrawerLayout(panel, { fit: 'none' });
+                if (els.drawer) els.drawer.style.display = 'none';
+            }
+            updateGlobalTerminalLayoutState();
+            setTerminalStatus(panel, '未连接', 'closed');
+            updateTerminalHeader(panel);
+            return true;
+        }
+
+        async function reopenTerminalForPanel(panel) {
+            return openTerminalForPanel(panel, { forceReconnect: true });
+        }
+
+        function toggleTerminalForPanel(panel) {
+            const state = getTerminalState(panel);
+            if (state.open) {
+                closeTerminalForPanel(panel);
+            } else {
+                openTerminalForPanel(panel);
+            }
+        }
+
+        function clearTerminalForPanel(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            state.term.clear();
+            state.term.focus();
+        }
+
+        function refreshTerminalLayoutOnViewportChange() {
+            ['source', 'target'].forEach((panel) => {
+                const state = getTerminalState(panel);
+                state.drawerHeight = clampTerminalDrawerHeight(panel, state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT);
+                applyTerminalDrawerLayout(panel, {
+                    fit: state.open ? 'schedule' : 'none',
+                    notifyServer: state.open
+                });
+            });
+        }
+
+        function handleTerminalServerChanged(panel) {
+            const state = getTerminalState(panel);
+            if (!state.open && !state.terminalId) return;
+            closeTerminalForPanel(panel, { silent: true });
         }
 
 
@@ -4369,6 +5238,58 @@
             if (isFinal && currentRunId === runId) {
                 currentRunId = null;
                 updateRunControls();
+            }
+        });
+
+        socket.on('terminal_output', function(data) {
+            const terminalId = data && data.terminal_id ? String(data.terminal_id) : '';
+            if (!terminalId) return;
+            const states = [terminalPanelState.source, terminalPanelState.target];
+            const state = states.find((item) => item && item.term && item.terminalId === terminalId);
+            if (!state || !state.term) return;
+            const chunk = data && typeof data.data === 'string' ? data.data : '';
+            if (chunk) {
+                state.term.write(chunk);
+                if (state.needsInitialStabilize) {
+                    state.needsInitialStabilize = false;
+                    window.requestAnimationFrame(() => scheduleTerminalStabilize(state.panel, true));
+                }
+            }
+            if (data && data.final === true) {
+                state.ready = false;
+                state.terminalId = '';
+                setTerminalStatus(state.panel, '已断开', 'closed');
+            }
+        });
+
+        socket.on('terminal_status', function(data) {
+            const terminalId = data && data.terminal_id ? String(data.terminal_id) : '';
+            const status = data && data.status ? String(data.status) : '';
+            let state = null;
+            if (status === 'opened' && data && data.panel) {
+                state = getTerminalState(data.panel);
+                if (state && state.term && (!state.terminalId || state.terminalId === terminalId)) {
+                    if (terminalId) state.terminalId = terminalId;
+                    if (data.server) state.server = data.server;
+                    if (data.cwd) state.cwd = data.cwd;
+                    updateTerminalHeader(state.panel);
+                    setTerminalStatus(state.panel, '已连接', 'connected');
+                }
+                return;
+            }
+            if (!terminalId) return;
+            state = [terminalPanelState.source, terminalPanelState.target]
+                .find((item) => item && item.term && item.terminalId === terminalId);
+            if (!state) return;
+            if (status === 'error') {
+                setTerminalStatus(state.panel, '异常', 'error');
+                if (data && data.message) {
+                    state.term.write(`\r\n\x1b[1;31m${data.message}\x1b[0m\r\n`);
+                }
+            } else if (status === 'closed') {
+                state.ready = false;
+                state.terminalId = '';
+                setTerminalStatus(state.panel, '已断开', 'closed');
             }
         });
 
@@ -7626,8 +8547,11 @@
 
 
             initializeResizers();
+            syncTerminalPreferenceControls();
+            refreshTerminalLayoutOnViewportChange();
             bindContextMenus();
             setupDragAndDrop();
+            window.addEventListener('resize', refreshTerminalLayoutOnViewportChange);
 
 
             const sourceContainer = document.getElementById('sourceFileBrowser');
@@ -7641,6 +8565,7 @@
 
 
             document.getElementById('sourceServer').addEventListener('change', async function() {
+                handleTerminalServerChanged('source');
                 if (this.value) {
                     const isWindows = isWindowsServer(this.value);
 
@@ -7676,6 +8601,7 @@
             });
 
             document.getElementById('targetServer').addEventListener('change', async function() {
+                handleTerminalServerChanged('target');
                 if (this.value) {
                     const isWindows = isWindowsServer(this.value);
 
