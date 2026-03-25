@@ -1519,7 +1519,6 @@
         const TERMINAL_CLIENT_TOKEN_STORAGE_KEY = 'turbofile-terminal-client-token';
         const TERMINAL_BROWSER_TOKEN_STORAGE_KEY = 'turbofile-terminal-browser-token';
         const TERMINAL_CLIENT_TOKEN_LOCK_PREFIX = 'turbofile-terminal-page-lock:';
-        const SERVER_SWITCH_RELOAD_STORAGE_KEY = 'turbofile-server-switch-reload';
         const TERMINAL_RENDERER_STORAGE_KEY = 'turbofile-terminal-renderer';
         const TERMINAL_FONT_STORAGE_KEY = 'turbofile-terminal-font';
         const TERMINAL_FONT_SIZE_STORAGE_KEY = 'turbofile-terminal-font-size';
@@ -1566,55 +1565,6 @@
         let terminalClientTokenPromise = null;
         let terminalClientTokenValue = '';
         let releaseTerminalClientTokenLock = null;
-
-        let suppressServerSwitchReload = false;
-
-        function readServerSwitchReloadState() {
-            try {
-                if (!window.sessionStorage) return null;
-                const raw = window.sessionStorage.getItem(SERVER_SWITCH_RELOAD_STORAGE_KEY);
-                if (!raw) return null;
-                const data = JSON.parse(raw);
-                if (!data || typeof data !== 'object') return null;
-                return {
-                    sourceServer: String(data.sourceServer || '').trim(),
-                    targetServer: String(data.targetServer || '').trim()
-                };
-            } catch (_) {
-                return null;
-            }
-        }
-
-        let pendingServerSwitchReloadState = readServerSwitchReloadState();
-
-        function clearServerSwitchReloadState() {
-            pendingServerSwitchReloadState = null;
-            try {
-                if (window.sessionStorage) {
-                    window.sessionStorage.removeItem(SERVER_SWITCH_RELOAD_STORAGE_KEY);
-                }
-            } catch (_) {}
-        }
-
-        function scheduleServerSwitchReload(panel, server) {
-            const normalizedPanel = panel === 'target' ? 'target' : 'source';
-            const sourceSelect = document.getElementById('sourceServer');
-            const targetSelect = document.getElementById('targetServer');
-            const payload = {
-                sourceServer: normalizedPanel === 'source'
-                    ? String(server || '').trim()
-                    : String(sourceSelect && sourceSelect.value ? sourceSelect.value : '').trim(),
-                targetServer: normalizedPanel === 'target'
-                    ? String(server || '').trim()
-                    : String(targetSelect && targetSelect.value ? targetSelect.value : '').trim()
-            };
-            try {
-                if (window.sessionStorage) {
-                    window.sessionStorage.setItem(SERVER_SWITCH_RELOAD_STORAGE_KEY, JSON.stringify(payload));
-                }
-            } catch (_) {}
-            window.location.reload();
-        }
 
         function readTerminalPreference(key) {
             try {
@@ -3274,14 +3224,6 @@
 
         function shouldRestoreTerminalSessionForPanel(panel, server) {
             const normalizedPanel = panel === 'target' ? 'target' : 'source';
-            const pendingServer = pendingServerSwitchReloadState
-                ? String(normalizedPanel === 'target'
-                    ? pendingServerSwitchReloadState.targetServer
-                    : pendingServerSwitchReloadState.sourceServer)
-                : '';
-            if (pendingServer && server && pendingServer !== server) {
-                return false;
-            }
             const selectEl = document.getElementById(`${normalizedPanel}Server`);
             const selectedServer = String(selectEl && selectEl.value ? selectEl.value : '').trim();
             if (selectedServer && server && selectedServer !== server) {
@@ -9576,10 +9518,6 @@
 
             document.getElementById('sourceServer').addEventListener('change', async function() {
                 const nextServer = this.value || '';
-                if (!suppressServerSwitchReload) {
-                    scheduleServerSwitchReload('source', nextServer);
-                    return;
-                }
                 const shouldReopenTerminal = await handleTerminalServerChanged('source');
                 terminalPanelState.source.server = nextServer;
                 terminalPanelState.source.profile = getDefaultTerminalProfile(nextServer);
@@ -9631,10 +9569,6 @@
 
             document.getElementById('targetServer').addEventListener('change', async function() {
                 const nextServer = this.value || '';
-                if (!suppressServerSwitchReload) {
-                    scheduleServerSwitchReload('target', nextServer);
-                    return;
-                }
                 const shouldReopenTerminal = await handleTerminalServerChanged('target');
                 terminalPanelState.target.server = nextServer;
                 terminalPanelState.target.profile = getDefaultTerminalProfile(nextServer);
@@ -9684,31 +9618,7 @@
                 }
             });
 
-                if (pendingServerSwitchReloadState) {
-                    const pendingState = pendingServerSwitchReloadState;
-                    suppressServerSwitchReload = true;
-                    try {
-                        const sourceSelect = document.getElementById('sourceServer');
-                        const targetSelect = document.getElementById('targetServer');
-                        if (sourceSelect && pendingState.sourceServer && sourceSelect.value !== pendingState.sourceServer) {
-                            sourceSelect.value = pendingState.sourceServer;
-                        }
-                        if (targetSelect && pendingState.targetServer && targetSelect.value !== pendingState.targetServer) {
-                            targetSelect.value = pendingState.targetServer;
-                        }
-                        if (sourceSelect && pendingState.sourceServer) {
-                            sourceSelect.dispatchEvent(new Event('change'));
-                        }
-                        if (targetSelect && pendingState.targetServer) {
-                            targetSelect.dispatchEvent(new Event('change'));
-                        }
-                    } finally {
-                        clearServerSwitchReloadState();
-                        suppressServerSwitchReload = false;
-                    }
-                } else {
-                    applyRememberedSelections();
-                }
+                applyRememberedSelections();
 
 
         });
