@@ -4229,6 +4229,7 @@ def _terminal_session_payload(terminal_id, task):
         'cwd': task.get('cwd') or '',
         'profile': task.get('profile') or '',
         'client_token': task.get('client_token') or '',
+        'browser_token': task.get('browser_token') or '',
         'detached': bool(task.get('sid') is None),
         'detached_seconds': detached_seconds,
         'opened_at': task.get('opened_at') or 0,
@@ -4295,6 +4296,48 @@ def rebind_terminal_sessions(client_token: str, sid: str):
     rebound.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
     return rebound
 
+def recover_detached_terminal_sessions_for_browser(browser_token: str, new_client_token: str, sid: str):
+    browser = str(browser_token or '').strip()
+    new_token = str(new_client_token or '').strip()
+    new_sid = str(sid or '').strip()
+    if not browser or not new_token or not new_sid:
+        return []
+
+    with TERMINAL_TASKS_LOCK:
+        detached_items = [
+            (terminal_id, task)
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('browser_token') == browser and task.get('sid') is None
+        ]
+        if not detached_items:
+            return []
+
+        latest_task = max(
+            detached_items,
+            key=lambda item: float(item[1].get('detached_at') or item[1].get('opened_at') or 0)
+        )[1]
+        source_client_token = str(latest_task.get('client_token') or '').strip()
+        if not source_client_token:
+            return []
+
+        rebound = []
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('browser_token') != browser:
+                continue
+            if task.get('sid') is not None:
+                continue
+            if str(task.get('client_token') or '').strip() != source_client_token:
+                continue
+            task['sid'] = new_sid
+            task['detached_at'] = None
+            task['client_token'] = new_token
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                rebound.append(payload)
+
+    rebound.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return rebound
+
 def _reap_detached_terminal_sessions():
     now = time.time()
     with TERMINAL_TASKS_LOCK:
@@ -4324,7 +4367,7 @@ def ensure_terminal_reaper_started():
         threading.Thread(target=_terminal_reaper_loop, daemon=True, name='turbofile-terminal-reaper').start()
         _TERMINAL_REAPER_STARTED = True
 
-def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, client_token=None, profile=None):
+def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, client_token=None, browser_token=None, profile=None):
     """Create a terminal session and start background streaming."""
     terminal_id = f"term_{uuid.uuid4().hex}"
     rows = _clamp_terminal_rows(rows)
@@ -4364,6 +4407,7 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, clie
                 'cwd': work_dir,
                 'profile': profile,
                 'client_token': str(client_token or '').strip(),
+                'browser_token': str(browser_token or '').strip(),
                 'opened_at': time.time(),
                 'detached_at': None,
                 'fd': master_fd,
@@ -4391,6 +4435,7 @@ def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, clie
                 'cwd': cwd or get_default_path(server_ip),
                 'profile': profile,
                 'client_token': str(client_token or '').strip(),
+                'browser_token': str(browser_token or '').strip(),
                 'opened_at': time.time(),
                 'detached_at': None,
                 'channel': channel,

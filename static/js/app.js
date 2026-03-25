@@ -1517,6 +1517,8 @@
         };
         const TERMINAL_FONT_FAMILY_FALLBACK = "'TurboFile Terminal Ubuntu', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace";
         const TERMINAL_CLIENT_TOKEN_STORAGE_KEY = 'turbofile-terminal-client-token';
+        const TERMINAL_BROWSER_TOKEN_STORAGE_KEY = 'turbofile-terminal-browser-token';
+        const TERMINAL_CLIENT_TOKEN_LOCK_PREFIX = 'turbofile-terminal-page-lock:';
         const SERVER_SWITCH_RELOAD_STORAGE_KEY = 'turbofile-server-switch-reload';
         const TERMINAL_RENDERER_STORAGE_KEY = 'turbofile-terminal-renderer';
         const TERMINAL_FONT_STORAGE_KEY = 'turbofile-terminal-font';
@@ -1561,6 +1563,9 @@
         let terminalWebglSupport = null;
         let activeTerminalResize = null;
         let terminalRestorePromise = null;
+        let terminalClientTokenPromise = null;
+        let terminalClientTokenValue = '';
+        let releaseTerminalClientTokenLock = null;
 
         let suppressServerSwitchReload = false;
 
@@ -1627,21 +1632,151 @@
             } catch (_) {}
         }
 
-        function getTerminalClientToken() {
+        function generateTerminalClientToken() {
             try {
-                if (!window.localStorage) {
-                    return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return `terminal-client-${window.crypto.randomUUID()}`;
                 }
-                let token = window.localStorage.getItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY);
-                if (!token) {
-                    token = `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
-                    window.localStorage.setItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY, token);
+            } catch (_) {}
+            return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+        }
+
+        function generateTerminalBrowserToken() {
+            try {
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return `terminal-browser-${window.crypto.randomUUID()}`;
                 }
-                return token;
+            } catch (_) {}
+            return `terminal-browser-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+        }
+
+        function getTerminalBrowserToken() {
+            let token = '';
+            try {
+                token = window.localStorage
+                    ? String(window.localStorage.getItem(TERMINAL_BROWSER_TOKEN_STORAGE_KEY) || '').trim()
+                    : '';
             } catch (_) {
-                return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                token = '';
+            }
+            if (token) {
+                return token;
+            }
+            token = generateTerminalBrowserToken();
+            try {
+                if (window.localStorage) {
+                    window.localStorage.setItem(TERMINAL_BROWSER_TOKEN_STORAGE_KEY, token);
+                }
+            } catch (_) {}
+            return token;
+        }
+
+        function sleep(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        async function tryAcquireTerminalClientTokenLock(token) {
+            if (!token) return false;
+            if (!navigator.locks || typeof navigator.locks.request !== 'function') {
+                return true;
+            }
+            return new Promise((resolve) => {
+                let settled = false;
+                navigator.locks.request(
+                    `${TERMINAL_CLIENT_TOKEN_LOCK_PREFIX}${token}`,
+                    { mode: 'exclusive', ifAvailable: true },
+                    async (lock) => {
+                        if (!lock) {
+                            if (!settled) {
+                                settled = true;
+                                resolve(false);
+                            }
+                            return;
+                        }
+                        if (!settled) {
+                            settled = true;
+                            resolve(true);
+                        }
+                        await new Promise((unlock) => {
+                            releaseTerminalClientTokenLock = () => {
+                                try {
+                                    unlock();
+                                } catch (_) {}
+                            };
+                        });
+                    }
+                ).catch(() => {
+                    if (!settled) {
+                        settled = true;
+                        resolve(false);
+                    }
+                });
+            });
+        }
+
+        async function ensureTerminalClientToken() {
+            if (terminalClientTokenValue) {
+                return terminalClientTokenValue;
+            }
+            if (terminalClientTokenPromise) {
+                return terminalClientTokenPromise;
+            }
+            terminalClientTokenPromise = (async () => {
+                let token = '';
+                try {
+                    token = window.sessionStorage
+                        ? String(window.sessionStorage.getItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY) || '').trim()
+                        : '';
+                } catch (_) {
+                    token = '';
+                }
+                if (!token) {
+                    token = generateTerminalClientToken();
+                }
+
+                let acquired = false;
+                for (let attempt = 0; attempt < 8; attempt += 1) {
+                    acquired = await tryAcquireTerminalClientTokenLock(token);
+                    if (acquired) break;
+                    await sleep(40);
+                }
+
+                if (!acquired) {
+                    token = generateTerminalClientToken();
+                    acquired = await tryAcquireTerminalClientTokenLock(token);
+                }
+
+                terminalClientTokenValue = token;
+                try {
+                    if (window.sessionStorage) {
+                        window.sessionStorage.setItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY, token);
+                    }
+                } catch (_) {}
+                try {
+                    if (window.localStorage) {
+                        window.localStorage.removeItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY);
+                    }
+                } catch (_) {}
+                return terminalClientTokenValue;
+            })();
+            try {
+                return await terminalClientTokenPromise;
+            } finally {
+                terminalClientTokenPromise = null;
             }
         }
+
+        function releaseTerminalPageTokenLock() {
+            if (typeof releaseTerminalClientTokenLock === 'function') {
+                try {
+                    releaseTerminalClientTokenLock();
+                } catch (_) {}
+            }
+            releaseTerminalClientTokenLock = null;
+        }
+
+        window.addEventListener('pagehide', releaseTerminalPageTokenLock);
+        window.addEventListener('beforeunload', releaseTerminalPageTokenLock);
 
         function getClientPlatformName() {
             try {
@@ -2927,6 +3062,7 @@
                 showToast('⚠️ 终端连接尚未就绪', 'warning');
                 return false;
             }
+            const clientToken = await ensureTerminalClientToken();
 
             const currentPath = String(options.cwd || getPanelCurrentPath(panel) || getDefaultPath(server) || '').trim();
             const desiredProfile = String(options.profile || getTerminalProfileForPanel(panel, server) || '').trim();
@@ -2998,7 +3134,8 @@
                         server: server,
                         cwd: currentPath,
                         sid: activeSocketId,
-                        client_token: getTerminalClientToken(),
+                        client_token: clientToken,
+                        browser_token: getTerminalBrowserToken(),
                         panel: panel,
                         profile: desiredProfile,
                         cols: state.term.cols || 120,
@@ -3213,12 +3350,14 @@
             if (terminalRestorePromise) return terminalRestorePromise;
             terminalRestorePromise = (async () => {
                 try {
+                    const clientToken = await ensureTerminalClientToken();
                     const resp = await fetch('/api/terminal/restore', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             sid: activeSocketId,
-                            client_token: getTerminalClientToken()
+                            client_token: clientToken,
+                            browser_token: getTerminalBrowserToken()
                         })
                     });
                     const result = await resp.json();

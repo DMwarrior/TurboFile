@@ -2,11 +2,14 @@ from flask import Blueprint, render_template, request, jsonify, Response, redire
 from flask_socketio import emit
 
 import codecs
+import posixpath
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
+import zipfile
 
 from .extensions import socketio
 from .core import *  # noqa: F403 - Keep legacy imports; refine to explicit later.
@@ -28,6 +31,147 @@ TEXT_EDITOR_CHUNK_READ_BYTES = 256 * 1024
 TEXT_EDITOR_CHUNK_READ_MIN_BYTES = 4 * 1024
 TEXT_EDITOR_CHUNK_READ_MAX_BYTES = 1024 * 1024
 TEXT_EDITOR_SAMPLE_BYTES = 4096
+_ZIP_MOJIBAKE_HINT_RE = re.compile(r'[╬╠╣╦╩╪╫╭╮╯╰├┤┬┴┼═║█▄▌▐■αβΓπΣσµτΦΘΩδ∞φε∩≈√]')
+
+
+def _looks_like_zip_mojibake(name: str) -> bool:
+    text = str(name or '')
+    if not text or text.isascii():
+        return False
+    if any('\u4e00' <= ch <= '\u9fff' for ch in text):
+        return False
+    return bool(_ZIP_MOJIBAKE_HINT_RE.search(text))
+
+
+def _decode_zip_member_name(raw_name: str) -> str:
+    name = str(raw_name or '')
+    if not _looks_like_zip_mojibake(name):
+        return name
+    try:
+        raw_bytes = name.encode('cp437')
+    except UnicodeEncodeError:
+        return name
+    for encoding in ('gb18030', 'gbk', 'utf-8'):
+        try:
+            candidate = raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if candidate and ('\ufffd' not in candidate):
+            return candidate
+    return name
+
+
+def _normalize_zip_member_path(raw_name: str) -> str:
+    name = _decode_zip_member_name(raw_name).replace('\\', '/').strip()
+    if not name:
+        return ''
+    normalized = posixpath.normpath(name)
+    if normalized in ('', '.'):
+        return ''
+    while normalized.startswith('./'):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _safe_local_extract_target(base_dir: str, member_name: str) -> str:
+    base_abs = os.path.abspath(base_dir)
+    target = os.path.abspath(os.path.join(base_abs, member_name.replace('/', os.sep)))
+    if os.path.commonpath([base_abs, target]) != base_abs:
+        raise ValueError(f'压缩包内路径非法: {member_name}')
+    return target
+
+
+def _safe_remote_extract_target(base_dir: str, member_name: str) -> str:
+    base_norm = posixpath.normpath(str(base_dir or ''))
+    target = posixpath.normpath(posixpath.join(base_norm, member_name))
+    if target != base_norm and not target.startswith(f'{base_norm.rstrip("/")}/'):
+        raise ValueError(f'压缩包内路径非法: {member_name}')
+    return target
+
+
+def _apply_zip_permissions_local(target_path: str, info: zipfile.ZipInfo):
+    try:
+        mode = (int(info.external_attr) >> 16) & 0o777
+        if mode:
+            os.chmod(target_path, mode)
+    except Exception:
+        pass
+
+
+def _sftp_mkdirs_posix(sftp, directory: str):
+    target = posixpath.normpath(str(directory or ''))
+    if not target or target == '.':
+        return
+    parts = [part for part in target.split('/') if part]
+    current = '/' if target.startswith('/') else ''
+    for part in parts:
+        if current in ('', '/'):
+            current = f'/{part}' if target.startswith('/') else part
+        else:
+            current = posixpath.join(current, part)
+        try:
+            sftp.stat(current)
+        except Exception:
+            sftp.mkdir(current)
+
+
+def _extract_zip_local_linux(file_path: str, base_dir: str):
+    with zipfile.ZipFile(file_path) as archive:
+        for info in archive.infolist():
+            member_name = _normalize_zip_member_path(info.filename)
+            if not member_name:
+                continue
+            if member_name.startswith('/') or member_name.startswith('../') or '/../' in f'/{member_name}':
+                raise ValueError(f'压缩包内路径非法: {member_name}')
+            target_path = _safe_local_extract_target(base_dir, member_name)
+            if info.is_dir():
+                os.makedirs(target_path, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with archive.open(info, 'r') as src, open(target_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            _apply_zip_permissions_local(target_path, info)
+
+
+def _extract_zip_remote_linux(server_ip: str, file_path: str, base_dir: str):
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError(f'无法连接到服务器 {server_ip}')
+    sftp = None
+    try:
+        sftp = ssh.open_sftp()
+        archive_file, _ = _sftp_open_with_fallback(sftp, file_path, 'rb', False)
+        with archive_file:
+            with zipfile.ZipFile(archive_file) as archive:
+                for info in archive.infolist():
+                    member_name = _normalize_zip_member_path(info.filename)
+                    if not member_name:
+                        continue
+                    if member_name.startswith('/') or member_name.startswith('../') or '/../' in f'/{member_name}':
+                        raise ValueError(f'压缩包内路径非法: {member_name}')
+                    target_path = _safe_remote_extract_target(base_dir, member_name)
+                    if info.is_dir():
+                        _sftp_mkdirs_posix(sftp, target_path)
+                        continue
+                    _sftp_mkdirs_posix(sftp, posixpath.dirname(target_path))
+                    with archive.open(info, 'r') as src, sftp.file(target_path, 'wb') as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                    try:
+                        mode = (int(info.external_attr) >> 16) & 0o777
+                        if mode:
+                            sftp.chmod(target_path, mode)
+                    except Exception:
+                        pass
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
 
 
 def _collect_requested_server_ips():
@@ -2801,6 +2945,7 @@ def open_terminal():
         server_ip = str(data.get('server') or '').strip()
         client_sid = str(data.get('sid') or '').strip()
         client_token = str(data.get('client_token') or '').strip()
+        browser_token = str(data.get('browser_token') or '').strip()
         cwd = str(data.get('cwd') or '').strip()
         panel = str(data.get('panel') or '').strip()
         profile = str(data.get('profile') or '').strip()
@@ -2827,6 +2972,7 @@ def open_terminal():
             sid=client_sid,
             panel=panel,
             client_token=client_token,
+            browser_token=browser_token,
             profile=profile
         )
         if not terminal_id:
@@ -2853,6 +2999,7 @@ def restore_terminal_sessions():
         data = request.get_json(silent=True) or {}
         client_sid = str(data.get('sid') or '').strip()
         client_token = str(data.get('client_token') or '').strip()
+        browser_token = str(data.get('browser_token') or '').strip()
         if not client_sid:
             return jsonify({'success': False, 'error': '缺少客户端 socket 会话标识'})
         if not client_token:
@@ -2860,7 +3007,11 @@ def restore_terminal_sessions():
 
         client_ip = extract_client_ipv4_from_request(request)
         sessions = []
-        for item in rebind_terminal_sessions(client_token, client_sid):
+        rebound_sessions = rebind_terminal_sessions(client_token, client_sid)
+        if not rebound_sessions and browser_token:
+            rebound_sessions = recover_detached_terminal_sessions_for_browser(browser_token, client_token, client_sid)
+
+        for item in rebound_sessions:
             server_ip = str(item.get('server') or '').strip()
             if not server_ip or server_ip not in SERVERS:
                 continue
@@ -3049,13 +3200,15 @@ def extract_archive():
             else:
                 try:
                     if name.endswith('.zip'):
-                        subprocess.check_output(['unzip', '-o', file_path, '-d', base_dir], stderr=subprocess.STDOUT)
+                        _extract_zip_local_linux(file_path, base_dir)
                     elif is_tar_like(name):
                         subprocess.check_output(['tar', '-xf', file_path, '-C', base_dir], stderr=subprocess.STDOUT)
                     else:
                         return jsonify({'success': False, 'error': '不支持的压缩格式'})
                 except subprocess.CalledProcessError as e:
                     return jsonify({'success': False, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else '解压失败'})
+                except Exception as e:
+                    return jsonify({'success': False, 'error': str(e) or '解压失败'})
         else:
             if is_windows:
                 safe_src = _escape_pwsh_literal(file_path)
@@ -3069,14 +3222,17 @@ def extract_archive():
                     return jsonify({'success': False, 'error': stderr or '解压失败'})
             else:
                 if name.endswith('.zip'):
-                    cmd = f"unzip -o {shlex.quote(file_path)} -d {shlex.quote(base_dir)}"
+                    try:
+                        _extract_zip_remote_linux(server_ip, file_path, base_dir)
+                    except Exception as e:
+                        return jsonify({'success': False, 'error': str(e) or '解压失败'})
                 elif is_tar_like(name):
                     cmd = f"tar -xf {shlex.quote(file_path)} -C {shlex.quote(base_dir)}"
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
+                    if exit_code != 0:
+                        return jsonify({'success': False, 'error': stderr or '解压失败'})
                 else:
                     return jsonify({'success': False, 'error': '不支持的压缩格式'})
-                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
-                if exit_code != 0:
-                    return jsonify({'success': False, 'error': stderr or '解压失败'})
 
         return jsonify({'success': True, 'message': '解压完成'})
     except Exception as e:
