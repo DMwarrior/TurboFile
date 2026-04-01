@@ -31,6 +31,7 @@ TEXT_EDITOR_CHUNK_READ_BYTES = 256 * 1024
 TEXT_EDITOR_CHUNK_READ_MIN_BYTES = 4 * 1024
 TEXT_EDITOR_CHUNK_READ_MAX_BYTES = 1024 * 1024
 TEXT_EDITOR_SAMPLE_BYTES = 4096
+TEXT_EDITOR_BINARY_PREVIEW_BYTES_PER_LINE = 16
 _ZIP_MOJIBAKE_HINT_RE = re.compile(r'[╬╠╣╦╩╪╫╭╮╯╰├┤┬┴┼═║█▄▌▐■αβΓπΣσµτΦΘΩδ∞φε∩≈√]')
 
 
@@ -917,6 +918,44 @@ def _decode_text_bytes_with_hint(data: bytes, encoding_hint: str = ''):
     return _decode_text_bytes(data)
 
 
+def _looks_like_binary_bytes(data: bytes) -> bool:
+    payload = bytes(data or b'')
+    if not payload:
+        return False
+    sample = payload[:TEXT_EDITOR_SAMPLE_BYTES]
+    if b'\x00' in sample:
+        return True
+    suspicious = 0
+    for value in sample:
+        if value in (9, 10, 13):
+            continue
+        if 32 <= value <= 126:
+            continue
+        if value >= 128:
+            continue
+        suspicious += 1
+    return suspicious / max(1, len(sample)) >= 0.30
+
+
+def _format_binary_preview(data: bytes, start_offset: int = 0) -> str:
+    payload = bytes(data or b'')
+    if not payload:
+        return '二进制文件为空。'
+
+    lines = [
+        '当前文件已按二进制模式打开，仅支持只读 HEX 预览。',
+        '左侧偏移量，右侧为 ASCII 对照。',
+        ''
+    ]
+    bytes_per_line = TEXT_EDITOR_BINARY_PREVIEW_BYTES_PER_LINE
+    for index in range(0, len(payload), bytes_per_line):
+        chunk = payload[index:index + bytes_per_line]
+        hex_part = ' '.join(f'{value:02X}' for value in chunk).ljust(bytes_per_line * 3 - 1)
+        ascii_part = ''.join(chr(value) if 32 <= value <= 126 else '.' for value in chunk)
+        lines.append(f'{start_offset + index:08X}  {hex_part}  {ascii_part}')
+    return '\n'.join(lines)
+
+
 def _stat_posix_file_via_ssh(ssh, path: str, timeout_sec: float = 12.0):
     """Return (size_bytes:int, mtime_unix:int) for a POSIX path via SSH."""
     if not ssh or not path:
@@ -1571,9 +1610,10 @@ def api_file_read():
         start = 0
         end = file_size
         encoding_hint = ''
+        sample = b''
+        binary_preview = False
 
-        # Sample the file head to preserve BOM-based encoding detection for partial reads.
-        if file_size > 0 and mode != 'auto':
+        if file_size > 0:
             sample = _read_file_range(
                 server_ip,
                 path,
@@ -1581,12 +1621,19 @@ def api_file_read():
                 length=min(TEXT_EDITOR_SAMPLE_BYTES, file_size),
                 timeout_sec=20.0
             )
-            _, encoding_hint = _decode_text_bytes(sample)
+            binary_preview = _looks_like_binary_bytes(sample)
+            if not binary_preview:
+                _, encoding_hint = _decode_text_bytes(sample)
 
         if mode == 'auto':
-            read_mode = 'full'
-            start = 0
-            end = file_size
+            if binary_preview or file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES:
+                read_mode = 'head'
+                start = 0
+                end = min(file_size, limit)
+            else:
+                read_mode = 'full'
+                start = 0
+                end = file_size
         elif mode == 'head':
             start = 0
             end = min(file_size, limit)
@@ -1611,9 +1658,15 @@ def api_file_read():
         length = None if read_mode == 'full' else max(0, end - start)
         data = _read_file_range(server_ip, path, offset=start, length=length, timeout_sec=60.0)
         actual_end = start + len(data or b'')
-        content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
+        binary_preview = binary_preview or _looks_like_binary_bytes(data)
+        if binary_preview:
+            content = _format_binary_preview(data, start_offset=start)
+            encoding = 'binary'
+        else:
+            content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
         read_only = bool(
-            read_mode != 'full'
+            binary_preview
+            or read_mode != 'full'
             or start > 0
             or actual_end < file_size
         )
@@ -1623,6 +1676,7 @@ def api_file_read():
             'success': True,
             'content': content,
             'encoding': encoding,
+            'binary': binary_preview,
             'mode': read_mode,
             'file_size': file_size,
             'mtime': mtime,
@@ -1633,7 +1687,7 @@ def api_file_read():
             'truncated': truncated,
             'can_load_prev': start > 0,
             'can_load_next': actual_end < file_size,
-            'editable': not read_only,
+            'editable': not read_only and not binary_preview,
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

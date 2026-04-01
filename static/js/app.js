@@ -62,6 +62,7 @@
             chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
             mode: 'full',
             encoding: 'utf-8',
+            binary: false,
             readOnly: false,
             truncated: false,
             followTail: false,
@@ -6790,9 +6791,6 @@
         function isOnnxFile(name) {
             return /\.onnx$/i.test(name || '');
         }
-        function isTextEditable(name) {
-            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp|csv|tsv|toml|tomld)$/i.test(name);
-        }
         function isArchiveFile(name) {
             return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i.test(name);
         }
@@ -7203,7 +7201,7 @@
                         title: name,
                         chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
                         resetSearch: true,
-                        placeholder: '正在加载文本内容...'
+                        placeholder: '正在加载文件内容...'
                     });
                 } catch (e) {
                     addLogError('打开编辑器失败: ' + (e.message || e));
@@ -7226,7 +7224,7 @@
                         previewImage(server, path, name, isSource);
                     } else if (isOnnxFile(name)) {
                         openOnnxInNetron(server, path, name);
-                    } else if (isTextEditable(name)) {
+                    } else {
                         editTextFile(server, path, name);
                     }
                 } catch (e) {
@@ -8105,7 +8103,7 @@
             }
 
             function getEditorFontSize() {
-                return 14;
+                return 17;
             }
 
             function getEditorLineHeight() {
@@ -8148,7 +8146,7 @@
             }
 
             function startEditorFollowTail() {
-                if (!editorViewState.readOnly || editorViewState.mode === 'full') {
+                if (!editorViewState.readOnly || editorViewState.mode === 'full' || editorViewState.binary) {
                     stopEditorFollowTail();
                     return;
                 }
@@ -8170,7 +8168,7 @@
             }
 
             function toggleEditorFollowTail() {
-                if (!editorViewState.readOnly || editorViewState.mode === 'full') return;
+                if (!editorViewState.readOnly || editorViewState.mode === 'full' || editorViewState.binary) return;
                 if (editorViewState.followTail) {
                     stopEditorFollowTail();
                 } else {
@@ -8200,7 +8198,12 @@
                     if (!editorViewState.path) {
                         textEl.textContent = '';
                     } else if (editorViewState.loading && !editorViewState.lastContent) {
-                        textEl.textContent = '正在加载文本内容...';
+                        textEl.textContent = '正在加载文件内容...';
+                    } else if (editorViewState.binary) {
+                        const startLabel = formatFileSize(editorViewState.readOffset || 0);
+                        const endLabel = formatFileSize(editorViewState.readEnd || 0);
+                        const totalLabel = formatFileSize(editorViewState.fileSize || 0);
+                        textEl.textContent = `二进制只读预览，当前范围 ${startLabel} - ${endLabel} / ${totalLabel}，显示格式 HEX`;
                     } else if (showChunkControls) {
                         const startLabel = formatFileSize(editorViewState.readOffset || 0);
                         const endLabel = formatFileSize(editorViewState.readEnd || 0);
@@ -8211,8 +8214,8 @@
                     }
                 }
 
-                if (saveBtn) saveBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading);
-                if (replaceToggleBtn) replaceToggleBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading);
+                if (saveBtn) saveBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading || editorViewState.binary);
+                if (replaceToggleBtn) replaceToggleBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading || editorViewState.binary);
                 if (findToggleBtn) findToggleBtn.disabled = !!(editorViewState.loading && !editorViewState.lastContent);
 
                 [headBtn, prevBtn, nextBtn, tailBtn, followBtn].forEach(btn => {
@@ -8225,7 +8228,7 @@
                 if (nextBtn) nextBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
                 if (tailBtn) tailBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
                 if (followBtn) {
-                    followBtn.disabled = !!editorViewState.loading;
+                    followBtn.disabled = !!(editorViewState.loading || editorViewState.binary);
                     followBtn.textContent = editorViewState.followTail ? '停止追尾' : '自动追尾';
                 }
             }
@@ -8385,8 +8388,14 @@
                     letterSpacing: 0,
                     minimap: { enabled: true },
                     scrollBeyondLastLine: false,
+                    scrollBeyondLastColumn: 6,
                     smoothScrolling: true,
-                    wordWrap: 'on',
+                    wordWrap: 'off',
+                    scrollbar: {
+                        horizontal: 'auto',
+                        vertical: 'auto',
+                        alwaysConsumeMouseWheel: false
+                    },
                     bracketPairColorization: { enabled: true },
                     guides: {
                         bracketPairs: true,
@@ -8435,6 +8444,7 @@
                 editorViewState.chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : editorViewState.chunkSize;
                 editorViewState.mode = options.mode || 'full';
                 editorViewState.encoding = options.encoding || 'utf-8';
+                editorViewState.binary = !!options.binary;
                 editorViewState.readOnly = !!options.readOnly;
                 editorViewState.truncated = !!options.truncated;
                 editorViewState.loading = !!options.loading;
@@ -8473,7 +8483,14 @@
                         allowVariableFonts: false,
                         disableLayerHinting: true,
                         disableMonospaceOptimizations: true,
-                        letterSpacing: 0
+                        letterSpacing: 0,
+                        wordWrap: 'off',
+                        scrollBeyondLastColumn: 6,
+                        scrollbar: {
+                            horizontal: 'auto',
+                            vertical: 'auto',
+                            alwaysConsumeMouseWheel: false
+                        }
                     });
                     if (monaco && monaco.editor && typeof monaco.editor.remeasureFonts === 'function') {
                         monaco.editor.remeasureFonts();
@@ -8520,6 +8537,7 @@
                     editorViewState.readEnd = 0;
                     editorViewState.mode = 'full';
                     editorViewState.encoding = 'utf-8';
+                    editorViewState.binary = false;
                     editorViewState.truncated = false;
                     editorViewState.lastContent = '';
                 }
@@ -8580,10 +8598,11 @@
                     if (editorViewState.requestToken !== requestToken) return;
 
                     const content = data.content || '';
+                    const binary = !!data.binary;
                     const readOnly = !!data.read_only;
                     editorViewState.loading = false;
 
-                    if (!readOnly && !data.truncated) {
+                    if (!readOnly && !data.truncated && !binary) {
                         previewCacheSet(server, path, 'text', content);
                     }
 
@@ -8594,6 +8613,7 @@
                         chunkSize: Number(data.chunk_size) || chunkSize,
                         mode: data.mode || 'full',
                         encoding: data.encoding || 'utf-8',
+                        binary,
                         readOnly,
                         truncated: !!data.truncated,
                         loading: false,
@@ -8621,6 +8641,7 @@
                 document.body.style.overflow = '';
                 stopEditorFollowTail();
                 editorViewState.loading = false;
+                editorViewState.binary = false;
                 editorViewState.requestToken = '';
                 editorViewState.renderToken = '';
                 if (monacoEditorState.editor) {
@@ -8630,6 +8651,12 @@
             }
 
             async function saveEditorContent() {
+                if (editorViewState.binary) {
+                    await showAlertDialog('当前文件以二进制 HEX 预览方式打开，不能直接保存。', {
+                        title: '二进制预览'
+                    });
+                    return;
+                }
                 if (editorViewState.readOnly) {
                     await showAlertDialog('当前是大文件只读预览模式，不能直接保存。请改为打开较小文件，或后续提供专门的日志编辑方案。', {
                         title: '只读预览'
