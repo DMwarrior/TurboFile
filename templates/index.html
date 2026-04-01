@@ -14,6 +14,7 @@
     <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-400.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-700.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm/xterm.css') }}">
+    <link rel="stylesheet" data-name="vs/editor/editor.main" href="{{ url_for('static', filename='vendor/monaco/min/vs/editor/editor.main.css') }}?v=monaco-0.47.0-fontfix-12">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
@@ -508,10 +509,10 @@
             <div class="editor-header">
                 <div class="editor-title modal-title">
                     <i class="bi bi-file-earmark-text"></i>
-                    <span>文本编辑器</span>
+                    <span id="editorTitleText">文本编辑器</span>
                 </div>
                 <div class="d-flex align-items-center gap-2">
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorTheme()">切换背景</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorTheme()">切换主题</button>
                     <button id="editorFindToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(false)">查找</button>
                     <button id="editorReplaceToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(true)">替换</button>
                     <button id="editorSaveBtn" type="button" class="btn btn-primary btn-sm" onclick="saveEditorContent()">保存</button>
@@ -519,13 +520,7 @@
                 </div>
             </div>
             <div class="editor-body">
-                <div id="editorGutter" class="editor-gutter">
-                    <div id="editorLineNumbers" class="editor-line-numbers"></div>
-                </div>
-                <div class="editor-text-wrapper">
-                    <pre id="editorHighlightLayer" class="editor-highlight-layer"></pre>
-                    <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
-                </div>
+                <div id="editorMonacoContainer" class="editor-monaco"></div>
             </div>
             <div id="editorStatusBar" class="editor-statusbar" style="display: none;">
                 <div id="editorStatusText" class="editor-status-text"></div>
@@ -536,15 +531,6 @@
                     <button id="editorTailBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('tail')">文件结尾</button>
                     <button id="editorFollowBtn" type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorFollowTail()">自动追尾</button>
                 </div>
-            </div>
-            <div id="findReplaceBar" class="find-replace-bar">
-                <input id="findInput" type="text" placeholder="查找" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-                <span id="findCount" class="text-muted" style="font-size: 12px;"></span>
-                <button type="button" onclick="findNext()">下一个</button>
-                <input id="replaceInput" type="text" placeholder="替换" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-                <button id="replaceBtn" type="button" onclick="replaceOne()">替换</button>
-                <button id="replaceAllBtn" type="button" onclick="replaceAll()">全部替换</button>
-                <button type="button" class="secondary" onclick="hideFindReplace()">关闭</button>
             </div>
         </div>
     </div>
@@ -640,6 +626,7 @@
         <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-fit.js') }}"></script>
         <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-webgl.js') }}"></script>
         <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-search.js') }}"></script>
-        <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/monaco/min/vs/loader.js') }}?v=monaco-0.47.0-fontfix-12"></script>
+        <script src="{{ url_for('static', filename='js/app.js') }}?v=monaco-0.47.0-fontfix-12"></script>
 	</body>
 	</html>

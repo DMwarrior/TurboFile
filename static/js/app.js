@@ -68,6 +68,7 @@
             followTimer: 0,
             loading: false,
             requestToken: '',
+            renderToken: '',
             lastContent: ''
         };
 
@@ -8086,11 +8087,48 @@
             }
 
             const EDITOR_THEME_KEY = 'turbofile_editor_theme';
+            const MONACO_BASE_PATH = '/static/vendor/monaco/min/vs';
+            const monacoEditorState = {
+                readyPromise: null,
+                monaco: null,
+                editor: null,
+                model: null,
+                suppressModelChange: false
+            };
+
+            function getEditorTitleElement() {
+                return document.getElementById('editorTitleText');
+            }
+
+            function getMonacoThemeName(mode) {
+                return mode === 'light' ? 'vs' : 'vs-dark';
+            }
+
+            function getEditorFontSize() {
+                return 14;
+            }
+
+            function getEditorLineHeight() {
+                return 20;
+            }
+
+            function getEditorFontFamily() {
+                return "Consolas, 'Courier New', monospace";
+            }
 
             function applyEditorTheme(mode) {
                 const modal = document.getElementById('editorModal');
                 if (!modal) return;
+                modal.style.setProperty('--editor-font', getEditorFontFamily());
+                modal.style.setProperty('--editor-font-size', `${getEditorFontSize()}px`);
+                modal.style.setProperty('--editor-line-height', `${getEditorLineHeight()}px`);
                 modal.classList.toggle('editor-theme-light', mode === 'light');
+                if (window.monaco && window.monaco.editor) {
+                    window.monaco.editor.setTheme(getMonacoThemeName(mode));
+                    if (typeof window.monaco.editor.remeasureFonts === 'function') {
+                        window.monaco.editor.remeasureFonts();
+                    }
+                }
             }
 
             function toggleEditorTheme() {
@@ -8192,18 +8230,201 @@
                 }
             }
 
+            function detectMonacoLanguage(path = '', title = '') {
+                const target = String(path || title || '').replace(/\\/g, '/');
+                const base = target.split('/').pop() || '';
+                const lower = base.toLowerCase();
+                if (lower === 'dockerfile') return 'dockerfile';
+                if (lower === '.gitignore' || lower === '.dockerignore') return 'plaintext';
+                const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '';
+                const languageMap = {
+                    txt: 'plaintext',
+                    log: 'plaintext',
+                    text: 'plaintext',
+                    sh: 'shell',
+                    bash: 'shell',
+                    zsh: 'shell',
+                    fish: 'shell',
+                    ps1: 'powershell',
+                    bat: 'bat',
+                    cmd: 'bat',
+                    py: 'python',
+                    pyi: 'python',
+                    json: 'json',
+                    jsonl: 'json',
+                    xml: 'xml',
+                    html: 'html',
+                    htm: 'html',
+                    css: 'css',
+                    scss: 'scss',
+                    less: 'less',
+                    js: 'javascript',
+                    cjs: 'javascript',
+                    mjs: 'javascript',
+                    jsx: 'javascript',
+                    ts: 'typescript',
+                    tsx: 'typescript',
+                    md: 'markdown',
+                    markdown: 'markdown',
+                    yaml: 'yaml',
+                    yml: 'yaml',
+                    ini: 'ini',
+                    cfg: 'ini',
+                    conf: 'ini',
+                    toml: 'ini',
+                    sql: 'sql',
+                    php: 'php',
+                    java: 'java',
+                    c: 'c',
+                    cc: 'cpp',
+                    cpp: 'cpp',
+                    cxx: 'cpp',
+                    h: 'cpp',
+                    hpp: 'cpp',
+                    go: 'go',
+                    rs: 'rust',
+                    lua: 'lua'
+                };
+                return languageMap[ext] || 'plaintext';
+            }
+
+            function buildEditorModelUri(server, path) {
+                const monaco = monacoEditorState.monaco || window.monaco;
+                if (!monaco) return null;
+                const normalizedPath = String(path || '').replace(/\\/g, '/');
+                const fullPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+                return monaco.Uri.from({
+                    scheme: 'file',
+                    authority: String(server || 'local'),
+                    path: fullPath
+                });
+            }
+
+            function disposeEditorModel() {
+                if (monacoEditorState.model) {
+                    try { monacoEditorState.model.dispose(); } catch (_) {}
+                    monacoEditorState.model = null;
+                }
+            }
+
+            function getEditorContent() {
+                if (monacoEditorState.model) return monacoEditorState.model.getValue();
+                return editorViewState.lastContent || '';
+            }
+
+            function revealEditorTail() {
+                if (!monacoEditorState.editor || !monacoEditorState.model) return;
+                const lastLine = Math.max(1, monacoEditorState.model.getLineCount());
+                monacoEditorState.editor.setPosition({
+                    lineNumber: lastLine,
+                    column: monacoEditorState.model.getLineMaxColumn(lastLine)
+                });
+                monacoEditorState.editor.revealLineNearTop(lastLine);
+            }
+
+            function resetEditorViewport() {
+                if (!monacoEditorState.editor) return;
+                monacoEditorState.editor.setScrollTop(0);
+                monacoEditorState.editor.setScrollLeft(0);
+                monacoEditorState.editor.setPosition({ lineNumber: 1, column: 1 });
+            }
+
+            function ensureMonacoEditorReady() {
+                if (monacoEditorState.readyPromise) {
+                    return monacoEditorState.readyPromise;
+                }
+
+                monacoEditorState.readyPromise = new Promise((resolve, reject) => {
+                    if (window.monaco && window.monaco.editor) {
+                        monacoEditorState.monaco = window.monaco;
+                        resolve(window.monaco);
+                        return;
+                    }
+                    if (typeof window.require !== 'function') {
+                        reject(new Error('Monaco loader 未加载'));
+                        return;
+                    }
+
+                    window.MonacoEnvironment = window.MonacoEnvironment || {};
+                    window.MonacoEnvironment.baseUrl = '/static/vendor/monaco/min/';
+                    window.require.config({ paths: { vs: MONACO_BASE_PATH } });
+                    window.require(['vs/editor/editor.main'], () => {
+                        monacoEditorState.monaco = window.monaco;
+                        resolve(window.monaco);
+                    }, (err) => {
+                        monacoEditorState.readyPromise = null;
+                        reject(err);
+                    });
+                });
+
+                return monacoEditorState.readyPromise;
+            }
+
+            async function ensureEditorInstance() {
+                const monaco = await ensureMonacoEditorReady();
+                if (monacoEditorState.editor) return monacoEditorState.editor;
+                const container = document.getElementById('editorMonacoContainer');
+                if (!container) throw new Error('编辑器容器不存在');
+
+                const themeMode = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                monaco.editor.setTheme(getMonacoThemeName(themeMode));
+                monacoEditorState.editor = monaco.editor.create(container, {
+                    value: '',
+                    language: 'plaintext',
+                    theme: getMonacoThemeName(themeMode),
+                    automaticLayout: true,
+                    readOnly: false,
+                    fontFamily: getEditorFontFamily(),
+                    fontSize: getEditorFontSize(),
+                    fontWeight: '400',
+                    lineHeight: getEditorLineHeight(),
+                    fontLigatures: false,
+                    allowVariableFonts: false,
+                    disableLayerHinting: true,
+                    disableMonospaceOptimizations: true,
+                    letterSpacing: 0,
+                    minimap: { enabled: true },
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    wordWrap: 'on',
+                    bracketPairColorization: { enabled: true },
+                    guides: {
+                        bracketPairs: true,
+                        indentation: true
+                    },
+                    renderWhitespace: 'selection',
+                    renderLineHighlight: 'line',
+                    selectionHighlight: true,
+                    occurrencesHighlight: 'singleFile',
+                    tabSize: 4,
+                    insertSpaces: true,
+                    padding: {
+                        top: 12,
+                        bottom: 12
+                    },
+                    stickyScroll: {
+                        enabled: true
+                    }
+                });
+                monacoEditorState.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+                    saveEditorContent();
+                });
+                monacoEditorState.editor.onDidChangeModelContent(() => {
+                    if (monacoEditorState.suppressModelChange) return;
+                    editorViewState.lastContent = getEditorContent();
+                });
+                return monacoEditorState.editor;
+            }
+
             function openEditorModal(server, path, title, content, options = {}) {
                 const modal = document.getElementById('editorModal');
+                if (!modal) return;
+                const titleEl = getEditorTitleElement();
                 const savedTheme = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                const renderToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                editorViewState.renderToken = renderToken;
                 applyEditorTheme(savedTheme);
-                modal.querySelector('.modal-title').textContent = title;
-                const ta = modal.querySelector('#editorTextarea');
-                ta.value = typeof content === 'string' ? content : '';
-                ta.dataset.server = server;
-                ta.dataset.path = path;
-                ta.dataset.encoding = options.encoding || 'utf-8';
-                ta.dataset.readOnly = options.readOnly ? 'true' : 'false';
-                ta.readOnly = !!options.readOnly;
+                if (titleEl) titleEl.textContent = title;
 
                 editorViewState.server = server;
                 editorViewState.path = path;
@@ -8217,33 +8438,61 @@
                 editorViewState.readOnly = !!options.readOnly;
                 editorViewState.truncated = !!options.truncated;
                 editorViewState.loading = !!options.loading;
-                editorViewState.lastContent = options.loading ? '' : ta.value;
-
-                if (options.resetSearch !== false) {
-                    const findInput = document.getElementById('findInput');
-                    const replaceInput = document.getElementById('replaceInput');
-                    if (findInput) findInput.value = '';
-                    if (replaceInput) replaceInput.value = '';
-                    const countEl = document.getElementById('findCount');
-                    if (countEl) countEl.textContent = '';
-                }
+                editorViewState.lastContent = options.loading ? '' : (typeof content === 'string' ? content : '');
 
                 if (!options.preserveFollow && (!editorViewState.readOnly || editorViewState.mode === 'full')) {
                     stopEditorFollowTail();
                 }
 
-                syncMinimap();
-                updateEditorLineNumbers();
-                renderFindHighlights();
-                syncEditorScroll();
                 updateEditorStatusBar();
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
-                if (options.hideFindBar !== false) {
-                    hideFindReplace();
-                }
-                startEditorScrollSync();
-                ta.focus();
+
+                ensureEditorInstance().then((editor) => {
+                    if (editorViewState.renderToken !== renderToken) return;
+                    const monaco = monacoEditorState.monaco || window.monaco;
+                    if (!monaco) throw new Error('Monaco 初始化失败');
+
+                    monacoEditorState.suppressModelChange = true;
+                    disposeEditorModel();
+                    const uri = buildEditorModelUri(server, path);
+                    const language = detectMonacoLanguage(path, title);
+                    monacoEditorState.model = monaco.editor.createModel(
+                        typeof content === 'string' ? content : '',
+                        language,
+                        uri || undefined
+                    );
+                    editor.setModel(monacoEditorState.model);
+                    editor.updateOptions({
+                        readOnly: !!options.readOnly,
+                        fontFamily: getEditorFontFamily(),
+                        fontSize: getEditorFontSize(),
+                        fontWeight: '400',
+                        lineHeight: getEditorLineHeight(),
+                        fontLigatures: false,
+                        allowVariableFonts: false,
+                        disableLayerHinting: true,
+                        disableMonospaceOptimizations: true,
+                        letterSpacing: 0
+                    });
+                    if (monaco && monaco.editor && typeof monaco.editor.remeasureFonts === 'function') {
+                        monaco.editor.remeasureFonts();
+                    }
+                    monacoEditorState.suppressModelChange = false;
+
+                    if (options.mode === 'tail' || (options.preserveFollow && editorViewState.followTail)) {
+                        revealEditorTail();
+                    } else {
+                        resetEditorViewport();
+                    }
+
+                    requestAnimationFrame(() => {
+                        try { editor.layout(); } catch (_) {}
+                        editor.focus();
+                    });
+                }).catch((e) => {
+                    addLogError('Monaco 初始化失败: ' + (e.message || e));
+                });
             }
 
             async function loadEditorFileChunk(action = 'auto', options = {}) {
@@ -8306,8 +8555,6 @@
                         readOnly: true,
                         truncated: editorViewState.truncated,
                         loading: true,
-                        resetSearch: options.resetSearch === true,
-                        hideFindBar: options.resetSearch === true,
                         preserveFollow: options.preserveFollow === true
                     });
                 }
@@ -8350,8 +8597,6 @@
                         readOnly,
                         truncated: !!data.truncated,
                         loading: false,
-                        resetSearch: options.resetSearch === true,
-                        hideFindBar: false,
                         preserveFollow: options.preserveFollow === true
                     });
 
@@ -8368,6 +8613,128 @@
                         closeEditorModal();
                     }
                 }
+            }
+
+            function closeEditorModal() {
+                const modal = document.getElementById('editorModal');
+                if (modal) modal.style.display = 'none';
+                document.body.style.overflow = '';
+                stopEditorFollowTail();
+                editorViewState.loading = false;
+                editorViewState.requestToken = '';
+                editorViewState.renderToken = '';
+                if (monacoEditorState.editor) {
+                    try { monacoEditorState.editor.setModel(null); } catch (_) {}
+                }
+                disposeEditorModel();
+            }
+
+            async function saveEditorContent() {
+                if (editorViewState.readOnly) {
+                    await showAlertDialog('当前是大文件只读预览模式，不能直接保存。请改为打开较小文件，或后续提供专门的日志编辑方案。', {
+                        title: '只读预览'
+                    });
+                    return;
+                }
+                const server = editorViewState.server;
+                const path = editorViewState.path;
+                const encoding = editorViewState.encoding || 'utf-8';
+                const content = getEditorContent();
+                try {
+                    const resp = await fetch('/api/file/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ server, path, content, encoding })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        addLogInfo('💾 已保存: ' + path);
+                        previewCacheSet(server, path, 'text', content);
+                        editorViewState.lastContent = content;
+                        showToast('✅ 已保存', 'success');
+                    } else {
+                        addLogError('保存失败: ' + (data.error || '未知错误'));
+                    }
+                } catch (e) {
+                    addLogError('保存失败: ' + (e.message || e));
+                }
+            }
+
+            function showFindReplace(withReplace) {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                editor.focus();
+                const actionId = withReplace && !editorViewState.readOnly
+                    ? 'editor.action.startFindReplaceAction'
+                    : 'actions.find';
+                const action = editor.getAction(actionId);
+                if (action) action.run();
+            }
+
+            function hideFindReplace() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                try {
+                    editor.trigger('keyboard', 'closeFindWidget', null);
+                } catch (_) {}
+            }
+
+            function findNext() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                const action = editor.getAction('editor.action.nextMatchFindAction');
+                if (action) action.run();
+            }
+
+            function findPrev() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                const action = editor.getAction('editor.action.previousMatchFindAction');
+                if (action) action.run();
+            }
+
+            function replaceOne() {
+                showFindReplace(true);
+            }
+
+            function replaceAll() {
+                showFindReplace(true);
+            }
+
+            function syncMinimap() {}
+            function syncMinimapHighlight() {}
+            function startEditorScrollSync() {}
+            function stopEditorScrollSync() {}
+            function updateEditorLineNumbers() {}
+            function syncEditorScroll() {}
+            function renderFindHighlights() {}
+
+            let previewEditorBindingsReady = false;
+            function bindPreviewAndEditorEvents() {
+                if (previewEditorBindingsReady) return;
+                previewEditorBindingsReady = true;
+
+                const btn = document.getElementById('imagePreviewCloseBtn');
+                if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
+                const prevBtn = document.getElementById('imagePrevBtn');
+                const nextBtn = document.getElementById('imageNextBtn');
+                if (prevBtn) prevBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index - 1));
+                if (nextBtn) nextBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index + 1));
+
+                document.addEventListener('keydown', (e) => {
+                    const modalVisible = document.getElementById('editorModal') && document.getElementById('editorModal').style.display !== 'none';
+                    if (!modalVisible) return;
+                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                        e.preventDefault();
+                        saveEditorContent();
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+                        e.preventDefault();
+                        showFindReplace(false);
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+                        e.preventDefault();
+                        showFindReplace(true);
+                    }
+                });
             }
 
             function compareFromSelection() {
@@ -8540,320 +8907,6 @@
                     modal.addEventListener(ev, () => { dragging = false; });
                 });
             }
-            function closeEditorModal() {
-                const modal = document.getElementById('editorModal');
-                if (modal) modal.style.display = 'none';
-                document.body.style.overflow = '';
-                stopEditorScrollSync();
-                stopEditorFollowTail();
-                editorViewState.loading = false;
-                editorViewState.requestToken = '';
-            }
-            async function saveEditorContent() {
-                const ta = document.querySelector('#editorModal textarea');
-                if (!ta) return;
-                if (ta.dataset.readOnly === 'true' || ta.readOnly) {
-                    await showAlertDialog('当前是大文件只读预览模式，不能直接保存。请改为打开较小文件，或后续提供专门的日志编辑方案。', {
-                        title: '只读预览'
-                    });
-                    return;
-                }
-                const server = ta.dataset.server;
-                const path = ta.dataset.path;
-                const encoding = ta.dataset.encoding || 'utf-8';
-                const content = ta.value;
-                try {
-                    const resp = await fetch('/api/file/save', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ server, path, content, encoding })
-                    });
-                    const data = await resp.json();
-                    if (data.success) {
-                        addLogInfo('💾 已保存: ' + path);
-                        previewCacheSet(server, path, 'text', content);
-                        editorViewState.lastContent = content;
-                        showToast('✅ 已保存', 'success');
-                    } else {
-                        addLogError('保存失败: ' + (data.error || '未知错误'));
-                    }
-                } catch (e) {
-                    addLogError('保存失败: ' + (e.message || e));
-                }
-            }
-
-            let previewEditorBindingsReady = false;
-            function bindPreviewAndEditorEvents() {
-                if (previewEditorBindingsReady) return;
-                previewEditorBindingsReady = true;
-
-                const btn = document.getElementById('imagePreviewCloseBtn');
-                if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
-                const prevBtn = document.getElementById('imagePrevBtn');
-                const nextBtn = document.getElementById('imageNextBtn');
-                if (prevBtn) prevBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index - 1));
-                if (nextBtn) nextBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index + 1));
-
-                const ta = document.getElementById('editorTextarea');
-                if (ta) {
-                    ta.addEventListener('input', () => {
-                        editorViewState.lastContent = ta.value || '';
-                        updateEditorLineNumbers();
-                        renderFindHighlights();
-                    });
-                    ta.addEventListener('scroll', syncEditorScroll);
-                    ta.addEventListener('wheel', () => {
-                        requestAnimationFrame(syncEditorScroll);
-                    }, { passive: true });
-                    const gutter = document.getElementById('editorGutter');
-                    if (gutter) {
-                        gutter.addEventListener('wheel', (e) => {
-                            ta.scrollTop += e.deltaY;
-                            syncEditorScroll();
-                            e.preventDefault();
-                        }, { passive: false });
-                    }
-                    updateEditorLineNumbers();
-                    renderFindHighlights();
-                    syncEditorScroll();
-                }
-
-                document.addEventListener('keydown', (e) => {
-                    const modalVisible = document.getElementById('editorModal') && document.getElementById('editorModal').style.display !== 'none';
-                    if (!modalVisible) return;
-                    if (document.activeElement && document.activeElement.id === 'editorTextarea' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-                        return;
-                    }
-                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-                        e.preventDefault();
-                        showFindReplace(false);
-                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
-                        e.preventDefault();
-                        showFindReplace(true);
-                    }
-                });
-            }
-
-            function syncMinimap() {
-
-            }
-
-            function syncMinimapHighlight() {
-
-            }
-
-            let editorScrollRaf = null;
-
-            function startEditorScrollSync() {
-                if (editorScrollRaf) return;
-                const tick = () => {
-                    const modal = document.getElementById('editorModal');
-                    if (!modal || modal.style.display === 'none') {
-                        editorScrollRaf = null;
-                        return;
-                    }
-                    syncEditorScroll();
-                    editorScrollRaf = requestAnimationFrame(tick);
-                };
-                editorScrollRaf = requestAnimationFrame(tick);
-            }
-
-            function stopEditorScrollSync() {
-                if (!editorScrollRaf) return;
-                cancelAnimationFrame(editorScrollRaf);
-                editorScrollRaf = null;
-            }
-
-            function countTextLines(text) {
-                let count = 1;
-                for (let i = 0; i < text.length; i++) {
-                    if (text.charCodeAt(i) === 10) count++;
-                }
-                return count;
-            }
-
-            function countTextOccurrences(text, query) {
-                if (!text || !query) return 0;
-                let count = 0;
-                let idx = 0;
-                while (idx <= text.length) {
-                    const found = text.indexOf(query, idx);
-                    if (found === -1) break;
-                    count++;
-                    idx = found + Math.max(query.length, 1);
-                }
-                return count;
-            }
-
-            function updateEditorLineNumbers() {
-                const ta = document.getElementById('editorTextarea');
-                const lineBox = document.getElementById('editorLineNumbers');
-                if (!ta || !lineBox) return;
-                const text = ta.value || '';
-                const count = Math.max(1, countTextLines(text));
-                let nums = '';
-                for (let i = 1; i <= count; i++) {
-                    nums += i + (i === count ? '' : '\n');
-                }
-                lineBox.textContent = nums;
-            }
-
-            function syncEditorScroll() {
-                const ta = document.getElementById('editorTextarea');
-                const layer = document.getElementById('editorHighlightLayer');
-                const lineBox = document.getElementById('editorLineNumbers');
-                if (!ta) return;
-                if (layer) {
-                    layer.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
-                }
-                if (lineBox) {
-                    lineBox.style.marginTop = `${-ta.scrollTop}px`;
-                }
-            }
-
-            function renderFindHighlights() {
-                const layer = document.getElementById('editorHighlightLayer');
-                const ta = document.getElementById('editorTextarea');
-                const findInput = document.getElementById('findInput');
-                const query = findInput ? findInput.value : '';
-                const countEl = document.getElementById('findCount');
-                if (!layer || !ta) return;
-                const text = ta.value || '';
-                layer.textContent = '';
-                if (!query) {
-                    if (countEl) countEl.textContent = '';
-                    syncEditorScroll();
-                    return;
-                }
-                const matchCount = countTextOccurrences(text, query);
-                if (countEl) {
-                    countEl.textContent = matchCount > 0 ? `${matchCount} 条` : '0 条';
-                }
-                syncEditorScroll();
-            }
-
-
-            function showFindReplace(withReplace) {
-                const bar = document.getElementById('findReplaceBar');
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                const replaceBtn = document.getElementById('replaceBtn');
-                const replaceAllBtn = document.getElementById('replaceAllBtn');
-                const ta = document.getElementById('editorTextarea');
-                if (!bar) return;
-                if (withReplace && ta && ta.readOnly) {
-                    withReplace = false;
-                }
-                bar.style.display = 'flex';
-                if (withReplace) {
-                    replaceInput.style.display = 'inline-block';
-                    replaceBtn.style.display = 'inline-block';
-                    replaceAllBtn.style.display = 'inline-block';
-                } else {
-                    replaceInput.style.display = 'none';
-                    replaceBtn.style.display = 'none';
-                    replaceAllBtn.style.display = 'none';
-                }
-                setTimeout(() => findInput && findInput.focus(), 0);
-            }
-
-            function hideFindReplace() {
-                const bar = document.getElementById('findReplaceBar');
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                const countEl = document.getElementById('findCount');
-                if (findInput) findInput.value = '';
-                if (replaceInput) replaceInput.value = '';
-                if (countEl) countEl.textContent = '';
-                renderFindHighlights();
-                if (bar) bar.style.display = 'none';
-            }
-
-            function findNext() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                renderFindHighlights();
-                if (!ta || !query) return;
-                const start = ta.selectionEnd;
-                const idx = ta.value.indexOf(query, start);
-                if (idx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(idx, idx + query.length);
-                    scrollToSelectionCenter();
-                    return;
-                }
-
-                const wrapIdx = ta.value.indexOf(query, 0);
-                if (wrapIdx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
-                    scrollToSelectionCenter();
-                }
-            }
-
-            function findPrev() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                renderFindHighlights();
-                if (!ta || !query) return;
-                const start = ta.selectionStart - 1;
-                const idx = ta.value.lastIndexOf(query, start);
-                if (idx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(idx, idx + query.length);
-                    scrollToSelectionCenter();
-                    return;
-                }
-                const wrapIdx = ta.value.lastIndexOf(query);
-                if (wrapIdx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
-                    scrollToSelectionCenter();
-                }
-            }
-
-            function scrollToSelectionCenter() {
-                const ta = document.getElementById('editorTextarea');
-                if (!ta) return;
-                const selStart = ta.selectionStart || 0;
-                const beforeText = ta.value.slice(0, selStart);
-                const lines = beforeText.split('\n');
-                const lineHeight = parseFloat(getComputedStyle(ta).lineHeight || '16');
-                const targetTop = (lines.length - 1) * lineHeight;
-                const centerOffset = ta.clientHeight / 2;
-                ta.scrollTop = Math.max(0, targetTop - centerOffset);
-            }
-
-            function replaceOne() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query || ta.readOnly) return;
-                const selText = ta.value.substring(ta.selectionStart, ta.selectionEnd);
-                if (selText === query) {
-                    const before = ta.value.substring(0, ta.selectionStart);
-                    const after = ta.value.substring(ta.selectionEnd);
-                    const pos = before.length + replacement.length;
-                    ta.value = before + replacement + after;
-                    ta.setSelectionRange(pos - replacement.length, pos);
-                    updateEditorLineNumbers();
-                    syncMinimap();
-                }
-                findNext();
-                renderFindHighlights();
-            }
-
-            function replaceAll() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query || ta.readOnly) return;
-                ta.value = ta.value.split(query).join(replacement);
-                updateEditorLineNumbers();
-                syncMinimap();
-                renderFindHighlights();
-            }
-
         document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     closeImageModal();

@@ -174,18 +174,111 @@ except:
     return 1
 }
 
+check_active_terminals() {
+    # Check whether there are active terminal sessions.
+    # Return 0 when none, 1 when active terminals exist, 2 when unable to determine.
+
+    api_base="${SERVICE_URL_LOCAL}"
+    if ! service_http_ok "${api_base}/"; then
+        api_base="${SERVICE_URL_PUBLIC}"
+    fi
+
+    if ! service_http_ok "${api_base}/"; then
+        return 0
+    fi
+
+    response=$(curl_bypass_proxy -s "${api_base}/api/active_terminals" 2>/dev/null)
+    if [ -z "$response" ]; then
+        echo -e "${YELLOW}⚠️  无法获取活跃终端信息（接口无响应），将按“未知状态”处理。${NC}"
+        return 2
+    fi
+
+    active_count=$(echo "$response" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('active_count',''))" 2>/dev/null)
+    success_flag=$(echo "$response" | python3 -c "import sys, json; d=json.load(sys.stdin); print('1' if d.get('success') else '0')" 2>/dev/null)
+
+    if [ "$success_flag" != "1" ]; then
+        echo -e "${YELLOW}⚠️  活跃终端接口返回失败，无法确认是否有终端任务。${NC}"
+        return 2
+    fi
+
+    if [ -z "$active_count" ] || [ "$active_count" -eq 0 ] 2>/dev/null; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}⚠️  检测到 ${active_count} 个活跃终端会话！${NC}"
+    echo ""
+    echo -e "${BLUE}活跃终端列表：${NC}"
+    echo "----------------------------------------"
+
+    echo "$response" | python3 -c "
+import sys, json, datetime
+try:
+    data = json.load(sys.stdin)
+    if data.get('success') and data.get('sessions'):
+        for i, t in enumerate(data['sessions'], 1):
+            opened_at = t.get('opened_at') or 0
+            try:
+                opened_at_str = datetime.datetime.fromtimestamp(float(opened_at)).strftime('%Y-%m-%d %H:%M:%S') if opened_at else '未知'
+            except Exception:
+                opened_at_str = '未知'
+            panel = {'source': '左侧', 'target': '右侧'}.get(str(t.get('panel') or ''), str(t.get('panel') or '未知'))
+            detached = '是' if t.get('detached') else '否'
+            print(f\"{i}. 服务器: {t.get('name') or t.get('server') or '未知'} ({t.get('server') or '未知'})\")
+            print(f\"   主机: {t.get('host') or t.get('server') or '未知'}\")
+            print(f\"   面板: {panel}\")
+            print(f\"   路径: {t.get('cwd') or '未知'}\")
+            print(f\"   Profile: {t.get('profile') or '未知'}\")
+            print(f\"   Detached: {detached}\")
+            print(f\"   打开时间: {opened_at_str}\")
+            print()
+except Exception:
+    pass
+" 2>/dev/null
+
+    echo "----------------------------------------"
+    return 1
+}
+
+check_active_workloads() {
+    # Return 0 when safe, 1 when active workloads exist, 2 when status is unknown.
+
+    local overall=0
+
+    check_active_transfers
+    local transfer_status=$?
+    if [ $transfer_status -eq 1 ]; then
+        overall=1
+    elif [ $transfer_status -eq 2 ] && [ $overall -eq 0 ]; then
+        overall=2
+    fi
+
+    if [ $transfer_status -ne 0 ]; then
+        echo ""
+    fi
+
+    check_active_terminals
+    local terminal_status=$?
+    if [ $terminal_status -eq 1 ]; then
+        overall=1
+    elif [ $terminal_status -eq 2 ] && [ $overall -eq 0 ]; then
+        overall=2
+    fi
+
+    return $overall
+}
+
 stop_service() {
     echo -e "${YELLOW}🛑 停止TurboFile服务...${NC}"
 
-    # Check active transfers.
-    check_active_transfers
+    # Check active transfers and terminal sessions.
+    check_active_workloads
     status=$?
     if [ $status -ne 0 ]; then
         echo ""
         if [ $status -eq 1 ]; then
-            echo -e "${RED}❌ 检测到活跃传输任务，停止服务可能会中断这些传输！${NC}"
+            echo -e "${RED}❌ 检测到活跃传输或终端任务，停止服务可能会中断传输或杀掉训练任务！${NC}"
         else
-            echo -e "${RED}❌ 无法确认是否存在传输任务（检测失败/未知状态），停止服务可能会中断传输！${NC}"
+            echo -e "${RED}❌ 无法确认是否存在传输或终端任务（检测失败/未知状态），停止服务可能会中断传输或训练！${NC}"
         fi
         read -p "是否确认停止服务？(yes/no): " confirm
         if [ "$confirm" != "yes" ]; then
@@ -218,15 +311,15 @@ stop_service() {
 restart_service() {
     echo -e "${YELLOW}🔄 重启TurboFile服务...${NC}"
 
-    # Check active transfers.
-    check_active_transfers
+    # Check active transfers and terminal sessions.
+    check_active_workloads
     status=$?
     if [ $status -ne 0 ]; then
         echo ""
         if [ $status -eq 1 ]; then
-            echo -e "${RED}❌ 检测到活跃传输任务，重启服务会中断这些传输！${NC}"
+            echo -e "${RED}❌ 检测到活跃传输或终端任务，重启服务会中断传输或杀掉训练任务！${NC}"
         else
-            echo -e "${RED}❌ 无法确认是否存在传输任务（检测失败/未知状态），重启服务可能会中断传输！${NC}"
+            echo -e "${RED}❌ 无法确认是否存在传输或终端任务（检测失败/未知状态），重启服务可能会中断传输或训练！${NC}"
         fi
         read -p "是否确认重启服务？(yes/no): " confirm
         if [ "$confirm" != "yes" ]; then
@@ -343,6 +436,16 @@ show_active_transfers() {
     fi
 }
 
+show_active_terminals() {
+    echo -e "${BLUE}🖥️ 检查活跃终端会话${NC}"
+    echo "=" * 40
+
+    check_active_terminals
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ 当前没有活跃的终端会话${NC}"
+    fi
+}
+
 show_help() {
     echo -e "${BLUE}🔧 TurboFile服务管理脚本${NC}"
     echo "=" * 40
@@ -358,6 +461,7 @@ show_help() {
     echo "  logs        查看服务日志"
     echo "  follow      实时查看日志"
     echo "  transfers   查看活跃传输任务"
+    echo "  terminals   查看活跃终端会话"
     echo "  web         打开Web界面"
     echo "  help        显示此帮助信息"
     echo ""
@@ -365,6 +469,7 @@ show_help() {
     echo "  $0 status    # 查看服务状态"
     echo "  $0 restart   # 重启服务"
     echo "  $0 transfers # 查看活跃传输"
+    echo "  $0 terminals # 查看活跃终端"
     echo "  $0 logs      # 查看日志"
 }
 
@@ -396,6 +501,9 @@ case "$1" in
         ;;
     transfers)
         show_active_transfers
+        ;;
+    terminals)
+        show_active_terminals
         ;;
     web)
         open_web

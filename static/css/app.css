@@ -110,7 +110,7 @@
             position: relative;
             border: 1px solid #1f2937;
             border-radius: 10px;
-            overflow: hidden;
+            overflow: visible;
             background: #0d1117;
             box-shadow: 0 10px 24px rgba(15, 23, 42, 0.28);
         }
@@ -122,15 +122,17 @@
         }
 
         .terminal-drawer-resizer {
-            flex: 0 0 20px;
-            position: relative;
+            position: absolute;
+            top: -12px;
+            left: 0;
+            right: 0;
+            height: 24px;
             display: block;
             width: 100%;
             cursor: row-resize;
             touch-action: none;
-            margin-top: -6px;
-            z-index: 2;
-            background: linear-gradient(180deg, rgba(13, 17, 23, 0.92) 0%, rgba(22, 27, 34, 0.96) 100%);
+            z-index: 6;
+            background: transparent;
         }
 
         .terminal-drawer-resizer::before {
@@ -139,7 +141,7 @@
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            width: calc(100% - 24px);
+            width: calc(100% - 20px);
             max-width: none;
             height: 2px;
             border-radius: 999px;
@@ -153,10 +155,6 @@
             height: 3px;
         }
 
-        .panel-workspace.terminal-maximized .terminal-drawer-resizer::before {
-            background: rgba(96, 165, 250, 0.38);
-        }
-
         .terminal-drawer-header {
             display: flex;
             align-items: center;
@@ -168,6 +166,8 @@
             color: #e5e7eb;
             font-size: 11px;
             line-height: 1.1;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
         }
 
         .terminal-drawer-title {
@@ -285,6 +285,8 @@
             position: relative;
             background: #0d1117;
             overflow: hidden;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
         }
 
         .terminal-host {
@@ -409,7 +411,12 @@
         }
 
         .resizable-panel.terminal-browser-fullscreen .terminal-drawer-resizer {
-            margin-top: 0;
+            top: 0;
+        }
+
+        .terminal-drawer:hover .terminal-drawer-resizer::before,
+        .terminal-drawer:focus-within .terminal-drawer-resizer::before {
+            background: rgba(96, 165, 250, 0.52);
         }
 
         body.terminal-page-fullscreen #appHeaderRow,
@@ -443,6 +450,13 @@
             border-right: none;
             border-bottom: none;
             box-shadow: none;
+        }
+
+        .resizable-panel.terminal-browser-fullscreen .terminal-drawer-header,
+        .resizable-panel.terminal-immersive .terminal-drawer-header,
+        .resizable-panel.terminal-browser-fullscreen .terminal-drawer-body,
+        .resizable-panel.terminal-immersive .terminal-drawer-body {
+            border-radius: 0;
         }
 
         .file-browser:hover {
@@ -595,8 +609,8 @@
         /* Text editor (VS Code-like sizing and colors). */
         .editor-modal {
             --editor-font: 'Consolas','Courier New',monospace;
-            --editor-font-size: 13px;
-            --editor-line-height: 1.6;
+            --editor-font-size: 15px;
+            --editor-line-height: 22px;
             --vs-bg: #1e1e1e;
             --vs-ui: #2d2d30;
             --vs-border: #3e3e42;
@@ -626,12 +640,6 @@
             --vs-accent-hover: #1d4ed8;
             --vs-danger: #dc2626;
             --vs-danger-hover: #b91c1c;
-        }
-        .editor-modal.editor-theme-light .editor-textarea {
-            caret-color: #111827;
-        }
-        .editor-modal.editor-theme-light .editor-textarea::selection {
-            background: #cfe3ff;
         }
         .editor-dialog {
             position: absolute;
@@ -700,6 +708,7 @@
             overflow: hidden;
             display: flex;
             background: var(--vs-bg);
+            min-height: 0;
         }
         .editor-statusbar {
             display: flex;
@@ -744,87 +753,55 @@
             cursor: not-allowed;
             color: var(--vs-muted);
         }
-        .editor-gutter {
-            width: 56px;
-            flex: 0 0 56px;
-            position: relative;
-            background: var(--vs-bg);
-            border-right: 1px solid var(--vs-border);
-            color: var(--vs-muted);
-            font-family: var(--editor-font);
-            font-size: var(--editor-font-size);
-            line-height: var(--editor-line-height);
-            text-align: right;
-            padding: 12px 10px 12px 0;
-            user-select: none;
-            overflow: hidden;
-            box-sizing: border-box;
-        }
-        .editor-line-numbers {
-            position: relative;
-            left: 0;
-            top: 0;
-            white-space: pre;
-            font-weight: 500;
-            will-change: transform;
-        }
-        .editor-text-wrapper {
-            position: relative;
+        .editor-monaco {
             flex: 1;
-            overflow: hidden;
-        }
-        .editor-main {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            position: relative;
             min-width: 0;
-        }
-        .editor-textarea {
-            width: 100%;
+            min-height: 0;
             height: 100%;
-            padding: 12px 14px;
-            background: transparent;
-            color: var(--vs-text);
-            border: none;
-            outline: none;
-            resize: none;
-            font-family: var(--editor-font);
-            font-size: var(--editor-font-size);
-            line-height: var(--editor-line-height);
-            font-weight: 500;
-            white-space: pre;
-            overflow: auto;
-            tab-size: 4;
-            scrollbar-color: var(--vs-border) var(--vs-bg);
-            position: relative;
-            z-index: 2;
-            caret-color: #aeafad;
-        }
-        .editor-textarea::selection {
-            background: #264f78;
-        }
-        .editor-highlight-layer {
-            position: absolute;
-            inset: 0;
-            margin: 0;
-            padding: 12px 14px;
             background: var(--vs-bg);
-            color: transparent !important; /* Keep background highlight only. */
-            pointer-events: none;
-            white-space: pre;
-            font-family: var(--editor-font);
-            font-size: var(--editor-font-size);
-            line-height: var(--editor-line-height);
-            overflow: hidden;
-            tab-size: 4;
-            z-index: 1; /* Below the textarea layer. */
         }
-        .editor-highlight-layer .hl {
-            background: transparent;
-            color: transparent !important;
+        .editor-monaco .monaco-editor,
+        .editor-monaco .monaco-editor .overflow-guard {
             border-radius: 0;
-            padding: 0;
+        }
+        .editor-modal .monaco-editor .codicon,
+        .editor-modal .monaco-editor .action-label.codicon,
+        .editor-modal .monaco-editor .monaco-action-bar .action-item .action-label.codicon,
+        .editor-modal .monaco-editor .monaco-findInput .codicon,
+        .editor-modal .monaco-editor .find-widget .codicon {
+            font-family: codicon !important;
+            font-size: inherit !important;
+            line-height: inherit !important;
+            font-weight: normal !important;
+            letter-spacing: normal !important;
+        }
+        .editor-modal .monaco-editor,
+        .editor-modal .monaco-editor .margin,
+        .editor-modal .monaco-editor .monaco-editor-background {
+            background-color: var(--vs-bg) !important;
+        }
+        .editor-modal .monaco-editor .current-line,
+        .editor-modal .monaco-editor .margin-view-overlays .current-line-margin {
+            border: none !important;
+        }
+        .editor-modal .monaco-editor .find-widget {
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
+        }
+        .editor-modal .monaco-editor .view-lines,
+        .editor-modal .monaco-editor .view-line,
+        .editor-modal .monaco-editor .view-lines *,
+        .editor-modal .monaco-editor .view-line *,
+        .editor-modal .monaco-editor .margin,
+        .editor-modal .monaco-editor .monaco-mouse-cursor-text,
+        .editor-modal .monaco-editor .line-numbers {
+            font-family: 'Consolas', 'Courier New', monospace !important;
+            font-size: var(--editor-font-size) !important;
+            line-height: var(--editor-line-height) !important;
+            font-weight: 400 !important;
+            letter-spacing: 0 !important;
+            text-rendering: auto;
+            -webkit-font-smoothing: subpixel-antialiased;
+            -moz-osx-font-smoothing: auto;
         }
 
         .progress-container {
@@ -835,47 +812,6 @@
         }
         .progress-container .stat-item i {
             margin-top: 2px;
-        }
-
-        /* Sublime-style minimap. */
-        /* Find/replace panel. */
-        .find-replace-bar {
-            position: absolute;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: var(--vs-ui);
-            border-top: 1px solid var(--vs-border);
-            padding: 6px 10px;
-            display: none;
-            gap: 6px;
-            align-items: center;
-            z-index: 10;
-        }
-        .find-replace-bar input {
-            background: var(--vs-bg);
-            border: 1px solid var(--vs-border);
-            color: var(--vs-text);
-            border-radius: 4px;
-            padding: 4px 6px;
-            font-size: 12px;
-            font-family: var(--editor-font);
-            min-width: 200px;
-        }
-        .find-replace-bar button {
-            border: 1px solid var(--vs-border);
-            background: var(--vs-button);
-            color: #fff;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-        }
-        .find-replace-bar button:hover {
-            background: var(--vs-button-hover);
-        }
-        .find-replace-bar .secondary {
-            background: var(--vs-button);
-            border-color: var(--vs-border);
         }
 
 	        /* Image grid view. */

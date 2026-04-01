@@ -2384,13 +2384,42 @@ def transfer_directory_contents_instant(transfer_id, source_server, source_dir, 
         _append_rsync_progress_opts(rsync_opts)
         rsync_opts_str = ' '.join(rsync_opts)
 
-        ssh = ssh_manager.get_connection(source_server)
-        if not ssh:
-            raise Exception(f"无法连接到源服务器 {source_server}")
+        ssh = None
 
         if source_server == target_server:
+            ssh = ssh_manager.get_connection(source_server)
+            if not ssh:
+                raise Exception(f"无法连接到源服务器 {source_server}")
             remote_cmd = f"rsync {rsync_opts_str} {shlex.quote(src_with_slash)} {shlex.quote(tgt_with_slash)}"
+        elif source_is_windows and not target_is_windows:
+            source_user = SERVERS[source_server]['user']
+            source_password = SERVERS[source_server].get('password')
+
+            ssh_to_source = RSYNC_SSH_CMD
+            source_port = SERVERS[source_server].get('port', 22)
+            if source_port != 22:
+                ssh_to_source = f"{ssh_to_source} -p {source_port}"
+
+            source_spec = shlex.quote(build_remote_spec(source_server, source_user, src_with_slash))
+            if source_password:
+                remote_cmd = (
+                    f"sshpass -p {shlex.quote(source_password)} "
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} "
+                    f"{source_spec} {shlex.quote(tgt_with_slash)}"
+                )
+            else:
+                remote_cmd = (
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} "
+                    f"{source_spec} {shlex.quote(tgt_with_slash)}"
+                )
+
+            ssh = ssh_manager.get_connection(target_server)
+            if not ssh:
+                raise Exception(f"无法连接到目标服务器 {target_server}")
         else:
+            ssh = ssh_manager.get_connection(source_server)
+            if not ssh:
+                raise Exception(f"无法连接到源服务器 {source_server}")
             target_user = SERVERS[target_server]['user']
             target_password = SERVERS[target_server].get('password')
 
@@ -2402,9 +2431,8 @@ def transfer_directory_contents_instant(transfer_id, source_server, source_dir, 
 
             dest = shlex.quote(build_remote_spec(target_server, target_user, tgt_with_slash))
             if target_password:
-                sshpass_cmd = "sshpass"
                 remote_cmd = (
-                    f"{sshpass_cmd} -p {shlex.quote(target_password)} "
+                    f"sshpass -p {shlex.quote(target_password)} "
                     f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} "
                     f"{shlex.quote(src_with_slash)} {dest}"
                 )
@@ -4248,6 +4276,22 @@ def list_terminal_sessions_for_client(client_token: str):
             if payload:
                 sessions.append(payload)
     sessions.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return sessions
+
+def list_active_terminal_sessions():
+    sessions = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                sessions.append(payload)
+    sessions.sort(
+        key=lambda item: (
+            str(item.get('server') or ''),
+            str(item.get('panel') or ''),
+            float(item.get('opened_at') or 0),
+        )
+    )
     return sessions
 
 def close_terminal_sessions_for_client_panel(client_token: str, panel: str):

@@ -1572,8 +1572,8 @@ def api_file_read():
         end = file_size
         encoding_hint = ''
 
-        # Sample the file head to preserve BOM-based encoding detection for large partial reads.
-        if file_size > 0 and (mode != 'auto' or file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES):
+        # Sample the file head to preserve BOM-based encoding detection for partial reads.
+        if file_size > 0 and mode != 'auto':
             sample = _read_file_range(
                 server_ip,
                 path,
@@ -1584,14 +1584,9 @@ def api_file_read():
             _, encoding_hint = _decode_text_bytes(sample)
 
         if mode == 'auto':
-            if file_size <= TEXT_EDITOR_FULL_READ_MAX_BYTES:
-                read_mode = 'full'
-                start = 0
-                end = file_size
-            else:
-                read_mode = 'tail'
-                end = file_size
-                start = max(0, end - limit)
+            read_mode = 'full'
+            start = 0
+            end = file_size
         elif mode == 'head':
             start = 0
             end = min(file_size, limit)
@@ -1618,8 +1613,7 @@ def api_file_read():
         actual_end = start + len(data or b'')
         content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
         read_only = bool(
-            file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES
-            or read_mode != 'full'
+            read_mode != 'full'
             or start > 0
             or actual_end < file_size
         )
@@ -3375,6 +3369,28 @@ def get_active_transfers():
             'transfers': transfers
         })
 
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@bp.route('/api/active_terminals', methods=['GET'])
+def get_active_terminals():
+    """Return active terminal sessions."""
+    try:
+        sessions = []
+        for item in list_active_terminal_sessions():
+            server_ip = str(item.get('server') or '').strip()
+            server_cfg = SERVERS.get(server_ip) or {}
+            sessions.append({
+                **item,
+                'name': server_cfg.get('name') or server_ip,
+                'host': server_cfg.get('host') or server_ip,
+            })
+
+        return jsonify({
+            'success': True,
+            'active_count': len(sessions),
+            'sessions': sessions
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
