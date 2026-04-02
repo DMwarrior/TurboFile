@@ -1496,26 +1496,28 @@
             }
         };
         const TERMINAL_THEME = {
-            background: '#0d1117',
-            foreground: '#e6edf3',
-            cursor: '#58a6ff',
-            selectionBackground: 'rgba(88, 166, 255, 0.28)',
-            black: '#0d1117',
-            red: '#ff7b72',
-            green: '#3fb950',
-            yellow: '#d29922',
-            blue: '#58a6ff',
-            magenta: '#bc8cff',
-            cyan: '#39c5cf',
-            white: '#c9d1d9',
-            brightBlack: '#484f58',
-            brightRed: '#ffa198',
-            brightGreen: '#56d364',
-            brightYellow: '#e3b341',
-            brightBlue: '#79c0ff',
-            brightMagenta: '#d2a8ff',
-            brightCyan: '#56d4dd',
-            brightWhite: '#f0f6fc'
+            background: '#1e1e1e',
+            foreground: '#d4d4d4',
+            cursor: '#aeafad',
+            cursorAccent: '#1e1e1e',
+            selectionBackground: 'rgba(38, 79, 120, 0.45)',
+            selectionInactiveBackground: 'rgba(60, 60, 60, 0.32)',
+            black: '#000000',
+            red: '#cd3131',
+            green: '#0dbc79',
+            yellow: '#e5e510',
+            blue: '#2472c8',
+            magenta: '#bc3fbc',
+            cyan: '#11a8cd',
+            white: '#e5e5e5',
+            brightBlack: '#666666',
+            brightRed: '#f14c4c',
+            brightGreen: '#23d18b',
+            brightYellow: '#f5f543',
+            brightBlue: '#3b8eea',
+            brightMagenta: '#d670d6',
+            brightCyan: '#29b8db',
+            brightWhite: '#e5e5e5'
         };
         const TERMINAL_FONT_FAMILY_FALLBACK = "'TurboFile Terminal Ubuntu', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace";
         const TERMINAL_CLIENT_TOKEN_STORAGE_KEY = 'turbofile-terminal-client-token';
@@ -1557,8 +1559,9 @@
         };
         const DEFAULT_TERMINAL_DRAWER_HEIGHT = 280;
         const MIN_TERMINAL_DRAWER_HEIGHT = 180;
-        const MIN_TERMINAL_BROWSER_HEIGHT = 120;
+        const MIN_TERMINAL_BROWSER_HEIGHT = 0;
         const TERMINAL_DRAWER_GAP = 8;
+        const TERMINAL_RESIZE_MAXIMIZE_THRESHOLD = 24;
         let terminalFontReadyPromise = null;
         let terminalFontReadyKey = '';
         let terminalWebglSupport = null;
@@ -1804,11 +1807,23 @@
             return {
                 fontFamily: getVSCodeLikeTerminalFontFamily(),
                 fontSize: getTerminalFontSize(),
-                lineHeight: 1,
+                lineHeight: 1.12,
                 letterSpacing: 0,
                 fontWeight: 'normal',
                 fontWeightBold: 'bold',
-                rescaleOverlappingGlyphs: true
+                rescaleOverlappingGlyphs: true,
+                cursorBlink: true,
+                cursorStyle: 'line',
+                cursorWidth: 2,
+                cursorInactiveStyle: 'outline',
+                scrollback: 8000,
+                smoothScrollDuration: 110,
+                fastScrollModifier: 'alt',
+                fastScrollSensitivity: 5,
+                scrollSensitivity: 1,
+                rightClickSelectsWord: false,
+                drawBoldTextInBrightColors: true,
+                minimumContrastRatio: 1
             };
         }
 
@@ -2237,6 +2252,24 @@
             return getDefaultTerminalProfile(server);
         }
 
+        function getTerminalProfileLabel(profileId, server) {
+            const options = getTerminalProfileOptionsForServer(server);
+            const match = options.find((item) => item && item.id === profileId);
+            return match && match.label ? String(match.label) : String(profileId || '').trim() || 'Terminal';
+        }
+
+        function formatTerminalInstanceTitle(profileId, server) {
+            const label = getTerminalProfileLabel(profileId, server);
+            const normalized = String(profileId || '').trim().toLowerCase();
+            if (normalized === 'bash' || normalized === 'cmd' || normalized === 'sh') {
+                return `${normalized} - TurboFile`;
+            }
+            if (normalized === 'powershell') {
+                return 'pwsh - TurboFile';
+            }
+            return `${label} - TurboFile`;
+        }
+
         function updateTerminalProfileControl(panel) {
             const state = getTerminalState(panel);
             const els = getTerminalElements(panel);
@@ -2547,9 +2580,11 @@
             const state = getTerminalState(panel);
             const els = getTerminalElements(panel);
             if (!els.label) return;
-            const sideName = panel === 'target' ? '右侧终端' : '左侧终端';
+            const profileId = getTerminalProfileForPanel(panel, state.server || getPanelCurrentServer(panel));
+            const title = formatTerminalInstanceTitle(profileId, state.server || getPanelCurrentServer(panel));
             const serverLabel = state.server ? getServerDisplayLabel(state.server) : '';
-            els.label.textContent = serverLabel ? `${sideName} · ${serverLabel}` : sideName;
+            els.label.textContent = title;
+            els.label.title = serverLabel ? `${title} · ${serverLabel}` : title;
         }
 
         function getTerminalDrawerMaxHeight(panel) {
@@ -2559,7 +2594,7 @@
             if (!availableHeight) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
             return Math.max(
                 MIN_TERMINAL_DRAWER_HEIGHT,
-                availableHeight - MIN_TERMINAL_BROWSER_HEIGHT - TERMINAL_DRAWER_GAP
+                availableHeight - MIN_TERMINAL_BROWSER_HEIGHT - 2
             );
         }
 
@@ -2754,8 +2789,14 @@
                 }
             }
             if (resizeState.panel) {
-                applyTerminalDrawerLayout(resizeState.panel, { fit: 'schedule', notifyServer: true });
                 const state = getTerminalState(resizeState.panel);
+                const maxHeight = getTerminalDrawerMaxHeight(resizeState.panel);
+                const shouldRestoreMaximized = Number.isFinite(resizeState.pendingHeight)
+                    && resizeState.pendingHeight >= (maxHeight - TERMINAL_RESIZE_MAXIMIZE_THRESHOLD);
+                if (shouldRestoreMaximized) {
+                    state.maximized = true;
+                }
+                applyTerminalDrawerLayout(resizeState.panel, { fit: 'schedule', notifyServer: true });
                 if (state.term) state.term.focus();
             }
         }
@@ -2774,7 +2815,7 @@
                 if (!activeTerminalResize) return;
                 const pendingHeight = activeTerminalResize.pendingHeight;
                 activeTerminalResize.rafId = 0;
-                setTerminalDrawerHeight(activeTerminalResize.panel, pendingHeight, { fit: 'direct', notifyServer: true });
+                setTerminalDrawerHeight(activeTerminalResize.panel, pendingHeight, { fit: 'none', notifyServer: false });
             });
         }
 
@@ -2782,7 +2823,7 @@
             const state = getTerminalState(panel);
             const els = getTerminalElements(panel);
             if (!state.open || !els.drawer || els.drawer.style.display === 'none') return;
-            if (event.button !== undefined && event.button !== 0) return;
+            if (event.button !== undefined && event.button !== 0 && event.button !== 2) return;
             stopTerminalResize();
             event.preventDefault();
 
@@ -2931,7 +2972,9 @@
             if (state.term && state.fontSignature === fontSignature) {
                 state.term.options = {
                     ...state.term.options,
-                    ...terminalOptions
+                    ...terminalOptions,
+                    theme: TERMINAL_THEME,
+                    allowTransparency: false
                 };
                 if (typeof state.term.clearTextureAtlas === 'function') {
                     try { state.term.clearTextureAtlas(); } catch (_) {}
@@ -2982,6 +3025,7 @@
 
             if (typeof ResizeObserver === 'function') {
                 state.resizeObserver = new ResizeObserver(() => {
+                    if (activeTerminalResize && activeTerminalResize.panel === panel) return;
                     window.requestAnimationFrame(() => fitTerminalToContainer(panel, true));
                 });
                 state.resizeObserver.observe(els.host);

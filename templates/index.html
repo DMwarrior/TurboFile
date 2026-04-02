@@ -136,20 +136,29 @@
                             <div class="terminal-drawer-resizer"
                                  title="拖动调整终端高度，双击恢复默认高度"
                                  onpointerdown="startTerminalResize(event, 'source')"
+                                 oncontextmenu="return false;"
                                  ondblclick="resetTerminalDrawerHeight('source')"></div>
                             <div class="terminal-drawer-header">
-                                <div class="terminal-drawer-title">
-                                    <i class="bi bi-terminal"></i>
-                                    <span id="sourceTerminalLabel">左侧终端</span>
-                                    <span id="sourceTerminalStatus" class="terminal-status-pill">未连接</span>
+                                <div class="terminal-drawer-tabs" aria-hidden="true">
+                                    <span class="terminal-drawer-tab">PROBLEMS</span>
+                                    <span class="terminal-drawer-tab">OUTPUT</span>
+                                    <span class="terminal-drawer-tab">DEBUG CONSOLE</span>
+                                    <span class="terminal-drawer-tab">PORTS</span>
+                                    <span class="terminal-drawer-tab active">TERMINAL</span>
                                 </div>
-                                <div class="terminal-drawer-actions">
-                                    <button type="button" id="sourceTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn" title="全屏" onclick="toggleTerminalMaximize('source')">
+                                <div class="terminal-drawer-titlebar">
+                                    <div class="terminal-drawer-title">
+                                        <i class="bi bi-terminal"></i>
+                                        <span id="sourceTerminalLabel">bash - TurboFile</span>
+                                        <span id="sourceTerminalStatus" class="terminal-status-pill">未连接</span>
+                                    </div>
+                                    <div class="terminal-drawer-actions">
+                                    <button type="button" id="sourceTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn terminal-icon-btn" title="全屏" onclick="toggleTerminalMaximize('source')">
                                         <i class="bi bi-arrows-fullscreen"></i>
-                                        <span>全屏</span>
                                     </button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('source')">清屏</button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('source')">关闭</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="清屏" onclick="clearTerminalForPanel('source')"><i class="bi bi-trash"></i></button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="关闭" onclick="closeTerminalForPanel('source')"><i class="bi bi-x-lg"></i></button>
+                                    </div>
                                 </div>
                             </div>
                             <div id="sourceTerminalSearchBar" class="terminal-searchbar" style="display: none;">
@@ -233,20 +242,29 @@
                             <div class="terminal-drawer-resizer"
                                  title="拖动调整终端高度，双击恢复默认高度"
                                  onpointerdown="startTerminalResize(event, 'target')"
+                                 oncontextmenu="return false;"
                                  ondblclick="resetTerminalDrawerHeight('target')"></div>
                             <div class="terminal-drawer-header">
-                                <div class="terminal-drawer-title">
-                                    <i class="bi bi-terminal"></i>
-                                    <span id="targetTerminalLabel">右侧终端</span>
-                                    <span id="targetTerminalStatus" class="terminal-status-pill">未连接</span>
+                                <div class="terminal-drawer-tabs" aria-hidden="true">
+                                    <span class="terminal-drawer-tab">PROBLEMS</span>
+                                    <span class="terminal-drawer-tab">OUTPUT</span>
+                                    <span class="terminal-drawer-tab">DEBUG CONSOLE</span>
+                                    <span class="terminal-drawer-tab">PORTS</span>
+                                    <span class="terminal-drawer-tab active">TERMINAL</span>
                                 </div>
-                                <div class="terminal-drawer-actions">
-                                    <button type="button" id="targetTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn" title="全屏" onclick="toggleTerminalMaximize('target')">
+                                <div class="terminal-drawer-titlebar">
+                                    <div class="terminal-drawer-title">
+                                        <i class="bi bi-terminal"></i>
+                                        <span id="targetTerminalLabel">bash - TurboFile</span>
+                                        <span id="targetTerminalStatus" class="terminal-status-pill">未连接</span>
+                                    </div>
+                                    <div class="terminal-drawer-actions">
+                                    <button type="button" id="targetTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn terminal-icon-btn" title="全屏" onclick="toggleTerminalMaximize('target')">
                                         <i class="bi bi-arrows-fullscreen"></i>
-                                        <span>全屏</span>
                                     </button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="clearTerminalForPanel('target')">清屏</button>
-                                    <button type="button" class="btn btn-sm btn-outline-light" onclick="closeTerminalForPanel('target')">关闭</button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="清屏" onclick="clearTerminalForPanel('target')"><i class="bi bi-trash"></i></button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="关闭" onclick="closeTerminalForPanel('target')"><i class="bi bi-x-lg"></i></button>
+                                    </div>
                                 </div>
                             </div>
                             <div id="targetTerminalSearchBar" class="terminal-searchbar" style="display: none;">
