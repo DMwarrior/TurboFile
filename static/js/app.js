@@ -8146,40 +8146,15 @@
             }
 
             function startEditorFollowTail() {
-                if (!editorViewState.readOnly || editorViewState.mode === 'full' || editorViewState.binary) {
-                    stopEditorFollowTail();
-                    return;
-                }
-                editorViewState.followTail = true;
-                if (editorViewState.followTimer) {
-                    clearInterval(editorViewState.followTimer);
-                }
-                editorViewState.followTimer = window.setInterval(() => {
-                    const modal = document.getElementById('editorModal');
-                    if (!modal || modal.style.display === 'none') {
-                        stopEditorFollowTail();
-                        return;
-                    }
-                    if (!editorViewState.loading) {
-                        loadEditorFileChunk('tail', { silent: true, preserveFollow: true });
-                    }
-                }, EDITOR_FOLLOW_INTERVAL_MS);
-                updateEditorStatusBar();
+                stopEditorFollowTail();
             }
 
             function toggleEditorFollowTail() {
-                if (!editorViewState.readOnly || editorViewState.mode === 'full' || editorViewState.binary) return;
-                if (editorViewState.followTail) {
-                    stopEditorFollowTail();
-                } else {
-                    startEditorFollowTail();
-                    loadEditorFileChunk('tail', { silent: true, preserveFollow: true });
-                }
+                stopEditorFollowTail();
             }
 
             function updateEditorStatusBar() {
                 const bar = document.getElementById('editorStatusBar');
-                const textEl = document.getElementById('editorStatusText');
                 const saveBtn = document.getElementById('editorSaveBtn');
                 const replaceToggleBtn = document.getElementById('editorReplaceToggleBtn');
                 const findToggleBtn = document.getElementById('editorFindToggleBtn');
@@ -8188,48 +8163,27 @@
                 const nextBtn = document.getElementById('editorNextBtn');
                 const tailBtn = document.getElementById('editorTailBtn');
                 const followBtn = document.getElementById('editorFollowBtn');
-                const showChunkControls = !!(editorViewState.readOnly || editorViewState.truncated || editorViewState.mode !== 'full');
 
                 if (bar) {
-                    bar.style.display = editorViewState.path ? 'flex' : 'none';
+                    bar.style.display = 'none';
                 }
 
-                if (textEl) {
-                    if (!editorViewState.path) {
-                        textEl.textContent = '';
-                    } else if (editorViewState.loading && !editorViewState.lastContent) {
-                        textEl.textContent = '正在加载文件内容...';
-                    } else if (editorViewState.binary) {
-                        const startLabel = formatFileSize(editorViewState.readOffset || 0);
-                        const endLabel = formatFileSize(editorViewState.readEnd || 0);
-                        const totalLabel = formatFileSize(editorViewState.fileSize || 0);
-                        textEl.textContent = `二进制只读预览，当前范围 ${startLabel} - ${endLabel} / ${totalLabel}，显示格式 HEX`;
-                    } else if (showChunkControls) {
-                        const startLabel = formatFileSize(editorViewState.readOffset || 0);
-                        const endLabel = formatFileSize(editorViewState.readEnd || 0);
-                        const totalLabel = formatFileSize(editorViewState.fileSize || 0);
-                        textEl.textContent = `大文件只读预览，当前范围 ${startLabel} - ${endLabel} / ${totalLabel}，编码 ${editorViewState.encoding || 'utf-8'}${editorViewState.followTail ? '，自动追尾中' : ''}`;
-                    } else {
-                        textEl.textContent = `完整加载 ${formatFileSize(editorViewState.fileSize || 0)}，编码 ${editorViewState.encoding || 'utf-8'}`;
-                    }
-                }
-
-                if (saveBtn) saveBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading || editorViewState.binary);
-                if (replaceToggleBtn) replaceToggleBtn.disabled = !!(editorViewState.readOnly || editorViewState.loading || editorViewState.binary);
+                if (saveBtn) saveBtn.disabled = !!editorViewState.loading;
+                if (replaceToggleBtn) replaceToggleBtn.disabled = !!editorViewState.loading;
                 if (findToggleBtn) findToggleBtn.disabled = !!(editorViewState.loading && !editorViewState.lastContent);
 
                 [headBtn, prevBtn, nextBtn, tailBtn, followBtn].forEach(btn => {
                     if (!btn) return;
-                    btn.style.display = showChunkControls ? 'inline-block' : 'none';
+                    btn.style.display = 'none';
                 });
 
-                if (headBtn) headBtn.disabled = !!(editorViewState.loading || (editorViewState.readOffset || 0) <= 0);
-                if (prevBtn) prevBtn.disabled = !!(editorViewState.loading || (editorViewState.readOffset || 0) <= 0);
-                if (nextBtn) nextBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
-                if (tailBtn) tailBtn.disabled = !!(editorViewState.loading || (editorViewState.readEnd || 0) >= (editorViewState.fileSize || 0));
+                if (headBtn) headBtn.disabled = true;
+                if (prevBtn) prevBtn.disabled = true;
+                if (nextBtn) nextBtn.disabled = true;
+                if (tailBtn) tailBtn.disabled = true;
                 if (followBtn) {
-                    followBtn.disabled = !!(editorViewState.loading || editorViewState.binary);
-                    followBtn.textContent = editorViewState.followTail ? '停止追尾' : '自动追尾';
+                    followBtn.disabled = true;
+                    followBtn.textContent = '自动追尾';
                 }
             }
 
@@ -8449,10 +8403,7 @@
                 editorViewState.truncated = !!options.truncated;
                 editorViewState.loading = !!options.loading;
                 editorViewState.lastContent = options.loading ? '' : (typeof content === 'string' ? content : '');
-
-                if (!options.preserveFollow && (!editorViewState.readOnly || editorViewState.mode === 'full')) {
-                    stopEditorFollowTail();
-                }
+                stopEditorFollowTail();
 
                 updateEditorStatusBar();
                 modal.style.display = 'block';
@@ -8496,12 +8447,7 @@
                         monaco.editor.remeasureFonts();
                     }
                     monacoEditorState.suppressModelChange = false;
-
-                    if (options.mode === 'tail' || (options.preserveFollow && editorViewState.followTail)) {
-                        revealEditorTail();
-                    } else {
-                        resetEditorViewport();
-                    }
+                    resetEditorViewport();
 
                     requestAnimationFrame(() => {
                         try { editor.layout(); } catch (_) {}
@@ -8518,18 +8464,12 @@
                 const title = options.title || editorViewState.title || '文本编辑器';
                 if (!server || !path) return;
 
-                const chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : (editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES);
                 const isNewFile = server !== editorViewState.server || path !== editorViewState.path;
                 const modal = document.getElementById('editorModal');
                 const silent = typeof options.silent === 'boolean'
                     ? options.silent
                     : !!(modal && modal.style.display !== 'none' && !isNewFile);
-                let mode = 'auto';
-                let offset = 0;
-
-                if (!options.preserveFollow && action !== 'tail') {
-                    stopEditorFollowTail();
-                }
+                stopEditorFollowTail();
 
                 if (isNewFile) {
                     editorViewState.fileSize = 0;
@@ -8542,21 +8482,6 @@
                     editorViewState.lastContent = '';
                 }
 
-                if (action === 'head') {
-                    mode = 'head';
-                } else if (action === 'tail') {
-                    mode = 'tail';
-                } else if (action === 'prev') {
-                    mode = 'range';
-                    offset = Math.max(0, (editorViewState.readOffset || 0) - chunkSize);
-                } else if (action === 'next') {
-                    mode = 'range';
-                    offset = Math.max(0, editorViewState.readEnd || 0);
-                } else if (action === 'range') {
-                    mode = 'range';
-                    offset = Math.max(0, Number(options.offset) || 0);
-                }
-
                 const requestToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
                 editorViewState.requestToken = requestToken;
                 editorViewState.loading = true;
@@ -8567,13 +8492,12 @@
                         fileSize: editorViewState.fileSize || 0,
                         readOffset: editorViewState.readOffset || 0,
                         readEnd: editorViewState.readEnd || 0,
-                        chunkSize,
+                        chunkSize: editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES,
                         mode: editorViewState.mode || 'full',
                         encoding: editorViewState.encoding || 'utf-8',
-                        readOnly: true,
-                        truncated: editorViewState.truncated,
-                        loading: true,
-                        preserveFollow: options.preserveFollow === true
+                        readOnly: false,
+                        truncated: false,
+                        loading: true
                     });
                 }
 
@@ -8581,11 +8505,6 @@
                     const url = new URL('/api/file/read', window.location.origin);
                     url.searchParams.set('server', server);
                     url.searchParams.set('path', path);
-                    url.searchParams.set('mode', mode);
-                    url.searchParams.set('limit', String(chunkSize));
-                    if (mode === 'range') {
-                        url.searchParams.set('offset', String(offset));
-                    }
 
                     const resp = await fetch(url.toString(), { cache: 'no-store' });
                     if (!resp.ok) {
@@ -8598,31 +8517,22 @@
                     if (editorViewState.requestToken !== requestToken) return;
 
                     const content = data.content || '';
-                    const binary = !!data.binary;
-                    const readOnly = !!data.read_only;
                     editorViewState.loading = false;
 
-                    if (!readOnly && !data.truncated && !binary) {
-                        previewCacheSet(server, path, 'text', content);
-                    }
+                    previewCacheSet(server, path, 'text', content);
 
                     openEditorModal(server, path, title, content, {
                         fileSize: Number(data.file_size) || 0,
                         readOffset: Number(data.read_offset) || 0,
                         readEnd: Number(data.read_end) || 0,
-                        chunkSize: Number(data.chunk_size) || chunkSize,
-                        mode: data.mode || 'full',
+                        chunkSize: Number(data.chunk_size) || (editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES),
+                        mode: 'full',
                         encoding: data.encoding || 'utf-8',
-                        binary,
-                        readOnly,
-                        truncated: !!data.truncated,
-                        loading: false,
-                        preserveFollow: options.preserveFollow === true
+                        binary: false,
+                        readOnly: false,
+                        truncated: false,
+                        loading: false
                     });
-
-                    if (options.preserveFollow && editorViewState.followTail) {
-                        startEditorFollowTail();
-                    }
                 } catch (e) {
                     if (editorViewState.requestToken === requestToken) {
                         editorViewState.loading = false;
@@ -8651,18 +8561,6 @@
             }
 
             async function saveEditorContent() {
-                if (editorViewState.binary) {
-                    await showAlertDialog('当前文件以二进制 HEX 预览方式打开，不能直接保存。', {
-                        title: '二进制预览'
-                    });
-                    return;
-                }
-                if (editorViewState.readOnly) {
-                    await showAlertDialog('当前是大文件只读预览模式，不能直接保存。请改为打开较小文件，或后续提供专门的日志编辑方案。', {
-                        title: '只读预览'
-                    });
-                    return;
-                }
                 const server = editorViewState.server;
                 const path = editorViewState.path;
                 const encoding = editorViewState.encoding || 'utf-8';

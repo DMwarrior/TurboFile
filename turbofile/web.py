@@ -1588,30 +1588,11 @@ def api_image_stream():
 def api_file_read():
     server_ip = request.args.get('server')
     path = request.args.get('path')
-    mode = (request.args.get('mode') or 'auto').strip().lower()
-    try:
-        offset = int(request.args.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    try:
-        limit = int(request.args.get('limit', TEXT_EDITOR_CHUNK_READ_BYTES))
-    except (TypeError, ValueError):
-        limit = TEXT_EDITOR_CHUNK_READ_BYTES
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
-    if mode not in {'auto', 'head', 'tail', 'range'}:
-        mode = 'auto'
-
-    offset = max(offset, 0)
-    limit = max(TEXT_EDITOR_CHUNK_READ_MIN_BYTES, min(limit, TEXT_EDITOR_CHUNK_READ_MAX_BYTES))
     try:
         file_size, mtime = _stat_file(server_ip, path, timeout_sec=15.0)
-        read_mode = mode
-        start = 0
-        end = file_size
         encoding_hint = ''
-        sample = b''
-        binary_preview = False
 
         if file_size > 0:
             sample = _read_file_range(
@@ -1621,73 +1602,28 @@ def api_file_read():
                 length=min(TEXT_EDITOR_SAMPLE_BYTES, file_size),
                 timeout_sec=20.0
             )
-            binary_preview = _looks_like_binary_bytes(sample)
-            if not binary_preview:
-                _, encoding_hint = _decode_text_bytes(sample)
+            _, encoding_hint = _decode_text_bytes(sample)
 
-        if mode == 'auto':
-            if binary_preview or file_size > TEXT_EDITOR_FULL_READ_MAX_BYTES:
-                read_mode = 'head'
-                start = 0
-                end = min(file_size, limit)
-            else:
-                read_mode = 'full'
-                start = 0
-                end = file_size
-        elif mode == 'head':
-            start = 0
-            end = min(file_size, limit)
-        elif mode == 'tail':
-            end = file_size
-            start = max(0, end - limit)
-        elif mode == 'range':
-            start = min(offset, file_size)
-            end = min(file_size, start + limit)
-
-        if encoding_hint == 'utf-16':
-            unit = 2
-            start = max(0, start - (start % unit))
-            if end < file_size and (end % unit):
-                end = min(file_size, end + (unit - (end % unit)))
-        elif encoding_hint == 'utf-32':
-            unit = 4
-            start = max(0, start - (start % unit))
-            if end < file_size and (end % unit):
-                end = min(file_size, end + (unit - (end % unit)))
-
-        length = None if read_mode == 'full' else max(0, end - start)
-        data = _read_file_range(server_ip, path, offset=start, length=length, timeout_sec=60.0)
-        actual_end = start + len(data or b'')
-        binary_preview = binary_preview or _looks_like_binary_bytes(data)
-        if binary_preview:
-            content = _format_binary_preview(data, start_offset=start)
-            encoding = 'binary'
-        else:
-            content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
-        read_only = bool(
-            binary_preview
-            or read_mode != 'full'
-            or start > 0
-            or actual_end < file_size
-        )
-        truncated = bool(start > 0 or actual_end < file_size)
+        data = _read_file_range(server_ip, path, offset=0, length=None, timeout_sec=180.0)
+        content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
+        actual_end = len(data or b'')
 
         return jsonify({
             'success': True,
             'content': content,
             'encoding': encoding,
-            'binary': binary_preview,
-            'mode': read_mode,
+            'binary': False,
+            'mode': 'full',
             'file_size': file_size,
             'mtime': mtime,
-            'read_offset': start,
+            'read_offset': 0,
             'read_end': actual_end,
-            'chunk_size': limit,
-            'read_only': read_only,
-            'truncated': truncated,
-            'can_load_prev': start > 0,
-            'can_load_next': actual_end < file_size,
-            'editable': not read_only and not binary_preview,
+            'chunk_size': actual_end,
+            'read_only': False,
+            'truncated': False,
+            'can_load_prev': False,
+            'can_load_next': False,
+            'editable': True,
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
