@@ -450,8 +450,11 @@
     </div>
 
 	    <div id="imagePreviewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1100;">
-	        <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
-	            <img alt="preview" style="max-width: 95vw; max-height: 85vh; object-fit: contain; user-select: none; cursor: grab;">
+	        <div class="image-preview-stage">
+	            <div class="image-preview-viewport">
+	                <img class="image-preview-layer is-active" alt="preview">
+	                <img class="image-preview-layer" alt="preview">
+	            </div>
 	        </div>
 	        <button id="imagePreviewCloseBtn" type="button" class="image-preview-close-btn" style="position: absolute; top: 16px; right: 16px; z-index: 1202;">
 	            关闭

@@ -6689,8 +6689,15 @@
             let imageNavLastStartAt = 0;
             let imagePrefetchTimer = 0;
             let imagePreviewPrefetchImg = null;
+            let imagePreviewActiveLayerIndex = 0;
+            let imagePreviewNavDirection = 1;
+            let imagePreviewTransitionTimer = 0;
+            let imagePreviewWheelAccumX = 0;
             const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS = 80;
             const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS_WIN = 140;
+            const IMAGE_PREVIEW_MIN_ZOOM = 1;
+            const IMAGE_PREVIEW_MAX_ZOOM = 4;
+            const IMAGE_PREVIEW_SECONDARY_ZOOM = 2.5;
             const IMAGE_PREVIEW_LOADING_SRC = (() => {
                 const svg =
                     '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">' +
@@ -6850,11 +6857,6 @@
                 ImageViewer.isSource = isSource;
             }
 
-            function applyImageTransform(img) {
-                if (!img) return;
-                img.style.transform = `translate(${imageOffsetX}px, ${imageOffsetY}px) scale(${imageZoom})`;
-            }
-
             function _getImageSizeText(img) {
                 if (!img) return '';
                 const w = img.naturalWidth || 0;
@@ -6870,6 +6872,221 @@
                 caption.textContent = sizeText ? `${base} | ${sizeText}` : base;
             }
 
+            function getImagePreviewElements() {
+                const modal = document.getElementById('imagePreviewModal');
+                if (!modal) return null;
+                const viewport = modal.querySelector('.image-preview-viewport');
+                const layers = Array.from(modal.querySelectorAll('.image-preview-layer'));
+                return { modal, viewport, layers };
+            }
+
+            function clampImagePreviewZoom(value) {
+                return clampNumber(Number(value) || IMAGE_PREVIEW_MIN_ZOOM, IMAGE_PREVIEW_MIN_ZOOM, IMAGE_PREVIEW_MAX_ZOOM);
+            }
+
+            function getImagePreviewViewportRect() {
+                const preview = getImagePreviewElements();
+                return preview && preview.viewport ? preview.viewport.getBoundingClientRect() : null;
+            }
+
+            function getImagePreviewMetrics(img, zoom = imageZoom) {
+                const viewportRect = getImagePreviewViewportRect();
+                if (!viewportRect) return null;
+                const viewportWidth = Math.max(1, viewportRect.width || 0);
+                const viewportHeight = Math.max(1, viewportRect.height || 0);
+                const naturalWidth = Math.max(1, img && img.naturalWidth ? img.naturalWidth : viewportWidth);
+                const naturalHeight = Math.max(1, img && img.naturalHeight ? img.naturalHeight : viewportHeight);
+                const containScale = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight);
+                const fitWidth = naturalWidth * containScale;
+                const fitHeight = naturalHeight * containScale;
+                const normalizedZoom = clampImagePreviewZoom(zoom);
+                return {
+                    viewportRect,
+                    viewportWidth,
+                    viewportHeight,
+                    fitWidth,
+                    fitHeight,
+                    displayWidth: fitWidth * normalizedZoom,
+                    displayHeight: fitHeight * normalizedZoom,
+                    zoom: normalizedZoom
+                };
+            }
+
+            function clampImagePreviewOffset(img, offsetX = imageOffsetX, offsetY = imageOffsetY, zoom = imageZoom) {
+                const metrics = getImagePreviewMetrics(img, zoom);
+                if (!metrics || metrics.zoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.001) {
+                    return { x: 0, y: 0 };
+                }
+                const maxX = Math.max(0, (metrics.displayWidth - metrics.viewportWidth) / 2);
+                const maxY = Math.max(0, (metrics.displayHeight - metrics.viewportHeight) / 2);
+                return {
+                    x: clampNumber(offsetX, -maxX, maxX),
+                    y: clampNumber(offsetY, -maxY, maxY)
+                };
+            }
+
+            function getPreviewContentPointAtClient(clientX, clientY, img, zoom = imageZoom, offsetX = imageOffsetX, offsetY = imageOffsetY) {
+                const metrics = getImagePreviewMetrics(img, zoom);
+                if (!metrics) return null;
+                const centerX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                const centerY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                return {
+                    x: (clientX - centerX - offsetX) / metrics.zoom,
+                    y: (clientY - centerY - offsetY) / metrics.zoom
+                };
+            }
+
+            function setImagePreviewZoom(nextZoom, clientX = null, clientY = null, img = getActivePreviewImage()) {
+                if (!img) return;
+                const normalizedZoom = clampImagePreviewZoom(nextZoom);
+                const currentZoom = clampImagePreviewZoom(imageZoom);
+                if (Math.abs(normalizedZoom - currentZoom) < 0.0001) {
+                    applyImageTransform(img);
+                    return;
+                }
+
+                const metrics = getImagePreviewMetrics(img, currentZoom);
+                if (metrics && Number.isFinite(clientX) && Number.isFinite(clientY)) {
+                    const anchorPoint = getPreviewContentPointAtClient(clientX, clientY, img, currentZoom, imageOffsetX, imageOffsetY);
+                    if (anchorPoint) {
+                        const centerX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                        const centerY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                        imageOffsetX = clientX - centerX - anchorPoint.x * normalizedZoom;
+                        imageOffsetY = clientY - centerY - anchorPoint.y * normalizedZoom;
+                    }
+                }
+
+                imageZoom = normalizedZoom;
+                if (imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.001) {
+                    imageOffsetX = 0;
+                    imageOffsetY = 0;
+                }
+                applyImageTransform(img);
+            }
+
+            function getImagePreviewSecondaryZoom(img = getActivePreviewImage()) {
+                if (!img) return IMAGE_PREVIEW_SECONDARY_ZOOM;
+                const metrics = getImagePreviewMetrics(img, IMAGE_PREVIEW_MIN_ZOOM);
+                if (!metrics) return IMAGE_PREVIEW_SECONDARY_ZOOM;
+                const naturalWidth = Math.max(1, img.naturalWidth || metrics.viewportWidth);
+                const naturalHeight = Math.max(1, img.naturalHeight || metrics.viewportHeight);
+                const widthRatio = naturalWidth / Math.max(1, metrics.fitWidth);
+                const heightRatio = naturalHeight / Math.max(1, metrics.fitHeight);
+                return clampImagePreviewZoom(Math.min(IMAGE_PREVIEW_SECONDARY_ZOOM, Math.max(1.5, Math.min(widthRatio, heightRatio))));
+            }
+
+            function applyImageTransform(img) {
+                if (!img) return;
+                imageZoom = clampImagePreviewZoom(imageZoom);
+                const clampedOffset = clampImagePreviewOffset(img, imageOffsetX, imageOffsetY, imageZoom);
+                imageOffsetX = clampedOffset.x;
+                imageOffsetY = clampedOffset.y;
+                img.style.setProperty('--preview-pan-x', `${imageOffsetX}px`);
+                img.style.setProperty('--preview-pan-y', `${imageOffsetY}px`);
+                img.style.setProperty('--preview-zoom', String(imageZoom));
+            }
+
+            function getActivePreviewImage() {
+                const preview = getImagePreviewElements();
+                if (!preview || !preview.layers.length) return null;
+                return preview.layers[imagePreviewActiveLayerIndex] || preview.layers[0] || null;
+            }
+
+            function getInactivePreviewImage() {
+                const preview = getImagePreviewElements();
+                if (!preview || preview.layers.length < 2) return getActivePreviewImage();
+                return preview.layers[imagePreviewActiveLayerIndex === 0 ? 1 : 0];
+            }
+
+            function resetPreviewLayerTransform(img) {
+                if (!img) return;
+                img.style.setProperty('--preview-shift-x', '0px');
+                img.style.setProperty('--preview-pan-x', '0px');
+                img.style.setProperty('--preview-pan-y', '0px');
+                img.style.setProperty('--preview-zoom', '1');
+            }
+
+            function resetPreviewLayer(img, preserveSrc = false) {
+                if (!img) return;
+                img.classList.remove('is-active');
+                img.classList.remove('is-interacting');
+                img.style.opacity = '0';
+                resetPreviewLayerTransform(img);
+                img.dataset.loaded = '0';
+                img.dataset.previewRetry = '0';
+                img.dataset.imagePath = '';
+                if (!preserveSrc) {
+                    img.removeAttribute('src');
+                }
+            }
+
+            function finishPreviewTransition(nextIndex) {
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
+                const preview = getImagePreviewElements();
+                if (!preview) return;
+                preview.layers.forEach((layer, idx) => {
+                    layer.classList.remove('is-interacting');
+                    if (idx === nextIndex) {
+                        layer.classList.add('is-active');
+                        layer.style.opacity = '1';
+                        layer.style.setProperty('--preview-shift-x', '0px');
+                    } else {
+                        layer.classList.remove('is-active');
+                        layer.style.opacity = '0';
+                        resetPreviewLayerTransform(layer);
+                    }
+                });
+                imagePreviewActiveLayerIndex = nextIndex;
+            }
+
+            function activatePreviewImage(targetImg, navDirection, animate) {
+                if (!targetImg) return;
+                const preview = getImagePreviewElements();
+                if (!preview || !preview.layers.length) return;
+                const targetIndex = preview.layers.indexOf(targetImg);
+                if (targetIndex < 0) return;
+                const currentIndex = imagePreviewActiveLayerIndex;
+                const currentImg = preview.layers[currentIndex] || null;
+
+                if (!animate || !currentImg || currentImg === targetImg || currentImg.dataset.loaded !== '1') {
+                    finishPreviewTransition(targetIndex);
+                    applyImageTransform(targetImg);
+                    return;
+                }
+
+                const incomingShift = navDirection >= 0 ? 72 : -72;
+                const outgoingShift = navDirection >= 0 ? -36 : 36;
+
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
+
+                resetPreviewLayerTransform(currentImg);
+                resetPreviewLayerTransform(targetImg);
+                targetImg.classList.add('is-active');
+                targetImg.style.opacity = '0.01';
+                targetImg.style.setProperty('--preview-shift-x', `${incomingShift}px`);
+                currentImg.classList.add('is-active');
+                currentImg.style.opacity = '1';
+                currentImg.style.setProperty('--preview-shift-x', '0px');
+
+                requestAnimationFrame(() => {
+                    targetImg.style.opacity = '1';
+                    targetImg.style.setProperty('--preview-shift-x', '0px');
+                    currentImg.style.opacity = '0';
+                    currentImg.style.setProperty('--preview-shift-x', `${outgoingShift}px`);
+                });
+
+                imagePreviewTransitionTimer = setTimeout(() => {
+                    finishPreviewTransition(targetIndex);
+                    applyImageTransform(targetImg);
+                }, 240);
+            }
+
             function prefetchAdjacentPreviewImages(currentIndex) {
                 try {
                     const items = ImageViewer.items || [];
@@ -6880,23 +7097,32 @@
 
                     const prevIndex = (currentIndex - 1 + len) % len;
                     const nextIndex = (currentIndex + 1) % len;
-                    const it = items[nextIndex];
-                    if (!it || !it.path) return;
-
                     if (isWindowsServer(server)) {
                         const req = getImagePreviewRequestSize();
                         const options = { width: req.width, height: req.height, quality: req.quality, interp: 'lanczos', format: 'webp' };
-                        getImageBlobUrl(server, it.path, options).catch(() => {});
+                        [prevIndex, nextIndex].forEach((idx) => {
+                            const it = items[idx];
+                            if (!it || !it.path) return;
+                            getImageBlobUrl(server, it.path, options).catch(() => {});
+                        });
                         return;
                     }
 
                     // Linux: preload original image URL into browser cache.
-                    const url = getImageStreamUrl(server, it.path);
                     if (!imagePreviewPrefetchImg) {
                         imagePreviewPrefetchImg = new Image();
                     }
                     try { imagePreviewPrefetchImg.decoding = 'async'; } catch (_) {}
-                    imagePreviewPrefetchImg.src = url;
+                    const nextItem = items[nextIndex];
+                    if (nextItem && nextItem.path) {
+                        imagePreviewPrefetchImg.src = getImageStreamUrl(server, nextItem.path);
+                    }
+                    const prevItem = items[prevIndex];
+                    if (prevItem && prevItem.path) {
+                        const img = new Image();
+                        try { img.decoding = 'async'; } catch (_) {}
+                        img.src = getImageStreamUrl(server, prevItem.path);
+                    }
                 } catch (_) {}
             }
 
@@ -6962,6 +7188,14 @@
                 let normalized = n;
                 if (normalized < 0) normalized = len - 1;
                 if (normalized >= len) normalized = 0;
+                if (len > 1) {
+                    const currentIndex = Number.isFinite(ImageViewer.index) ? ImageViewer.index : 0;
+                    const forwardSteps = (normalized - currentIndex + len) % len;
+                    const backwardSteps = (currentIndex - normalized + len) % len;
+                    if (forwardSteps !== 0) {
+                        imagePreviewNavDirection = forwardSteps <= backwardSteps ? 1 : -1;
+                    }
+                }
                 imageNavQueuedIndex = normalized;
 
                 // Update UI immediately so the index number keeps up with key repeat.
@@ -6994,11 +7228,11 @@
                 const server = ImageViewer.server;
                 if (!item || !item.path || !server) return;
                 const reqId = ++imagePreviewRequestSeq;
-
-
-                const modal = document.getElementById('imagePreviewModal');
-                const img = modal ? modal.querySelector('img') : null;
-                if (modal && img) {
+                const preview = getImagePreviewElements();
+                const modal = preview ? preview.modal : null;
+                const activeImg = getActivePreviewImage();
+                const inactiveImg = getInactivePreviewImage();
+                if (modal) {
                     try {
                         const gridModal = document.getElementById('imageGridModal');
                         if (gridModal && gridModal.style.display !== 'none') {
@@ -7006,15 +7240,6 @@
                         }
                     } catch (_) {}
                     modal.style.display = 'block';
-                    img.style.opacity = '0.3';
-                    img.decoding = 'async';
-                    img.dataset.imagePath = item.path || '';
-                    img.src = IMAGE_PREVIEW_LOADING_SRC;
-                    img.dataset.previewRetry = '0';
-                    imageZoom = 1;
-                    imageOffsetX = 0;
-                    imageOffsetY = 0;
-                    applyImageTransform(img);
                 }
                 const isWin = isWindowsServer(server);
                 _updateImageCaption(item, index, len, isWin ? '' : '原图加载中');
@@ -7023,64 +7248,104 @@
                     if (imagePreviewFetchController) {
                         try { imagePreviewFetchController.abort(); } catch (_) {}
                     }
+                    const expectedPath = item.path || '';
+                    if (activeImg && activeImg.dataset.loaded === '1' && activeImg.dataset.imagePath === expectedPath) {
+                        const sizeText = _getImageSizeText(activeImg);
+                        _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
+                        schedulePrefetchAdjacentPreviewImages(index);
+                        return;
+                    }
                     imagePreviewFetchController = new AbortController();
                     if (reqId !== imagePreviewRequestSeq) return;
-                    if (img) {
-                        const expectedPath = item.path || '';
-                        if (img.dataset.imagePath !== expectedPath) return;
-                        const url = getImageStreamUrl(server, expectedPath);
-                        const req = getImagePreviewRequestSize();
-                        const previewOptions = {
-                            width: req.width,
-                            height: req.height,
-                            quality: req.quality,
-                            interp: 'lanczos',
-                            format: 'webp',
-                            signal: imagePreviewFetchController.signal
-                        };
-                        img.onerror = () => {
-                            if (reqId !== imagePreviewRequestSeq) return;
-                            if (img.dataset.imagePath !== expectedPath) return;
-                            const retry = Number.parseInt(img.dataset.previewRetry || '0', 10) || 0;
-                            if (retry < 1) {
-                                img.dataset.previewRetry = String(retry + 1);
-                                // Retry once; still guard against stale nav.
-                                setTimeout(() => {
-                                    if (reqId !== imagePreviewRequestSeq) return;
-                                    if (img.dataset.imagePath !== expectedPath) return;
-                                    img.style.opacity = '0.3';
-                                    if (isWin) {
-                                        getImageBlobUrl(server, expectedPath, previewOptions)
-                                            .then((u) => {
-                                                if (reqId !== imagePreviewRequestSeq) return;
-                                                if (img.dataset.imagePath !== expectedPath) return;
-                                                img.src = u;
-                                            })
-                                            .catch(() => {});
-                                    } else {
-                                        img.src = getImageStreamUrl(server, expectedPath, { t: Date.now() });
-                                    }
-                                }, 180 + Math.floor(Math.random() * 160));
-                                return;
-                            }
-                            img.style.opacity = '1';
-                            _updateImageCaption(item, index, len, '加载失败');
-                        };
-                        img.onload = () => {
-                            if (reqId !== imagePreviewRequestSeq) return;
-                            if (img.dataset.imagePath !== expectedPath) return;
-                            img.style.opacity = '1';
-                            const sizeText = _getImageSizeText(img);
-                            _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
-                        };
-                        if (isWin) {
-                            const u = await getImageBlobUrl(server, expectedPath, previewOptions);
-                            if (reqId !== imagePreviewRequestSeq) return;
-                            if (img.dataset.imagePath !== expectedPath) return;
-                            img.src = u;
-                        } else {
-                            img.src = url;
+                    const currentReady = activeImg && activeImg.dataset.loaded === '1' && activeImg.dataset.imagePath;
+                    const shouldAnimate = Boolean(currentReady && activeImg.dataset.imagePath !== expectedPath);
+                    const targetImg = shouldAnimate ? inactiveImg : activeImg;
+                    if (!targetImg) return;
+
+                    imageZoom = 1;
+                    imageOffsetX = 0;
+                    imageOffsetY = 0;
+
+                    resetPreviewLayerTransform(targetImg);
+                    targetImg.decoding = 'async';
+                    targetImg.dataset.imagePath = expectedPath;
+                    targetImg.dataset.previewRetry = '0';
+                    targetImg.dataset.loaded = '0';
+
+                    if (!currentReady) {
+                        targetImg.classList.add('is-active');
+                        targetImg.style.opacity = '0.24';
+                        targetImg.src = IMAGE_PREVIEW_LOADING_SRC;
+                    }
+
+                    const url = getImageStreamUrl(server, expectedPath);
+                    const req = getImagePreviewRequestSize();
+                    const previewOptions = {
+                        width: req.width,
+                        height: req.height,
+                        quality: req.quality,
+                        interp: 'lanczos',
+                        format: 'webp',
+                        signal: imagePreviewFetchController.signal
+                    };
+
+                    const commitLoadedImage = () => {
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        targetImg.dataset.loaded = '1';
+                        activatePreviewImage(targetImg, imagePreviewNavDirection, shouldAnimate);
+                        const sizeText = _getImageSizeText(targetImg);
+                        _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
+                    };
+                    const maybeCommitCachedImage = () => {
+                        if (!targetImg.complete) return false;
+                        if (!(targetImg.naturalWidth || targetImg.naturalHeight)) return false;
+                        requestAnimationFrame(() => {
+                            commitLoadedImage();
+                        });
+                        return true;
+                    };
+
+                    targetImg.onerror = () => {
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        const retry = Number.parseInt(targetImg.dataset.previewRetry || '0', 10) || 0;
+                        if (retry < 1) {
+                            targetImg.dataset.previewRetry = String(retry + 1);
+                            setTimeout(() => {
+                                if (reqId !== imagePreviewRequestSeq) return;
+                                if (targetImg.dataset.imagePath !== expectedPath) return;
+                                if (isWin) {
+                                    getImageBlobUrl(server, expectedPath, previewOptions)
+                                        .then((u) => {
+                                            if (reqId !== imagePreviewRequestSeq) return;
+                                            if (targetImg.dataset.imagePath !== expectedPath) return;
+                                            targetImg.src = u;
+                                        })
+                                        .catch(() => {});
+                                } else {
+                                    targetImg.src = getImageStreamUrl(server, expectedPath, { t: Date.now() });
+                                }
+                            }, 180 + Math.floor(Math.random() * 160));
+                            return;
                         }
+                        targetImg.style.opacity = currentReady ? '0' : '1';
+                        _updateImageCaption(item, index, len, '加载失败');
+                    };
+
+                    targetImg.onload = () => {
+                        commitLoadedImage();
+                    };
+
+                    if (isWin) {
+                        const u = await getImageBlobUrl(server, expectedPath, previewOptions);
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        targetImg.src = u;
+                        maybeCommitCachedImage();
+                    } else {
+                        targetImg.src = url;
+                        maybeCommitCachedImage();
                     }
 
                     // Prefetch neighbors (debounced) to make switching feel instant without flooding.
@@ -7092,8 +7357,9 @@
                     if (reqId !== imagePreviewRequestSeq) return;
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
-                    if (img && img.dataset.imagePath === (item.path || '')) {
-                        img.style.opacity = '1';
+                    const currentImg = getActivePreviewImage();
+                    if (currentImg && currentImg.dataset.imagePath === (item.path || '')) {
+                        currentImg.style.opacity = '1';
                     }
                     _updateImageCaption(item, index, len, '加载失败');
                 }
@@ -7235,7 +7501,7 @@
             function openImageModal(src, title) {
                 const modal = document.getElementById('imagePreviewModal');
                 if (!modal) return;
-                const img = modal.querySelector('img');
+                const img = getActivePreviewImage() || modal.querySelector('img');
                 if (img) img.src = src;
                 modal.style.display = 'block';
             }
@@ -7253,15 +7519,29 @@
                     clearTimeout(imagePrefetchTimer);
                     imagePrefetchTimer = 0;
                 }
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
                 if (imagePreviewFetchController) {
                     try { imagePreviewFetchController.abort(); } catch (_) {}
                     imagePreviewFetchController = null;
                 }
-                const img = modal.querySelector('img');
-                if (img) img.removeAttribute('src');
+                const preview = getImagePreviewElements();
+                if (preview) {
+                    preview.layers.forEach((img, idx) => {
+                        resetPreviewLayer(img);
+                        if (idx === 0) {
+                            img.classList.add('is-active');
+                        }
+                    });
+                }
                 imageZoom = 1;
                 imageOffsetX = 0;
                 imageOffsetY = 0;
+                imagePreviewActiveLayerIndex = 0;
+                imagePreviewNavDirection = 1;
+                imagePreviewWheelAccumX = 0;
                 const caption = document.getElementById('imagePreviewCaption');
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
@@ -8910,56 +9190,280 @@
 
             function setupImageWheelZoom() {
                 const modal = document.getElementById('imagePreviewModal');
-                const img = modal ? modal.querySelector('img') : null;
-                if (!modal || !img) return;
-                let dragging = false;
-                let startX = 0;
-                let startY = 0;
-                let lastX = 0;
-                let lastY = 0;
-                let rafPending = false;
+                if (!modal) return;
+                const viewport = modal.querySelector('.image-preview-viewport');
+                if (!viewport) return;
+                const gesture = {
+                    pointers: new Map(),
+                    primaryPointerId: null,
+                    mode: 'idle',
+                    startClientX: 0,
+                    startClientY: 0,
+                    startOffsetX: 0,
+                    startOffsetY: 0,
+                    startZoom: IMAGE_PREVIEW_MIN_ZOOM,
+                    lastSwipeShiftX: 0,
+                    pinchStartDistance: 0,
+                    pinchAnchor: null
+                };
+                let lastTapAt = 0;
+                let lastTapX = 0;
+                let lastTapY = 0;
+
+                const updateActiveImageTransform = () => {
+                    const img = getActivePreviewImage();
+                    if (!img) return;
+                    applyImageTransform(img);
+                };
+
+                const setInteractionState = (isInteracting) => {
+                    const img = getActivePreviewImage();
+                    if (!img) return;
+                    img.classList.toggle('is-interacting', Boolean(isInteracting));
+                };
+
+                const beginSinglePointerGesture = (point) => {
+                    if (!point) return;
+                    const activeImg = getActivePreviewImage();
+                    gesture.primaryPointerId = point.pointerId;
+                    gesture.startClientX = point.clientX;
+                    gesture.startClientY = point.clientY;
+                    gesture.startOffsetX = imageOffsetX;
+                    gesture.startOffsetY = imageOffsetY;
+                    gesture.startZoom = imageZoom;
+                    gesture.lastSwipeShiftX = 0;
+                    gesture.mode = (imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.02 && ImageViewer.items.length > 1) ? 'swipe' : 'pan';
+                    if (activeImg) {
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                    }
+                    setInteractionState(true);
+                };
+
+                const beginPinchGesture = () => {
+                    const points = Array.from(gesture.pointers.values());
+                    if (points.length < 2) return;
+                    const [a, b] = points;
+                    const centerX = (a.clientX + b.clientX) / 2;
+                    const centerY = (a.clientY + b.clientY) / 2;
+                    const activeImg = getActivePreviewImage();
+                    gesture.mode = 'pinch';
+                    gesture.primaryPointerId = null;
+                    gesture.startZoom = imageZoom;
+                    gesture.startOffsetX = imageOffsetX;
+                    gesture.startOffsetY = imageOffsetY;
+                    gesture.pinchStartDistance = Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY));
+                    gesture.pinchAnchor = activeImg
+                        ? getPreviewContentPointAtClient(centerX, centerY, activeImg, imageZoom, imageOffsetX, imageOffsetY)
+                        : null;
+                    if (activeImg) {
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                    }
+                    setInteractionState(true);
+                };
+
+                const updateSwipeGesture = (point) => {
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg) return;
+                    const deltaX = point.clientX - gesture.startClientX;
+                    const deltaY = point.clientY - gesture.startClientY;
+                    if (Math.abs(deltaY) > Math.abs(deltaX) * 1.2) {
+                        gesture.lastSwipeShiftX = 0;
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                        return;
+                    }
+                    gesture.lastSwipeShiftX = deltaX;
+                    activeImg.style.setProperty('--preview-shift-x', `${deltaX}px`);
+                };
+
+                const updatePanGesture = (point) => {
+                    imageOffsetX = gesture.startOffsetX + (point.clientX - gesture.startClientX);
+                    imageOffsetY = gesture.startOffsetY + (point.clientY - gesture.startClientY);
+                    updateActiveImageTransform();
+                };
+
+                const updatePinchGesture = () => {
+                    const points = Array.from(gesture.pointers.values());
+                    const activeImg = getActivePreviewImage();
+                    if (points.length < 2 || !activeImg) return;
+                    const [a, b] = points;
+                    const centerX = (a.clientX + b.clientX) / 2;
+                    const centerY = (a.clientY + b.clientY) / 2;
+                    const distance = Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY));
+                    const nextZoom = clampImagePreviewZoom(gesture.startZoom * (distance / Math.max(1, gesture.pinchStartDistance)));
+                    const metrics = getImagePreviewMetrics(activeImg, nextZoom);
+                    imageZoom = nextZoom;
+                    if (gesture.pinchAnchor && metrics) {
+                        const viewportCenterX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                        const viewportCenterY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                        imageOffsetX = centerX - viewportCenterX - gesture.pinchAnchor.x * nextZoom;
+                        imageOffsetY = centerY - viewportCenterY - gesture.pinchAnchor.y * nextZoom;
+                    } else {
+                        imageOffsetX = gesture.startOffsetX;
+                        imageOffsetY = gesture.startOffsetY;
+                    }
+                    updateActiveImageTransform();
+                };
+
+                const finishPanOrPinchGesture = () => {
+                    setInteractionState(false);
+                    updateActiveImageTransform();
+                };
+
+                const finishSwipeGesture = () => {
+                    const activeImg = getActivePreviewImage();
+                    setInteractionState(false);
+                    if (!activeImg) return;
+                    const metrics = getImagePreviewMetrics(activeImg, imageZoom);
+                    const threshold = Math.max(80, (metrics ? metrics.viewportWidth : 760) * 0.12);
+                    const shiftX = gesture.lastSwipeShiftX;
+                    activeImg.style.setProperty('--preview-shift-x', '0px');
+                    gesture.lastSwipeShiftX = 0;
+                    if (Math.abs(shiftX) >= threshold) {
+                        requestShowImageAt(ImageViewer.index + (shiftX < 0 ? 1 : -1));
+                    }
+                };
+
+                const startFollowUpGestureFromRemainingPointer = () => {
+                    const remainingPointers = Array.from(gesture.pointers.values());
+                    if (remainingPointers.length !== 1) {
+                        gesture.mode = 'idle';
+                        gesture.primaryPointerId = null;
+                        return;
+                    }
+                    beginSinglePointerGesture(remainingPointers[0]);
+                };
+
+                const maybeHandleTouchDoubleTap = (e) => {
+                    if (e.pointerType !== 'touch') return false;
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg || activeImg.dataset.loaded !== '1') return false;
+                    const movedDistance = Math.hypot(e.clientX - gesture.startClientX, e.clientY - gesture.startClientY);
+                    if (movedDistance > 16) {
+                        lastTapAt = 0;
+                        return false;
+                    }
+                    const now = Date.now();
+                    const isDoubleTap = (now - lastTapAt) < 320
+                        && Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < 24;
+                    lastTapAt = now;
+                    lastTapX = e.clientX;
+                    lastTapY = e.clientY;
+                    if (!isDoubleTap) return false;
+                    const targetZoom = imageZoom > IMAGE_PREVIEW_MIN_ZOOM + 0.02
+                        ? IMAGE_PREVIEW_MIN_ZOOM
+                        : getImagePreviewSecondaryZoom(activeImg);
+                    setImagePreviewZoom(targetZoom, e.clientX, e.clientY, activeImg);
+                    lastTapAt = 0;
+                    return true;
+                };
 
                 modal.addEventListener('wheel', (e) => {
                     if (modal.style.display === 'none') return;
+                    const dominantDeltaX = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg) return;
+                    if (dominantDeltaX && ImageViewer.items.length > 1 && imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.02) {
+                        e.preventDefault();
+                        imagePreviewWheelAccumX += e.deltaX;
+                        if (Math.abs(imagePreviewWheelAccumX) >= 56) {
+                            const direction = imagePreviewWheelAccumX > 0 ? 1 : -1;
+                            imagePreviewWheelAccumX = 0;
+                            requestShowImageAt(ImageViewer.index + direction);
+                        }
+                        return;
+                    }
+                    imagePreviewWheelAccumX = 0;
                     e.preventDefault();
-                    const delta = e.deltaY > 0 ? -0.1 : 0.1;
-                    imageZoom = Math.min(5, Math.max(0.2, imageZoom + delta));
-                    applyImageTransform(img);
+                    const nextZoom = clampImagePreviewZoom(imageZoom * Math.exp(-e.deltaY * 0.0025));
+                    setImagePreviewZoom(nextZoom, e.clientX, e.clientY, activeImg);
                 }, { passive: false });
 
-                modal.addEventListener('mousedown', (e) => {
+                viewport.addEventListener('dblclick', (e) => {
                     if (modal.style.display === 'none') return;
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg || activeImg.dataset.loaded !== '1') return;
+                    const targetZoom = imageZoom > IMAGE_PREVIEW_MIN_ZOOM + 0.02
+                        ? IMAGE_PREVIEW_MIN_ZOOM
+                        : getImagePreviewSecondaryZoom(activeImg);
+                    setImagePreviewZoom(targetZoom, e.clientX, e.clientY, activeImg);
+                    e.preventDefault();
+                });
+
+                viewport.addEventListener('dragstart', (e) => {
+                    e.preventDefault();
+                });
+
+                viewport.addEventListener('pointerdown', (e) => {
+                    if (modal.style.display === 'none') return;
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     if (e.target.closest('#imagePreviewCloseBtn') ||
                         e.target.closest('#imagePrevBtn') ||
                         e.target.closest('#imageNextBtn')) {
                         return;
                     }
-                    dragging = true;
-                    startX = e.clientX - imageOffsetX;
-                    startY = e.clientY - imageOffsetY;
-                    lastX = imageOffsetX;
-                    lastY = imageOffsetY;
+                    gesture.pointers.set(e.pointerId, {
+                        pointerId: e.pointerId,
+                        clientX: e.clientX,
+                        clientY: e.clientY
+                    });
+                    try { viewport.setPointerCapture(e.pointerId); } catch (_) {}
+                    if (gesture.pointers.size >= 2) {
+                        beginPinchGesture();
+                    } else {
+                        beginSinglePointerGesture({
+                            pointerId: e.pointerId,
+                            clientX: e.clientX,
+                            clientY: e.clientY
+                        });
+                    }
                     e.preventDefault();
                 });
 
-                modal.addEventListener('mousemove', (e) => {
-                    if (!dragging) return;
-                    lastX = e.clientX - startX;
-                    lastY = e.clientY - startY;
-                    if (!rafPending) {
-                        rafPending = true;
-                        requestAnimationFrame(() => {
-                            imageOffsetX = lastX;
-                            imageOffsetY = lastY;
-                            applyImageTransform(img);
-                            rafPending = false;
-                        });
+                window.addEventListener('pointermove', (e) => {
+                    if (!gesture.pointers.has(e.pointerId)) return;
+                    gesture.pointers.set(e.pointerId, {
+                        pointerId: e.pointerId,
+                        clientX: e.clientX,
+                        clientY: e.clientY
+                    });
+                    if (gesture.mode === 'pinch' || gesture.pointers.size >= 2) {
+                        if (gesture.mode !== 'pinch') {
+                            beginPinchGesture();
+                        }
+                        updatePinchGesture();
+                        return;
+                    }
+                    if (gesture.primaryPointerId !== e.pointerId) return;
+                    const point = gesture.pointers.get(e.pointerId);
+                    if (!point) return;
+                    if (gesture.mode === 'swipe') {
+                        updateSwipeGesture(point);
+                    } else if (gesture.mode === 'pan') {
+                        updatePanGesture(point);
                     }
                 });
 
-                ['mouseup', 'mouseleave'].forEach(ev => {
-                    modal.addEventListener(ev, () => { dragging = false; });
-                });
+                const releasePointer = (e) => {
+                    if (!gesture.pointers.has(e.pointerId)) return;
+                    gesture.pointers.delete(e.pointerId);
+                    if (gesture.mode === 'pinch') {
+                        finishPanOrPinchGesture();
+                        startFollowUpGestureFromRemainingPointer();
+                        return;
+                    }
+                    if (gesture.primaryPointerId !== e.pointerId) return;
+                    if (gesture.mode === 'swipe') {
+                        finishSwipeGesture();
+                    } else if (gesture.mode === 'pan') {
+                        finishPanOrPinchGesture();
+                    }
+                    maybeHandleTouchDoubleTap(e);
+                    gesture.mode = 'idle';
+                    gesture.primaryPointerId = null;
+                };
+
+                window.addEventListener('pointerup', releasePointer);
+                window.addEventListener('pointercancel', releasePointer);
             }
         document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
