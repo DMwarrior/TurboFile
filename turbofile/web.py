@@ -2695,7 +2695,7 @@ def api_client_path_save():
 
 @bp.route('/api/compare_files', methods=['POST'])
 def compare_files():
-    """Compare two files and return a line-by-line diff (VSCode-style)."""
+    """Read two files and return their full text for Monaco diff rendering."""
     try:
         data = request.get_json(silent=True) or {}
         server_a = data.get('server_a')
@@ -2712,58 +2712,18 @@ def compare_files():
                     data_bytes = f.read()
             else:
                 data_bytes = _read_remote_file_bytes(server, path, timeout_sec=60.0)
-            text, _ = _decode_text_bytes(data_bytes)
-            return text
+            text, encoding = _decode_text_bytes(data_bytes)
+            return text, encoding
 
-        left_text = read_text(server_a, path_a).splitlines()
-        right_text = read_text(server_b, path_b).splitlines()
-
-        sm = SequenceMatcher(None, left_text, right_text)
-        diff_lines = []
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag == 'equal':
-                for k in range(i2 - i1):
-                    diff_lines.append({
-                        'left_no': i1 + k + 1,
-                        'right_no': j1 + k + 1,
-                        'left': left_text[i1 + k],
-                        'right': right_text[j1 + k],
-                        'tag': 'equal'
-                    })
-            elif tag == 'replace':
-                max_len = max(i2 - i1, j2 - j1)
-                for k in range(max_len):
-                    left_line = left_text[i1 + k] if (i1 + k) < i2 else ''
-                    right_line = right_text[j1 + k] if (j1 + k) < j2 else ''
-                    diff_lines.append({
-                        'left_no': i1 + k + 1 if (i1 + k) < i2 else None,
-                        'right_no': j1 + k + 1 if (j1 + k) < j2 else None,
-                        'left': left_line,
-                        'right': right_line,
-                        'tag': 'replace'
-                    })
-            elif tag == 'delete':
-                for k in range(i2 - i1):
-                    diff_lines.append({
-                        'left_no': i1 + k + 1,
-                        'right_no': None,
-                        'left': left_text[i1 + k],
-                        'right': '',
-                        'tag': 'delete'
-                    })
-            elif tag == 'insert':
-                for k in range(j2 - j1):
-                    diff_lines.append({
-                        'left_no': None,
-                        'right_no': j1 + k + 1,
-                        'left': '',
-                        'right': right_text[j1 + k],
-                        'tag': 'insert'
-                    })
+        left_text, left_encoding = read_text(server_a, path_a)
+        right_text, right_encoding = read_text(server_b, path_b)
 
         return jsonify({
             'success': True,
-            'lines': diff_lines
+            'left_content': left_text,
+            'right_content': right_text,
+            'left_encoding': left_encoding,
+            'right_encoding': right_encoding,
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})

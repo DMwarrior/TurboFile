@@ -8093,6 +8093,12 @@
                 model: null,
                 suppressModelChange: false
             };
+            const monacoDiffState = {
+                editor: null,
+                originalModel: null,
+                modifiedModel: null,
+                updateDisposable: null
+            };
 
             function getEditorTitleElement() {
                 return document.getElementById('editorTitleText');
@@ -8257,11 +8263,96 @@
                 });
             }
 
+            function buildDiffModelUri(server, path, side) {
+                const monaco = monacoEditorState.monaco || window.monaco;
+                if (!monaco) return null;
+                const normalizedPath = String(path || '').replace(/\\/g, '/');
+                const fullPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+                return monaco.Uri.from({
+                    scheme: 'file',
+                    authority: String(server || 'local'),
+                    path: fullPath,
+                    query: `diffSide=${encodeURIComponent(String(side || 'modified'))}`
+                });
+            }
+
             function disposeEditorModel() {
                 if (monacoEditorState.model) {
                     try { monacoEditorState.model.dispose(); } catch (_) {}
                     monacoEditorState.model = null;
                 }
+            }
+
+            function disposeDiffModels() {
+                if (monacoDiffState.originalModel) {
+                    try { monacoDiffState.originalModel.dispose(); } catch (_) {}
+                    monacoDiffState.originalModel = null;
+                }
+                if (monacoDiffState.modifiedModel) {
+                    try { monacoDiffState.modifiedModel.dispose(); } catch (_) {}
+                    monacoDiffState.modifiedModel = null;
+                }
+            }
+
+            function disposeDiffUpdateSubscription() {
+                if (monacoDiffState.updateDisposable) {
+                    try { monacoDiffState.updateDisposable.dispose(); } catch (_) {}
+                    monacoDiffState.updateDisposable = null;
+                }
+            }
+
+            function countDiffSpan(startLine, endLine) {
+                if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return 0;
+                if (startLine <= 0 || endLine <= 0) return 0;
+                return Math.max(0, endLine - startLine + 1);
+            }
+
+            function renderMonacoDiffSummary(meta = {}) {
+                const summary = document.getElementById('diffSummary');
+                if (!summary) return;
+                const leftEncoding = meta.leftEncoding || '';
+                const rightEncoding = meta.rightEncoding || '';
+                const insertCount = Number.isFinite(meta.insertCount) ? meta.insertCount : 0;
+                const deleteCount = Number.isFinite(meta.deleteCount) ? meta.deleteCount : 0;
+                const modifyCount = Number.isFinite(meta.modifyCount) ? meta.modifyCount : 0;
+                const parts = [];
+                if (leftEncoding || rightEncoding) {
+                    parts.push(`左 ${leftEncoding || '-'} / 右 ${rightEncoding || '-'}`);
+                }
+                parts.push(`新增 ${insertCount}`);
+                parts.push(`删除 ${deleteCount}`);
+                parts.push(`修改 ${modifyCount}`);
+                summary.textContent = parts.join('，');
+            }
+
+            function updateMonacoDiffSummary(meta = {}) {
+                const editor = monacoDiffState.editor;
+                if (!editor || typeof editor.getLineChanges !== 'function') {
+                    renderMonacoDiffSummary(meta);
+                    return;
+                }
+                const lineChanges = editor.getLineChanges() || [];
+                let insertCount = 0;
+                let deleteCount = 0;
+                let modifyCount = 0;
+                lineChanges.forEach((change) => {
+                    const originalCount = countDiffSpan(change.originalStartLineNumber, change.originalEndLineNumber);
+                    const modifiedCount = countDiffSpan(change.modifiedStartLineNumber, change.modifiedEndLineNumber);
+                    if (!originalCount && modifiedCount) {
+                        insertCount += modifiedCount;
+                    } else if (originalCount && !modifiedCount) {
+                        deleteCount += originalCount;
+                    } else {
+                        modifyCount += Math.max(originalCount, modifiedCount);
+                    }
+                });
+                renderMonacoDiffSummary({
+                    leftEncoding: meta.leftEncoding,
+                    rightEncoding: meta.rightEncoding,
+                    insertCount,
+                    deleteCount,
+                    modifyCount
+                });
             }
 
             function getEditorContent() {
@@ -8377,6 +8468,34 @@
                     editorViewState.lastContent = getEditorContent();
                 });
                 return monacoEditorState.editor;
+            }
+
+            async function ensureDiffEditorInstance() {
+                const monaco = await ensureMonacoEditorReady();
+                if (monacoDiffState.editor) return monacoDiffState.editor;
+                const container = document.getElementById('diffMonacoContainer');
+                if (!container) throw new Error('Diff 编辑器容器不存在');
+
+                const themeMode = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                monaco.editor.setTheme(getMonacoThemeName(themeMode));
+                monacoDiffState.editor = monaco.editor.createDiffEditor(container, {
+                    automaticLayout: true,
+                    readOnly: true,
+                    originalEditable: false,
+                    renderSideBySide: true,
+                    useInlineViewWhenSpaceIsLimited: true,
+                    minimap: { enabled: false },
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    fontFamily: getEditorFontFamily(),
+                    fontSize: getEditorFontSize(),
+                    lineHeight: getEditorLineHeight(),
+                    fontLigatures: false,
+                    renderOverviewRuler: true,
+                    diffWordWrap: 'off',
+                    wordWrap: 'off'
+                });
+                return monacoDiffState.editor;
             }
 
             function openEditorModal(server, path, title, content, options = {}) {
@@ -8707,75 +8826,85 @@
                         addLogError(`❌ 对比失败: ${data.error || '未知错误'}`);
                         return;
                     }
-                    showDiffModal(data.lines || [], left, right);
+                    showDiffModal(data, left, right);
                 } catch (e) {
                     addLogError(`❌ 对比异常: ${e.message || e}`);
                 }
             }
 
-            function showDiffModal(lines, leftMeta, rightMeta) {
+            function showDiffModal(diffData, leftMeta, rightMeta) {
                 const modal = document.getElementById('diffModal');
-                const rows = document.getElementById('diffRows');
                 const leftPath = document.getElementById('diffLeftPath');
                 const rightPath = document.getElementById('diffRightPath');
-                const summary = document.getElementById('diffSummary');
-                if (!modal || !rows) return;
+                if (!modal) return;
 
-                rows.innerHTML = '';
                 leftPath.textContent = leftMeta ? `${leftMeta.name} (${leftMeta.server})` : '';
                 rightPath.textContent = rightMeta ? `${rightMeta.name} (${rightMeta.server})` : '';
-
-                let addCount = 0, delCount = 0, repCount = 0;
-                (lines || []).forEach(line => {
-                    const tag = line.tag || 'equal';
-                    if (tag === 'insert') addCount++;
-                    else if (tag === 'delete') delCount++;
-                    else if (tag === 'replace') repCount++;
-
-                    const pair = document.createElement('div');
-                    pair.className = 'diff-line';
-                    pair.classList.add(tag);
-
-                    const leftSide = document.createElement('div');
-                    leftSide.className = 'diff-side left';
-                    const lno = document.createElement('div');
-                    lno.className = 'diff-lineno';
-                    lno.textContent = line.left_no ? line.left_no : '';
-                    const lcode = document.createElement('div');
-                    lcode.className = 'diff-code';
-                    lcode.textContent = (line.left ?? '');
-                    leftSide.appendChild(lno);
-                    leftSide.appendChild(lcode);
-
-                    const rightSide = document.createElement('div');
-                    rightSide.className = 'diff-side right';
-                    const rno = document.createElement('div');
-                    rno.className = 'diff-lineno';
-                    rno.textContent = line.right_no ? line.right_no : '';
-                    const rcode = document.createElement('div');
-                    rcode.className = 'diff-code';
-                    rcode.textContent = (line.right ?? '');
-                    rightSide.appendChild(rno);
-                    rightSide.appendChild(rcode);
-
-                    pair.appendChild(leftSide);
-                    pair.appendChild(rightSide);
-                    rows.appendChild(pair);
+                renderMonacoDiffSummary({
+                    leftEncoding: diffData && diffData.left_encoding,
+                    rightEncoding: diffData && diffData.right_encoding
                 });
-
-                if (summary) {
-                    summary.textContent = `新增 ${addCount}，删除 ${delCount}，修改 ${repCount}`;
-                }
-
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
+
+                ensureDiffEditorInstance().then((editor) => {
+                    const monaco = monacoEditorState.monaco || window.monaco;
+                    if (!monaco) throw new Error('Monaco 初始化失败');
+
+                    disposeDiffUpdateSubscription();
+                    disposeDiffModels();
+
+                    const leftContent = (diffData && typeof diffData.left_content === 'string') ? diffData.left_content : '';
+                    const rightContent = (diffData && typeof diffData.right_content === 'string') ? diffData.right_content : '';
+                    const originalLanguage = detectMonacoLanguage(leftMeta && leftMeta.path, leftMeta && leftMeta.name);
+                    const modifiedLanguage = detectMonacoLanguage(rightMeta && rightMeta.path, rightMeta && rightMeta.name);
+                    monacoDiffState.originalModel = monaco.editor.createModel(
+                        leftContent,
+                        originalLanguage,
+                        buildDiffModelUri(leftMeta && leftMeta.server, leftMeta && leftMeta.path, 'original') || undefined
+                    );
+                    monacoDiffState.modifiedModel = monaco.editor.createModel(
+                        rightContent,
+                        modifiedLanguage,
+                        buildDiffModelUri(rightMeta && rightMeta.server, rightMeta && rightMeta.path, 'modified') || undefined
+                    );
+                    editor.setModel({
+                        original: monacoDiffState.originalModel,
+                        modified: monacoDiffState.modifiedModel
+                    });
+                    editor.updateOptions({
+                        fontFamily: getEditorFontFamily(),
+                        fontSize: getEditorFontSize(),
+                        lineHeight: getEditorLineHeight()
+                    });
+                    monacoDiffState.updateDisposable = editor.onDidUpdateDiff(() => {
+                        updateMonacoDiffSummary({
+                            leftEncoding: diffData && diffData.left_encoding,
+                            rightEncoding: diffData && diffData.right_encoding
+                        });
+                    });
+                    requestAnimationFrame(() => {
+                        try { editor.layout(); } catch (_) {}
+                        updateMonacoDiffSummary({
+                            leftEncoding: diffData && diffData.left_encoding,
+                            rightEncoding: diffData && diffData.right_encoding
+                        });
+                        editor.focus();
+                    });
+                }).catch((e) => {
+                    addLogError(`❌ Diff 编辑器初始化失败: ${e.message || e}`);
+                });
             }
 
             function closeDiffModal() {
                 const modal = document.getElementById('diffModal');
-                const rows = document.getElementById('diffRows');
                 if (modal) modal.style.display = 'none';
-                if (rows) rows.innerHTML = '';
+                disposeDiffUpdateSubscription();
+                if (monacoDiffState.editor) {
+                    try { monacoDiffState.editor.setModel(null); } catch (_) {}
+                }
+                disposeDiffModels();
+                renderMonacoDiffSummary({});
                 document.body.style.overflow = '';
             }
 
