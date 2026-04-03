@@ -67,6 +67,183 @@
             position: relative;
         }
 
+        .panel-toolbar {
+            --panel-toolbar-gap: 8px;
+            gap: var(--panel-toolbar-gap);
+            min-height: 26px;
+        }
+
+        .panel-meta-text {
+            display: inline-flex;
+            align-items: center;
+            min-height: 26px;
+            margin: 0;
+            font-size: 0.75rem;
+            line-height: 1;
+            vertical-align: middle;
+        }
+
+        .browse-sort-controls {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--panel-toolbar-gap);
+            flex: 0 0 auto;
+            align-self: center;
+            min-height: 26px;
+            margin: 0;
+            line-height: 1;
+        }
+
+        .browse-sort-select {
+            min-width: 60px;
+            height: 26px;
+            min-height: 26px;
+            padding: 0 24px 0 8px;
+            font-family: inherit !important;
+            font-size: 0.75rem !important;
+            font-weight: 500 !important;
+            line-height: normal !important;
+            color: #64748b;
+            background-color: transparent;
+            border: 1px solid #dbe4f0;
+            border-radius: 4px;
+            box-shadow: none !important;
+            box-sizing: border-box;
+            vertical-align: middle;
+            appearance: auto;
+            -webkit-appearance: menulist;
+            -moz-appearance: menulist;
+            background-position: right 8px center;
+            background-size: 9px 7px;
+            margin: 0;
+        }
+
+        .browse-sort-order-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 32px;
+            height: 26px;
+            min-height: 26px;
+            padding: 0 8px;
+            font-family: inherit !important;
+            font-size: 0.75rem !important;
+            font-weight: 500 !important;
+            line-height: 1 !important;
+            background: transparent;
+            border: none !important;
+            border-radius: 4px;
+            box-shadow: none !important;
+            transform: none !important;
+            box-sizing: border-box;
+            vertical-align: middle;
+            margin: 0;
+            gap: 0;
+        }
+
+        .browse-sort-order-btn.btn,
+        .browse-sort-order-btn.btn-outline-primary,
+        .browse-sort-order-btn.btn-outline-primary:hover,
+        .browse-sort-order-btn.btn-outline-primary:focus,
+        .browse-sort-order-btn.btn-outline-primary:active,
+        .browse-sort-order-btn.btn-outline-success,
+        .browse-sort-order-btn.btn-outline-success:hover,
+        .browse-sort-order-btn.btn-outline-success:focus,
+        .browse-sort-order-btn.btn-outline-success:active {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            transform: none !important;
+        }
+
+        .panel-refresh-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            min-height: 26px;
+            height: 26px;
+            padding: 0 8px !important;
+            margin: 0;
+            font-size: 0.75rem !important;
+            line-height: 1 !important;
+            box-sizing: border-box;
+            vertical-align: middle;
+            color: #64748b !important;
+            border-color: #dbe4f0 !important;
+            box-shadow: none !important;
+        }
+
+        .panel-refresh-btn .bi {
+            font-size: 0.75rem;
+            line-height: 1;
+            color: #64748b;
+        }
+
+        .panel-hidden-switch {
+            display: inline-flex;
+            align-items: center;
+            min-height: 26px;
+            margin: 0;
+            font-size: 0.75rem;
+            line-height: 1;
+        }
+
+        .panel-hidden-switch.form-switch {
+            padding-left: 2rem;
+        }
+
+        .panel-hidden-switch .form-check-input {
+            margin-top: 0;
+        }
+
+        .panel-hidden-switch .form-check-label {
+            display: inline-flex;
+            align-items: center;
+            min-height: 26px;
+            margin-bottom: 0;
+            font-size: 0.75rem;
+            line-height: 1;
+        }
+
+        .browse-sort-order-btn:hover,
+        .browse-sort-order-btn:focus,
+        .browse-sort-order-btn:active {
+            background: transparent;
+            border-color: transparent;
+            box-shadow: none !important;
+            transform: none !important;
+        }
+
+        .browse-sort-select:focus {
+            color: #64748b;
+            border-color: #dbe4f0;
+            box-shadow: none !important;
+        }
+
+        .browse-sort-select option {
+            font-family: inherit;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .panel-refresh-btn:hover,
+        .panel-refresh-btn:focus,
+        .panel-refresh-btn:active {
+            color: #64748b !important;
+            border-color: #dbe4f0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            transform: none !important;
+        }
+
+        .panel-refresh-btn:hover .bi,
+        .panel-refresh-btn:focus .bi,
+        .panel-refresh-btn:active .bi,
+        .panel-hidden-switch .form-check-label {
+            color: #64748b;
+        }
+
         @font-face {
             font-family: 'TurboFile Terminal Ubuntu';
             src: url('/static/vendor/fonts/ubuntu-mono-400.woff2?v=terminal-ubuntu-2') format('woff2');

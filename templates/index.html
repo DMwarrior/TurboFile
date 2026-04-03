@@ -78,16 +78,22 @@
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-files text-info"></i> 左侧文件浏览
                         </h6>
-                        <div class="d-flex align-items-center" style="gap: 10px;">
-                            <small id="sourceFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
-                            <small id="sourceSelectedInfo" style="font-size: 0.75rem; color: #0d6efd; display: none;"></small>
-                            <button class="btn btn-outline-primary btn-sm" onclick="refreshSource()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
-                                <i class="bi bi-arrow-clockwise"></i> 刷新
-                            </button>
-                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                        <div class="d-flex align-items-center panel-toolbar">
+                            <small id="sourceFileCount" class="panel-meta-text" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="sourceSelectedInfo" class="panel-meta-text" style="font-size: 0.75rem; color: #0d6efd; display: none;"></small>
+                            <div class="browse-sort-controls">
+                                <select id="sourceSortBy" class="form-select form-select-sm browse-sort-select" onchange="handleBrowseSortChange('source')" title="排序方式">
+                                    <option value="name">名称</option>
+                                    <option value="modified">时间</option>
+                                    <option value="size">大小</option>
+                                    <option value="type">类型</option>
+                                </select>
+                                <button id="sourceSortOrderBtn" type="button" class="btn btn-outline-primary btn-sm panel-refresh-btn browse-sort-order-btn" onclick="toggleBrowseSortOrder('source')" title="切换升降序">升</button>
+                            </div>
+                            <div class="form-check form-switch panel-hidden-switch" style="font-size: 0.75rem;">
                                 <input class="form-check-input" type="checkbox" id="sourceShowHidden" onchange="toggleHiddenFiles('source')">
                                 <label class="form-check-label" for="sourceShowHidden" style="font-size: 0.75rem;">
-                                    显示隐藏文件
+                                    隐藏文件
                                 </label>
                             </div>
                         </div>
@@ -98,6 +104,11 @@
                             <span id="sourcePathDisplay" class="path-display">/</span>
                         </div>
                         <div class="path-actions">
+                            <button type="button" class="btn btn-sm" title="刷新目录内容"
+                                    onclick="refreshSource()"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-arrow-clockwise text-primary" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(true, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -184,16 +195,22 @@
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-folder-check text-success"></i> 右侧文件浏览
                         </h6>
-                        <div class="d-flex align-items-center" style="gap: 10px;">
-                            <small id="targetFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
-                            <small id="targetSelectedInfo" style="font-size: 0.75rem; color: #198754; display: none;"></small>
-                            <button class="btn btn-outline-success btn-sm" onclick="refreshTarget()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
-                                <i class="bi bi-arrow-clockwise"></i> 刷新
-                            </button>
-                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                        <div class="d-flex align-items-center panel-toolbar">
+                            <small id="targetFileCount" class="panel-meta-text" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="targetSelectedInfo" class="panel-meta-text" style="font-size: 0.75rem; color: #198754; display: none;"></small>
+                            <div class="browse-sort-controls">
+                                <select id="targetSortBy" class="form-select form-select-sm browse-sort-select" onchange="handleBrowseSortChange('target')" title="排序方式">
+                                    <option value="name">名称</option>
+                                    <option value="modified">时间</option>
+                                    <option value="size">大小</option>
+                                    <option value="type">类型</option>
+                                </select>
+                                <button id="targetSortOrderBtn" type="button" class="btn btn-outline-success btn-sm panel-refresh-btn browse-sort-order-btn" onclick="toggleBrowseSortOrder('target')" title="切换升降序">升</button>
+                            </div>
+                            <div class="form-check form-switch panel-hidden-switch" style="font-size: 0.75rem;">
                                 <input class="form-check-input" type="checkbox" id="targetShowHidden" onchange="toggleHiddenFiles('target')">
                                 <label class="form-check-label" for="targetShowHidden" style="font-size: 0.75rem;">
-                                    显示隐藏文件
+                                    隐藏文件
                                 </label>
                             </div>
                         </div>
@@ -204,6 +221,11 @@
                             <span id="targetPathDisplay" class="path-display">/</span>
                         </div>
                         <div class="path-actions">
+                            <button type="button" class="btn btn-sm" title="刷新目录内容"
+                                    onclick="refreshTarget()"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-arrow-clockwise text-success" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(false, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">

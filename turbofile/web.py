@@ -1830,6 +1830,8 @@ def browse_directory(server_ip):
     path = request.args.get('path', default_path)
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
     force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+    sort_by = normalize_browse_sort_by(request.args.get('sort_by'))
+    sort_order = normalize_browse_sort_order(request.args.get('sort_order'))
     try:
         offset = int(request.args.get('offset', 0))
     except ValueError:
@@ -1854,7 +1856,7 @@ def browse_directory(server_ip):
             print(f"🔄 强制刷新: 清除了 {cleared_count} 个缓存项 - {server_ip}:{path}")
 
         # Fetch directory list (rebuild after cache clear).
-        files = get_directory_listing_optimized(server_ip, path, show_hidden)
+        files = get_directory_listing_optimized(server_ip, path, show_hidden, sort_by, sort_order)
         total_count = len(files)
 
         # Pagination slice.
@@ -1871,6 +1873,8 @@ def browse_directory(server_ip):
             'path': path,
             'files': paged_files,
             'show_hidden': show_hidden,
+            'sort_by': sort_by,
+            'sort_order': sort_order,
             'force_refresh': force_refresh,
             'cache_cleared': cleared_count if force_refresh else 0,
             'response_time': round(response_time, 2),  # Include response timing.
@@ -1897,6 +1901,8 @@ def quick_search(server_ip):
     path = request.args.get('path', '')
     keyword = request.args.get('keyword', '').strip()
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
+    sort_by = normalize_browse_sort_by(request.args.get('sort_by'))
+    sort_order = normalize_browse_sort_order(request.args.get('sort_order'))
 
     if not server_ip or server_ip not in SERVERS:
         return jsonify({'success': False, 'error': '无效的服务器'}), 400
@@ -1904,7 +1910,7 @@ def quick_search(server_ip):
         return jsonify({'success': False, 'error': '缺少路径或关键字'}), 400
 
     try:
-        files = get_cached_listing(server_ip, path, show_hidden)
+        files = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
         if files is not None:
             if not files:
                 return jsonify({

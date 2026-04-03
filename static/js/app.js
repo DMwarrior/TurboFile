@@ -29,9 +29,12 @@
 
         const BROWSE_PAGE_SIZE = 400;
         const BROWSE_PAGE_SIZE_MAX = 2000;
+        const BROWSE_SORT_STORAGE_KEY = 'turbofile-browse-sort';
+        const BROWSE_SORT_BY_CHOICES = ['name', 'modified', 'size', 'type'];
+        const BROWSE_SORT_ORDER_CHOICES = ['asc', 'desc'];
         const browseState = {
-            source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null },
-            target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null }
+            source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null, sortBy: 'name', sortOrder: 'asc' },
+            target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null, sortBy: 'name', sortOrder: 'asc' }
         };
         const browsePositionMemory = {
             source: new Map(),
@@ -339,13 +342,15 @@
         }
 
         function _buildOptimisticItems(targetPath, files) {
-            const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            const now = Date.now();
+            const ts = new Date(now).toISOString().slice(0, 19).replace('T', ' ');
             return (files || []).map(f => ({
                 name: f.name,
                 path: _joinPath(targetPath, f.name),
                 is_directory: !!f.is_directory,
                 size: 0,
-                modified: ts
+                modified: ts,
+                modified_ts: Math.floor(now / 1000)
             }));
         }
 
@@ -360,7 +365,7 @@
 
             const state = isSource ? browseState.source : browseState.target;
             const baseIndex = state.loadedCount || 0;
-            const sorted = sortFilesWinSCPStyle([...items]);
+            const sorted = sortFilesForPanel([...items], isSource);
 
             sorted.forEach((file, idx) => {
                 const icon = file.is_directory ? 'bi-folder-fill text-warning' : 'bi-file-earmark text-info';
@@ -4132,8 +4137,108 @@
             return {
                 serverSelect: isSource ? 'sourceServer' : 'targetServer',
                 showHiddenCheckbox: isSource ? 'sourceShowHidden' : 'targetShowHidden',
-                containerId: isSource ? 'sourceFileBrowser' : 'targetFileBrowser'
+                containerId: isSource ? 'sourceFileBrowser' : 'targetFileBrowser',
+                sortSelect: isSource ? 'sourceSortBy' : 'targetSortBy',
+                sortOrderBtn: isSource ? 'sourceSortOrderBtn' : 'targetSortOrderBtn'
             };
+        }
+
+        function normalizeBrowseSortBy(value) {
+            const sortBy = String(value || 'name').trim().toLowerCase();
+            return BROWSE_SORT_BY_CHOICES.includes(sortBy) ? sortBy : 'name';
+        }
+
+        function normalizeBrowseSortOrder(value) {
+            const sortOrder = String(value || 'asc').trim().toLowerCase();
+            return BROWSE_SORT_ORDER_CHOICES.includes(sortOrder) ? sortOrder : 'asc';
+        }
+
+        function getPanelSortState(isSource) {
+            return isSource ? browseState.source : browseState.target;
+        }
+
+        function loadBrowseSortPreferences() {
+            try {
+                const raw = localStorage.getItem(BROWSE_SORT_STORAGE_KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                ['source', 'target'].forEach((panel) => {
+                    const next = parsed && typeof parsed === 'object' ? parsed[panel] : null;
+                    if (!next || typeof next !== 'object') return;
+                    browseState[panel].sortBy = normalizeBrowseSortBy(next.sortBy);
+                    browseState[panel].sortOrder = normalizeBrowseSortOrder(next.sortOrder);
+                });
+            } catch (_) {}
+        }
+
+        function saveBrowseSortPreferences() {
+            try {
+                localStorage.setItem(BROWSE_SORT_STORAGE_KEY, JSON.stringify({
+                    source: {
+                        sortBy: browseState.source.sortBy,
+                        sortOrder: browseState.source.sortOrder
+                    },
+                    target: {
+                        sortBy: browseState.target.sortBy,
+                        sortOrder: browseState.target.sortOrder
+                    }
+                }));
+            } catch (_) {}
+        }
+
+        function syncBrowseSortControls(panel) {
+            const isSource = panel === 'source';
+            const state = getPanelSortState(isSource);
+            const { sortSelect, sortOrderBtn } = getPanelConfig(isSource);
+            const select = document.getElementById(sortSelect);
+            const orderBtn = document.getElementById(sortOrderBtn);
+            if (select) {
+                select.value = normalizeBrowseSortBy(state.sortBy);
+            }
+            if (orderBtn) {
+                const sortOrder = normalizeBrowseSortOrder(state.sortOrder);
+                orderBtn.textContent = sortOrder === 'asc' ? '升' : '降';
+                orderBtn.title = sortOrder === 'asc' ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序';
+                orderBtn.setAttribute('aria-label', orderBtn.title);
+            }
+        }
+
+        function appendBrowseSortParams(params, isSource) {
+            const state = getPanelSortState(isSource);
+            params.set('sort_by', normalizeBrowseSortBy(state.sortBy));
+            params.set('sort_order', normalizeBrowseSortOrder(state.sortOrder));
+            return params;
+        }
+
+        function handleBrowseSortChange(panel) {
+            const isSource = panel === 'source';
+            const { sortSelect } = getPanelConfig(isSource);
+            const select = document.getElementById(sortSelect);
+            const nextSortBy = normalizeBrowseSortBy(select ? select.value : 'name');
+            const state = getPanelSortState(isSource);
+            if (state.sortBy === nextSortBy) {
+                syncBrowseSortControls(panel);
+                return;
+            }
+            state.sortBy = nextSortBy;
+            saveBrowseSortPreferences();
+            syncBrowseSortControls(panel);
+            const currentPath = getActivePath(isSource);
+            if (currentPath) {
+                loadDirectory(panel, currentPath, { reset: true });
+            }
+        }
+
+        function toggleBrowseSortOrder(panel) {
+            const isSource = panel === 'source';
+            const state = getPanelSortState(isSource);
+            state.sortOrder = normalizeBrowseSortOrder(state.sortOrder) === 'asc' ? 'desc' : 'asc';
+            saveBrowseSortPreferences();
+            syncBrowseSortControls(panel);
+            const currentPath = getActivePath(isSource);
+            if (currentPath) {
+                loadDirectory(panel, currentPath, { reset: true });
+            }
         }
 
         function buildBrowseMemoryKey(isSource, path) {
@@ -4141,7 +4246,8 @@
             const { serverSelect } = getPanelConfig(isSource);
             const server = document.getElementById(serverSelect).value;
             if (!server) return null;
-            return `${server}::${path}`;
+            const state = getPanelSortState(isSource);
+            return `${server}::${path}::${normalizeBrowseSortBy(state.sortBy)}::${normalizeBrowseSortOrder(state.sortOrder)}`;
         }
 
         function rememberBrowsePosition(isSource) {
@@ -4314,13 +4420,13 @@
                 invalidatePreviewCacheUnderDir(server, targetPath);
             }
 
-            const params = new URLSearchParams({
+            const params = appendBrowseSortParams(new URLSearchParams({
                 path: targetPath,
                 show_hidden: showHidden,
                 offset: requestOffset,
                 limit: BROWSE_PAGE_SIZE,
                 force_refresh: forceRefresh
-            });
+            }), isSource);
 
             try {
                 const response = await fetch(`/api/browse/${server}?${params.toString()}`, {
@@ -4585,26 +4691,70 @@
         }
 
 
-        function sortFilesWinSCPStyle(files) {
-            return files.sort((a, b) => {
+        const browseNameCollator = new Intl.Collator('zh-CN', {
+            numeric: true,
+            sensitivity: 'base'
+        });
 
-                if (a.is_directory && !b.is_directory) {
-                    return -1;
-                }
-                if (!a.is_directory && b.is_directory) {
-                    return 1;
-                }
+        function getFileNameSortValue(file) {
+            return String((file && file.name) || '');
+        }
 
+        function getFileModifiedSortValue(file) {
+            const ts = Number(file && file.modified_ts);
+            if (Number.isFinite(ts)) return ts;
+            const parsed = Date.parse(String((file && file.modified) || '').replace('上午', 'AM').replace('下午', 'PM'));
+            return Number.isFinite(parsed) ? parsed : 0;
+        }
 
-                const nameA = a.name.toLowerCase();
-                const nameB = b.name.toLowerCase();
+        function getFileSizeSortValue(file) {
+            const size = Number(file && file.size);
+            return Number.isFinite(size) ? size : 0;
+        }
 
+        function getFileTypeSortValue(file) {
+            const name = getFileNameSortValue(file);
+            if (!name || (file && file.is_directory)) return '';
+            const idx = name.lastIndexOf('.');
+            if (idx <= 0 || idx === name.length - 1) return '';
+            return name.slice(idx + 1).toLowerCase();
+        }
 
-                return nameA.localeCompare(nameB, undefined, {
-                    numeric: true,
-                    sensitivity: 'base'
-                });
-            });
+        function compareBrowseFiles(a, b, sortBy = 'name', sortOrder = 'asc') {
+            const dirA = !!(a && a.is_directory);
+            const dirB = !!(b && b.is_directory);
+            if (dirA !== dirB) {
+                return dirA ? -1 : 1;
+            }
+
+            const normalizedSortBy = normalizeBrowseSortBy(sortBy);
+            const normalizedSortOrder = normalizeBrowseSortOrder(sortOrder);
+            const factor = normalizedSortOrder === 'desc' ? -1 : 1;
+            let primary = 0;
+
+            if (normalizedSortBy === 'modified') {
+                primary = getFileModifiedSortValue(a) - getFileModifiedSortValue(b);
+            } else if (normalizedSortBy === 'size') {
+                primary = getFileSizeSortValue(a) - getFileSizeSortValue(b);
+            } else if (normalizedSortBy === 'type') {
+                primary = browseNameCollator.compare(getFileTypeSortValue(a), getFileTypeSortValue(b));
+            } else {
+                primary = browseNameCollator.compare(getFileNameSortValue(a), getFileNameSortValue(b));
+            }
+
+            if (primary !== 0) {
+                return primary * factor;
+            }
+            return browseNameCollator.compare(getFileNameSortValue(a), getFileNameSortValue(b)) * factor;
+        }
+
+        function sortFilesWinSCPStyle(files, sortBy = 'name', sortOrder = 'asc') {
+            return files.sort((a, b) => compareBrowseFiles(a, b, sortBy, sortOrder));
+        }
+
+        function sortFilesForPanel(files, isSource) {
+            const state = getPanelSortState(isSource);
+            return sortFilesWinSCPStyle(files, state.sortBy, state.sortOrder);
         }
 
 
@@ -4666,7 +4816,7 @@
                 }
             }
 
-            const sortedFiles = sortFilesWinSCPStyle([...files]);
+            const sortedFiles = sortFilesForPanel([...files], isSource);
 
             const fragment = document.createDocumentFragment();
             sortedFiles.forEach((file, index) => {
@@ -5308,12 +5458,12 @@
             state.loadingAllPromise = (async () => {
                 let localOffset = loadedCount;
                 while (true) {
-                    const params = new URLSearchParams({
+                    const params = appendBrowseSortParams(new URLSearchParams({
                         path: state.path,
                         show_hidden: showHidden,
                         offset: localOffset,
                         limit: BROWSE_PAGE_SIZE_MAX
-                    });
+                    }), isSource);
                     const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
                     const data = await resp.json();
                     if (!data.success) break;
@@ -5420,11 +5570,11 @@
 
             addLogInfo('🔎 正在快速查找，请稍候...');
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
-            const params = new URLSearchParams({
+            const params = appendBrowseSortParams(new URLSearchParams({
                 path: state.path,
                 keyword: rawKeyword,
                 show_hidden: showHidden
-            });
+            }), isSource);
 
             let data;
             try {
@@ -5459,12 +5609,12 @@
             }
 
             const pageStart = Math.floor(index / BROWSE_PAGE_SIZE) * BROWSE_PAGE_SIZE;
-            const pageParams = new URLSearchParams({
+            const pageParams = appendBrowseSortParams(new URLSearchParams({
                 path: state.path,
                 show_hidden: showHidden,
                 offset: pageStart,
                 limit: BROWSE_PAGE_SIZE
-            });
+            }), isSource);
 
             try {
                 const resp = await fetch(`/api/browse/${server}?${pageParams.toString()}`, { cache: 'no-cache' });
@@ -8292,12 +8442,12 @@
                         if (state.hasMore || state.fullHasMore || !state.fullItems) {
                             let localOffset = state.fullOffset || state.loadedCount || (state.offset || 0);
                             while (true) {
-                                const params = new URLSearchParams({
+                                const params = appendBrowseSortParams(new URLSearchParams({
                                     path: state.path,
                                     show_hidden: document.getElementById(isSource ? 'sourceShowHidden' : 'targetShowHidden').checked,
                                     offset: localOffset,
                                     limit: BROWSE_PAGE_SIZE_MAX
-                                });
+                                }), isSource);
                                 const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
                                 const data = await resp.json();
                                 if (!data.success) break;
@@ -10151,6 +10301,9 @@
 
 
             switchLogoDisplay('header');
+            loadBrowseSortPreferences();
+            syncBrowseSortControls('source');
+            syncBrowseSortControls('target');
 
 
             initializeResizers();

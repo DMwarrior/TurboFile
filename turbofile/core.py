@@ -1474,39 +1474,128 @@ def _natural_sort_key(name: str):
     except Exception:
         return [name.lower()]
 
-def sort_file_items(items):
-    """Sort WinSCP-style: directories first, then natural name order."""
+BROWSE_SORT_BY_NAME = 'name'
+BROWSE_SORT_BY_MODIFIED = 'modified'
+BROWSE_SORT_BY_SIZE = 'size'
+BROWSE_SORT_BY_TYPE = 'type'
+BROWSE_SORT_ORDER_ASC = 'asc'
+BROWSE_SORT_ORDER_DESC = 'desc'
+BROWSE_SORT_BY_CHOICES = {
+    BROWSE_SORT_BY_NAME,
+    BROWSE_SORT_BY_MODIFIED,
+    BROWSE_SORT_BY_SIZE,
+    BROWSE_SORT_BY_TYPE,
+}
+BROWSE_SORT_ORDER_CHOICES = {
+    BROWSE_SORT_ORDER_ASC,
+    BROWSE_SORT_ORDER_DESC,
+}
+
+
+def normalize_browse_sort_by(value):
+    sort_by = str(value or BROWSE_SORT_BY_NAME).strip().lower()
+    return sort_by if sort_by in BROWSE_SORT_BY_CHOICES else BROWSE_SORT_BY_NAME
+
+
+def normalize_browse_sort_order(value):
+    sort_order = str(value or BROWSE_SORT_ORDER_ASC).strip().lower()
+    return sort_order if sort_order in BROWSE_SORT_ORDER_CHOICES else BROWSE_SORT_ORDER_ASC
+
+
+def _file_extension_sort_key(name: str):
     try:
-        return sorted(
-            items,
-            key=lambda x: (
-                0 if x.get('is_directory') else 1,
-                _natural_sort_key(x.get('name', ''))
-            )
-        )
+        file_name = str(name or '')
+        if file_name.startswith('.') and file_name.count('.') == 1:
+            return ''
+        _, ext = os.path.splitext(file_name)
+        return ext[1:].lower()
+    except Exception:
+        return ''
+
+
+def _coerce_modified_timestamp(value):
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value or '').strip()
+        if not text:
+            return 0
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y/%m/%d %H:%M:%S', '%Y/%m/%d %H:%M'):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except Exception:
+                continue
+        text = text.replace('上午', 'AM').replace('下午', 'PM')
+        for fmt in ('%Y-%m-%d %p %I:%M', '%Y/%m/%d %p %I:%M', '%m/%d/%Y %p %I:%M'):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except Exception:
+                continue
+    except Exception:
+        return 0
+    return 0
+
+
+def _get_item_modified_ts(item):
+    try:
+        if isinstance(item, dict):
+            ts = item.get('modified_ts')
+            if isinstance(ts, (int, float)):
+                return int(ts)
+            return _coerce_modified_timestamp(item.get('modified'))
+    except Exception:
+        return 0
+    return 0
+
+
+def sort_file_items(items, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
+    """Sort file items with directories pinned first and configurable secondary ordering."""
+    try:
+        sort_by = normalize_browse_sort_by(sort_by)
+        sort_order = normalize_browse_sort_order(sort_order)
+        reverse = sort_order == BROWSE_SORT_ORDER_DESC
+
+        def _secondary_key(item):
+            name_key = _natural_sort_key(str(item.get('name', '')))
+            if sort_by == BROWSE_SORT_BY_MODIFIED:
+                return (_get_item_modified_ts(item), name_key)
+            if sort_by == BROWSE_SORT_BY_SIZE:
+                return (int(item.get('size') or 0), name_key)
+            if sort_by == BROWSE_SORT_BY_TYPE:
+                if item.get('is_directory'):
+                    return ('', name_key)
+                return (_file_extension_sort_key(item.get('name', '')), name_key)
+            return name_key
+
+        ordered = sorted(items, key=_secondary_key, reverse=reverse)
+        return sorted(ordered, key=lambda x: 0 if x.get('is_directory') else 1)
     except Exception:
         return items
 
-def get_cache_key(server_ip, path, show_hidden):
+
+def get_cache_key(server_ip, path, show_hidden, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Build cache key."""
-    return f"{server_ip}:{path}:{show_hidden}"
+    return (
+        f"{server_ip}:{path}:{show_hidden}:"
+        f"{normalize_browse_sort_by(sort_by)}:{normalize_browse_sort_order(sort_order)}"
+    )
 
 def is_cache_valid(cache_entry):
     """Check whether cache is valid."""
     return time.time() - cache_entry['timestamp'] < cache_timeout
 
-def get_cached_listing(server_ip, path, show_hidden):
+def get_cached_listing(server_ip, path, show_hidden, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Get cached file list."""
-    cache_key = get_cache_key(server_ip, path, show_hidden)
+    cache_key = get_cache_key(server_ip, path, show_hidden, sort_by, sort_order)
     if cache_key in file_cache:
         cache_entry = file_cache[cache_key]
         if is_cache_valid(cache_entry):
             return cache_entry['data']
     return None
 
-def set_cached_listing(server_ip, path, show_hidden, data):
+def set_cached_listing(server_ip, path, show_hidden, data, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Set file list cache."""
-    cache_key = get_cache_key(server_ip, path, show_hidden)
+    cache_key = get_cache_key(server_ip, path, show_hidden, sort_by, sort_order)
     file_cache[cache_key] = {
         'data': data,
         'timestamp': time.time()
@@ -1533,12 +1622,16 @@ def clear_cached_listing(server_ip, path, show_hidden=None):
 
         return len(keys_to_remove)
     else:
+        keys_to_remove = []
+        prefix = f"{server_ip}:{path}:{show_hidden}:"
+        for cache_key in file_cache.keys():
+            if cache_key.startswith(prefix):
+                keys_to_remove.append(cache_key)
 
-        cache_key = get_cache_key(server_ip, path, show_hidden)
-        if cache_key in file_cache:
-            del file_cache[cache_key]
-            return 1
-        return 0
+        for key in keys_to_remove:
+            del file_cache[key]
+
+        return len(keys_to_remove)
 
 def clear_all_cache():
     """Clear all caches."""
@@ -1617,7 +1710,7 @@ def is_winscp_hidden_file(name, permissions="", path="/"):
 
     return False
 
-def get_directory_listing(server_ip, path=None, show_hidden=False):
+def get_directory_listing(server_ip, path=None, show_hidden=False, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Get a remote directory listing.
 
     Args:
@@ -1630,7 +1723,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
         path = get_default_path(server_ip)
 
 
-    cached_result = get_cached_listing(server_ip, path, show_hidden)
+    cached_result = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
     if cached_result is not None:
         return cached_result
     if is_local_server(server_ip):
@@ -1651,10 +1744,11 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "path": item_path,
                     "is_directory": is_dir,
                     "size": size,
-                    "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "modified_ts": int(mtime)
                 })
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         except Exception:
             return []
@@ -1743,17 +1837,18 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                         "path": full_path,
                         "is_directory": is_directory,
                         "size": size,
-                        "modified": f"{date_str} {full_time}"
+                        "modified": f"{date_str} {full_time}",
+                        "modified_ts": _coerce_modified_timestamp(f"{date_str} {full_time}")
                     })
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         else:
 
 
 
-            command = f"ls -la {shlex.quote(path)} | tail -n +2"
+            command = f"LC_ALL=C ls -la --time-style=long-iso {shlex.quote(path)} | tail -n +2"
 
             output, error, _ = ssh_manager.execute_command(server_ip, command)
 
@@ -1795,13 +1890,13 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     continue
 
                 parts = line.split()
-                if len(parts) < 9:
+                if len(parts) < 8:
                     continue
 
                 permissions = parts[0]
                 size = parts[4]
-                date_parts = parts[5:8]
-                name = ' '.join(parts[8:])
+                date_parts = parts[5:7]
+                name = ' '.join(parts[7:])
 
                 if not show_hidden and name.startswith('.'):
                     continue
@@ -1822,14 +1917,15 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "path": os.path.join(path, name),
                     "is_directory": is_directory,
                     "size": int(size) if size.isdigit() else 0,
-                    "modified": ' '.join(date_parts)
+                    "modified": ' '.join(date_parts),
+                    "modified_ts": _coerce_modified_timestamp(' '.join(date_parts))
                 })
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
 
-def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
+def get_directory_listing_optimized(server_ip, path=None, show_hidden=False, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Optimized directory listing focused on response speed."""
 
 
@@ -1837,7 +1933,7 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
         path = get_default_path(server_ip)
 
 
-    cached_result = get_cached_listing(server_ip, path, show_hidden)
+    cached_result = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
     if cached_result is not None:
         return cached_result
 
@@ -1863,20 +1959,21 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
                             "path": os.path.join(path, entry.name),
                             "is_directory": is_dir,
                             "size": size,
-                            "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                            "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                            "modified_ts": int(mtime)
                         })
                     except (OSError, PermissionError):
 
                         continue
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         except Exception:
             return []
     else:
 
-        return get_directory_listing(server_ip, path, show_hidden)
+        return get_directory_listing(server_ip, path, show_hidden, sort_by, sort_order)
 
 def start_speed_update_timer(transfer_id, source_server, target_server):
     """Start the speed update timer to improve transfer performance."""
