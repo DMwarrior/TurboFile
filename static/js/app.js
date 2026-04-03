@@ -52,7 +52,7 @@
         let transferRefreshOverride = null; // { refreshSource: boolean, refreshTarget: boolean } | null
 
 
-        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false, promptSelection: null };
+        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false, promptSelection: null, variant: '' };
         const EDITOR_LARGE_FILE_CHUNK_BYTES = 256 * 1024;
         const EDITOR_FOLLOW_INTERVAL_MS = 2000;
         const editorViewState = {
@@ -92,13 +92,21 @@
         function _getUiDialogElements() {
             return {
                 modal: document.getElementById('uiDialogModal'),
+                dialog: document.querySelector('#uiDialogModal .ui-dialog'),
+                content: document.querySelector('#uiDialogModal .ui-dialog-content'),
                 title: document.getElementById('uiDialogTitle'),
+                eyebrow: document.getElementById('uiDialogEyebrow'),
+                subtitle: document.getElementById('uiDialogSubtitle'),
+                iconBadge: document.getElementById('uiDialogIconBadge'),
+                icon: document.getElementById('uiDialogIcon'),
                 message: document.getElementById('uiDialogMessage'),
                 list: document.getElementById('uiDialogList'),
                 warning: document.getElementById('uiDialogWarning'),
                 warningText: document.querySelector('#uiDialogWarning span'),
                 inputRow: document.getElementById('uiDialogInputRow'),
                 input: document.getElementById('uiDialogInput'),
+                inputHint: document.getElementById('uiDialogInputHint'),
+                meta: document.getElementById('uiDialogMeta'),
                 confirmBtn: document.getElementById('uiDialogConfirm'),
                 cancelBtn: document.getElementById('uiDialogCancel')
             };
@@ -205,9 +213,29 @@
 
             const els = _getUiDialogElements();
             uiDialogState.type = options.type || 'alert';
+            uiDialogState.variant = options.variant || '';
+
+            if (els.dialog) {
+                els.dialog.classList.toggle('ui-dialog-spotlight', uiDialogState.variant === 'spotlight-search');
+            }
 
             if (els.title) {
                 els.title.textContent = options.title || '提示';
+            }
+            if (els.eyebrow) {
+                const eyebrow = options.eyebrow || '';
+                els.eyebrow.textContent = eyebrow;
+                els.eyebrow.style.display = eyebrow ? 'block' : 'none';
+            }
+            if (els.subtitle) {
+                const subtitle = options.subtitle || '';
+                els.subtitle.textContent = subtitle;
+                els.subtitle.style.display = subtitle ? 'block' : 'none';
+            }
+            if (els.icon && els.iconBadge) {
+                const iconClass = options.iconClass || (uiDialogState.variant === 'spotlight-search' ? 'bi bi-search' : 'bi bi-info-circle');
+                els.icon.className = iconClass;
+                els.iconBadge.style.display = iconClass ? 'inline-flex' : 'none';
             }
             if (els.message) {
                 const msg = options.message || '';
@@ -248,6 +276,16 @@
                     els.input.placeholder = '';
                     uiDialogState.promptSelection = null;
                 }
+            }
+            if (els.inputHint) {
+                const inputHint = uiDialogState.type === 'prompt' ? (options.inputHint || '') : '';
+                els.inputHint.textContent = inputHint;
+                els.inputHint.style.display = inputHint ? 'inline-flex' : 'none';
+            }
+            if (els.meta) {
+                const meta = uiDialogState.type === 'prompt' ? (options.meta || '') : '';
+                els.meta.textContent = meta;
+                els.meta.style.display = meta ? 'block' : 'none';
             }
 
             if (els.confirmBtn) {
@@ -588,8 +626,7 @@
 
             if (finalMode === 'move' && !skipMoveConfirm) {
                 const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
-                    title: '剪切确认',
-                    danger: true
+                    title: '剪切确认'
                 });
                 if (!ok) {
                     return false;
@@ -3470,7 +3507,6 @@
 	                const ok = await showConfirmDialog(msg, {
 	                    title: '删除确认',
 	                    warning: '此操作不可恢复！',
-	                    danger: true,
 	                    confirmText: '删除'
 	                });
 	                if (!ok) return;
@@ -3523,7 +3559,6 @@
                 title: '删除确认',
                 items: selectedFiles.map(f => f.name),
                 warning: '此操作不可恢复！',
-                danger: true,
                 confirmText: '删除'
             });
             if (!ok) {
@@ -5517,8 +5552,14 @@
             }
 
             const input = await showPromptDialog('输入要查找的文件/文件夹名称关键字', {
-                title: '快速查找',
-                placeholder: '文件/文件夹关键字'
+                title: '递归查找',
+                placeholder: '输入文件名、目录名或关键字',
+                variant: 'spotlight-search',
+                eyebrow: 'Quick Search',
+                subtitle: '会搜索当前目录以及所有子目录',
+                iconClass: 'bi bi-search',
+                inputHint: 'Enter 搜索',
+                meta: '支持模糊匹配，结果会自动定位到第一个命中的文件或文件夹'
             });
             if (input === null) return;
             const rawKeyword = String(input || '').trim();
@@ -5961,7 +6002,7 @@
 	                    const excluded = selectAllState[key].excluded.size || 0;
 	                    const base = total > 0 ? `已全选：当前目录全部（共 ${total} 项）` : '已全选：当前目录全部';
 	                    el.textContent = excluded > 0 ? `${base}，已排除 ${excluded} 项` : base;
-	                    el.style.display = 'inline';
+	                    el.style.display = 'inline-flex';
 	                    return;
 	                }
 	                if (!selectedArr || selectedArr.length === 0) {
@@ -5975,7 +6016,7 @@
 	                if (fileCount > 0) parts.push(`${fileCount} 文件`);
 	                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
 	                el.textContent = `已选中：${parts.join('，')}`;
-	                el.style.display = 'inline';
+	                el.style.display = 'inline-flex';
 	            }
 
             renderSelectedInfo(true, selectedSourceFiles);
@@ -6031,8 +6072,7 @@
 
             if (currentTransferMode === 'move') {
                 const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
-                    title: '剪切确认',
-                    danger: true
+                    title: '剪切确认'
                 });
                 if (!ok) {
                     return;

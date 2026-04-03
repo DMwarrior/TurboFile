@@ -312,30 +312,30 @@
             <div class="col-12">
                 <div class="card">
                     <div class="card-body" style="padding: 8px 12px;">
-                        <div class="text-center" style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
+                        <div class="text-center transfer-action-row" style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
                             <!-- Transfer mode selector (separated styles) -->
                             <input type="radio" class="btn-check" name="transferMode" id="modeCopy" value="copy" checked>
-                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeCopy">
+                            <label class="btn btn-outline-primary transfer-mode-btn codex-auth-btn" for="modeCopy">
                                 <i class="bi bi-files"></i> 复制
                             </label>
 
                             <input type="radio" class="btn-check" name="transferMode" id="modeMove" value="move">
-                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeMove">
+                            <label class="btn btn-outline-primary transfer-mode-btn codex-auth-btn" for="modeMove">
                                 <i class="bi bi-scissors"></i> 剪切
                             </label>
 
                             <!-- Start transfer button -->
-                            <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()" style="padding: 6px 16px;">
+                            <button id="startTransferBtn" class="btn btn-primary me-2 codex-auth-btn codex-auth-btn-light" onclick="startTransfer()" style="padding: 6px 16px;">
                                 <i class="bi bi-lightning-charge-fill"></i> 开始传输
                             </button>
 
                             <!-- Cancel transfer button -->
-                            <button id="cancelTransferBtn" class="btn btn-danger me-2" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none; padding: 6px 16px;" title="单击取消传输，双击强制终止">
+                            <button id="cancelTransferBtn" class="btn btn-danger me-2 codex-auth-btn codex-auth-btn-danger" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none; padding: 6px 16px;" title="单击取消传输，双击强制终止">
                                 <i class="bi bi-stop-circle-fill"></i> 取消传输
                             </button>
 
                             <!-- View logs button -->
-                            <button class="btn btn-primary" onclick="showLogModal()" style="padding: 6px 12px;" title="查看传输日志">
+                            <button class="btn btn-primary codex-auth-btn codex-auth-btn-light" onclick="showLogModal()" style="padding: 6px 12px;" title="查看传输日志">
                                 <i class="bi bi-journal-text"></i> 查看日志
                             </button>
                         </div>
@@ -622,7 +622,16 @@
         <div class="modal-dialog modal-dialog-centered ui-dialog">
             <div class="modal-content ui-dialog-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="uiDialogTitle">提示</h5>
+                    <div class="ui-dialog-heading">
+                        <div class="ui-dialog-icon-badge" id="uiDialogIconBadge" aria-hidden="true">
+                            <i id="uiDialogIcon" class="bi bi-search"></i>
+                        </div>
+                        <div class="ui-dialog-heading-text">
+                            <div id="uiDialogEyebrow" class="ui-dialog-eyebrow" style="display: none;">Quick Search</div>
+                            <h5 class="modal-title" id="uiDialogTitle">提示</h5>
+                            <div id="uiDialogSubtitle" class="ui-dialog-subtitle" style="display: none;"></div>
+                        </div>
+                    </div>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -633,7 +642,12 @@
                         <span></span>
                     </div>
                     <div id="uiDialogInputRow" class="ui-dialog-input-row" style="display: none;">
-                        <input id="uiDialogInput" type="text" class="form-control form-control-sm" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                        <div class="ui-dialog-input-shell">
+                            <i class="bi bi-search ui-dialog-input-icon" aria-hidden="true"></i>
+                            <input id="uiDialogInput" type="text" class="form-control form-control-sm ui-dialog-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                            <span id="uiDialogInputHint" class="ui-dialog-input-hint" style="display: none;">Enter</span>
+                        </div>
+                        <div id="uiDialogMeta" class="ui-dialog-meta" style="display: none;"></div>
                     </div>
                 </div>
                 <div class="modal-footer">
