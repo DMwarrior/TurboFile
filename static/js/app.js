@@ -1128,9 +1128,11 @@
                     }
                 } else {
                     driveSelect.innerHTML = '<option value="">(无磁盘信息)</option>';
+                    showActionFailureToast('加载磁盘失败', data, '无磁盘信息');
                 }
-            } catch (_) {
+            } catch (error) {
                 driveSelect.innerHTML = '<option value="">(加载失败)</option>';
+                showActionFailureToast('加载磁盘异常', error.message);
             }
         }
 
@@ -1184,6 +1186,7 @@
                 const data = await resp.json();
                 if (!data.success) {
                     listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${data.error || '未知错误'}</div>`;
+                    showActionFailureToast('浏览目录失败', data);
                     return;
                 }
 
@@ -1246,6 +1249,7 @@
                 positionDownloadWindowsModal();
             } catch (e) {
                 listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${String(e)}</div>`;
+                showActionFailureToast('浏览目录异常', e.message || e);
             }
         }
 
@@ -2121,6 +2125,34 @@
             setTimeout(() => {
                 if (item.parentNode) item.parentNode.removeChild(item);
             }, toastConfig.duration);
+        }
+
+        function compactToastDetail(detail, maxLength = 140) {
+            const text = String(detail || '')
+                .replace(/\s+/g, ' ')
+                .replace(/^Warning:\s*Permanently added.*?known hosts\.\s*/i, '')
+                .trim();
+            if (!text) return '';
+            return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+        }
+
+        function extractActionErrorMessage(payload, fallback = '未知错误') {
+            if (!payload) return fallback;
+            if (typeof payload === 'string') {
+                return compactToastDetail(payload) || fallback;
+            }
+            const direct = compactToastDetail(payload.error || payload.message || '');
+            if (direct) return direct;
+            if (Array.isArray(payload.failed_items) && payload.failed_items.length > 0) {
+                const first = payload.failed_items[0] || {};
+                return compactToastDetail(first.error || first.path || '') || fallback;
+            }
+            return fallback;
+        }
+
+        function showActionFailureToast(action, payload, fallback = '未知错误') {
+            const detail = extractActionErrorMessage(payload, fallback);
+            showToast(`${action}: ${detail}`, 'error');
         }
 
         function getTerminalState(panel) {
@@ -3186,7 +3218,7 @@
                     setTerminalStatus(panel, '连接失败', 'error');
                     state.term.write(`\x1b[1;31m终端创建失败: ${result.error || '未知错误'}\x1b[0m\r\n`);
                     addLogError(`❌ 终端创建失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 终端创建失败', 'error');
+                    showActionFailureToast('终端创建失败', result);
                     return false;
                 }
                 state.terminalId = result.terminal_id || '';
@@ -3208,7 +3240,7 @@
                 setTerminalStatus(panel, '连接失败', 'error');
                 state.term.write(`\x1b[1;31m终端创建异常: ${error.message}\x1b[0m\r\n`);
                 addLogError(`❌ 终端创建异常: ${error.message}`);
-                showToast('❌ 终端创建异常', 'error');
+                showActionFailureToast('终端创建异常', error.message);
                 return false;
             }
         }
@@ -3610,7 +3642,7 @@
                     }
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 删除失败', 'error');
+                    showActionFailureToast('删除失败', result);
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -3620,7 +3652,7 @@
                 silentRefresh();
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showToast('❌ 删除异常', 'error');
+                showActionFailureToast('删除异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -3672,7 +3704,7 @@
                     }
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 删除失败', 'error');
+                    showActionFailureToast('删除失败', result);
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -3682,7 +3714,7 @@
                 return ok;
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showToast('❌ 删除异常', 'error');
+                showActionFailureToast('删除异常', error.message);
                 return false;
             } finally {
                 imageDeleteInFlight = false;
@@ -3750,12 +3782,14 @@
                     }
                 } else {
                     addLogError(`❌ 创建文件夹失败: ${result.error}`);
+                    showActionFailureToast('新建文件夹失败', result);
                     if (optimisticAdded) {
                         removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
                     }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件夹异常: ${error.message}`);
+                showActionFailureToast('新建文件夹异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -3789,12 +3823,14 @@
                     }
                 } else {
                     addLogError(`❌ 创建文件失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('新建文件失败', result);
                     if (optimisticAdded) {
                         removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
                     }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件异常: ${error.message}`);
+                showActionFailureToast('新建文件异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -3880,6 +3916,7 @@
                     }
                 } else {
                     addLogError(`❌ 重命名失败: ${result.error}`);
+                    showActionFailureToast('重命名失败', result);
                     if (optimistic && oldName) {
                         applyRenameOptimistic(type, optimistic.newPath, oldName);
                     } else if (type === 'source') {
@@ -3890,6 +3927,7 @@
                 }
             } catch (error) {
                 addLogError(`❌ 重命名异常: ${error.message}`);
+                showActionFailureToast('重命名异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -3945,9 +3983,11 @@
                     addLogWarning('⏹️ 已发送中断请求');
                 } else {
                     addLogError(`❌ 中断失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('中断失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 中断异常: ${err.message}`);
+                showActionFailureToast('中断异常', err.message);
             }
         }
 
@@ -3969,9 +4009,11 @@
                 const result = await resp.json();
                 if (!result.success) {
                     addLogError(`❌ 发送输入失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('发送输入失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 发送输入异常: ${err.message}`);
+                showActionFailureToast('发送输入异常', err.message);
             } finally {
                 inputEl.value = '';
             }
@@ -4084,9 +4126,11 @@
                     updateRunControls();
                 } else {
                     addLogError(`❌ 运行失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('运行失败', result);
                 }
             } catch (error) {
                 addLogError(`❌ 运行异常: ${error.message}`);
+                showActionFailureToast('运行异常', error.message);
             }
         }
 
@@ -4115,11 +4159,11 @@
                     showToast(`📏 大小: ${sizeText}`, 'success');
                 } else {
                     addLogError(`❌ 计算失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 计算失败', 'error');
+                    showActionFailureToast('计算失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 计算异常: ${err.message}`);
-                showToast('❌ 计算异常', 'error');
+                showActionFailureToast('计算异常', err.message);
             }
         }
 
@@ -4138,11 +4182,11 @@
                     showToast(`🗜️ 压缩完成: ${zipName}`, 'success');
                 } else {
                     addLogError(`❌ 压缩失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 压缩失败', 'error');
+                    showActionFailureToast('压缩失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 压缩异常: ${err.message}`);
-                showToast('❌ 压缩异常', 'error');
+                showActionFailureToast('压缩异常', err.message);
             }
         }
 
@@ -4160,11 +4204,11 @@
                     showToast(`📂 解压完成: ${fileName}`, 'success');
                 } else {
                     addLogError(`❌ 解压失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 解压失败', 'error');
+                    showActionFailureToast('解压失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 解压异常: ${err.message}`);
-                showToast('❌ 解压异常', 'error');
+                showActionFailureToast('解压异常', err.message);
             }
         }
 
@@ -4527,12 +4571,14 @@
                     state.hasMore = false;
                     showErrorState(containerId, '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览${isSource ? '源' : '目标'}目录失败: ${data.error}`);
+                    showActionFailureToast(`浏览${isSource ? '源' : '目标'}目录失败`, data);
                 }
             } catch (error) {
                 if (error.name !== 'AbortError') {
                     console.error('Error:', error);
                     showErrorState(containerId, '浏览失败: ' + error.message);
                     addLogError(`❌ 浏览${isSource ? '源' : '目标'}目录出错: ${error}`);
+                    showActionFailureToast(`浏览${isSource ? '源' : '目标'}目录异常`, error.message || error);
                 }
                 state.hasMore = false;
             } finally {
@@ -6620,7 +6666,7 @@
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输失败'; }
                     { const pb = document.getElementById('progressBar'); if (pb) pb.classList.add('bg-danger'); }
                     addLogError(`❌ 传输失败: ${data.message}`);
-                    showToast('❌ 传输失败', 'error');
+                    showActionFailureToast('传输失败', data && data.message ? data.message : '未知错误');
                 }
 
 
@@ -6642,6 +6688,7 @@
                     addLogWarning('⚠️ 传输已取消');
                 } else {
                     addLogError(`❌ 取消传输失败: ${data.message}`);
+                    showActionFailureToast('取消传输失败', data && data.message ? data.message : '未知错误');
                 }
 
                 setTimeout(resetTransferUI, 2000);
@@ -9212,9 +9259,11 @@
                         showToast('✅ 已保存', 'success');
                     } else {
                         addLogError('保存失败: ' + (data.error || '未知错误'));
+                        showActionFailureToast('保存失败', data);
                     }
                 } catch (e) {
                     addLogError('保存失败: ' + (e.message || e));
+                    showActionFailureToast('保存异常', e.message || e);
                 }
             }
 
@@ -9338,11 +9387,13 @@
                     const data = await resp.json();
                     if (!data.success) {
                         addLogError(`❌ 对比失败: ${data.error || '未知错误'}`);
+                        showActionFailureToast('对比失败', data);
                         return;
                     }
                     showDiffModal(data, left, right);
                 } catch (e) {
                     addLogError(`❌ 对比异常: ${e.message || e}`);
+                    showActionFailureToast('对比异常', e.message || e);
                 }
             }
 
