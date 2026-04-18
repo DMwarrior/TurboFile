@@ -1,10 +1,1066 @@
-from flask import Blueprint, render_template, request, jsonify, Response
+from flask import Blueprint, render_template, request, jsonify, Response, redirect, send_from_directory
 from flask_socketio import emit
+
+import codecs
+import posixpath
+import os
+import re
+import shutil
+import threading
+import time
+import uuid
+import zipfile
 
 from .extensions import socketio
 from .core import *  # noqa: F403 - Keep legacy imports; refine to explicit later.
 
 bp = Blueprint('turbofile', __name__)
+
+_REMOTE_IMAGE_TOOL_CACHE = {}
+_REMOTE_IMAGE_TOOL_CACHE_GUARD = threading.Lock()
+_REMOTE_IMAGE_TOOL_CACHE_TTL_SEC = 300
+
+_REMOTE_WIN_IMAGE_TOOL_CACHE = {}
+_REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD = threading.Lock()
+_REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC = 300
+
+_SERVER_ACCESS_KEYS = ('server', 'source_server', 'target_server', 'server_a', 'server_b')
+
+TEXT_EDITOR_FULL_READ_MAX_BYTES = 1024 * 1024
+TEXT_EDITOR_CHUNK_READ_BYTES = 256 * 1024
+TEXT_EDITOR_CHUNK_READ_MIN_BYTES = 4 * 1024
+TEXT_EDITOR_CHUNK_READ_MAX_BYTES = 1024 * 1024
+TEXT_EDITOR_SAMPLE_BYTES = 4096
+TEXT_EDITOR_BINARY_PREVIEW_BYTES_PER_LINE = 16
+_ZIP_MOJIBAKE_HINT_RE = re.compile(r'[╬╠╣╦╩╪╫╭╮╯╰├┤┬┴┼═║█▄▌▐■αβΓπΣσµτΦΘΩδ∞φε∩≈√]')
+
+
+def _looks_like_zip_mojibake(name: str) -> bool:
+    text = str(name or '')
+    if not text or text.isascii():
+        return False
+    if any('\u4e00' <= ch <= '\u9fff' for ch in text):
+        return False
+    return bool(_ZIP_MOJIBAKE_HINT_RE.search(text))
+
+
+def _decode_zip_member_name(raw_name: str) -> str:
+    name = str(raw_name or '')
+    if not _looks_like_zip_mojibake(name):
+        return name
+    try:
+        raw_bytes = name.encode('cp437')
+    except UnicodeEncodeError:
+        return name
+    for encoding in ('gb18030', 'gbk', 'utf-8'):
+        try:
+            candidate = raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if candidate and ('\ufffd' not in candidate):
+            return candidate
+    return name
+
+
+def _normalize_zip_member_path(raw_name: str) -> str:
+    name = _decode_zip_member_name(raw_name).replace('\\', '/').strip()
+    if not name:
+        return ''
+    normalized = posixpath.normpath(name)
+    if normalized in ('', '.'):
+        return ''
+    while normalized.startswith('./'):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _safe_local_extract_target(base_dir: str, member_name: str) -> str:
+    base_abs = os.path.abspath(base_dir)
+    target = os.path.abspath(os.path.join(base_abs, member_name.replace('/', os.sep)))
+    if os.path.commonpath([base_abs, target]) != base_abs:
+        raise ValueError(f'压缩包内路径非法: {member_name}')
+    return target
+
+
+def _safe_remote_extract_target(base_dir: str, member_name: str) -> str:
+    base_norm = posixpath.normpath(str(base_dir or ''))
+    target = posixpath.normpath(posixpath.join(base_norm, member_name))
+    if target != base_norm and not target.startswith(f'{base_norm.rstrip("/")}/'):
+        raise ValueError(f'压缩包内路径非法: {member_name}')
+    return target
+
+
+def _apply_zip_permissions_local(target_path: str, info: zipfile.ZipInfo):
+    try:
+        mode = (int(info.external_attr) >> 16) & 0o777
+        if mode:
+            os.chmod(target_path, mode)
+    except Exception:
+        pass
+
+
+def _sftp_mkdirs_posix(sftp, directory: str):
+    target = posixpath.normpath(str(directory or ''))
+    if not target or target == '.':
+        return
+    parts = [part for part in target.split('/') if part]
+    current = '/' if target.startswith('/') else ''
+    for part in parts:
+        if current in ('', '/'):
+            current = f'/{part}' if target.startswith('/') else part
+        else:
+            current = posixpath.join(current, part)
+        try:
+            sftp.stat(current)
+        except Exception:
+            sftp.mkdir(current)
+
+
+def _extract_zip_local_linux(file_path: str, base_dir: str):
+    with zipfile.ZipFile(file_path) as archive:
+        for info in archive.infolist():
+            member_name = _normalize_zip_member_path(info.filename)
+            if not member_name:
+                continue
+            if member_name.startswith('/') or member_name.startswith('../') or '/../' in f'/{member_name}':
+                raise ValueError(f'压缩包内路径非法: {member_name}')
+            target_path = _safe_local_extract_target(base_dir, member_name)
+            if info.is_dir():
+                os.makedirs(target_path, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with archive.open(info, 'r') as src, open(target_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            _apply_zip_permissions_local(target_path, info)
+
+
+def _extract_zip_remote_linux(server_ip: str, file_path: str, base_dir: str):
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError(f'无法连接到服务器 {server_ip}')
+    sftp = None
+    try:
+        sftp = ssh.open_sftp()
+        archive_file, _ = _sftp_open_with_fallback(sftp, file_path, 'rb', False)
+        with archive_file:
+            with zipfile.ZipFile(archive_file) as archive:
+                for info in archive.infolist():
+                    member_name = _normalize_zip_member_path(info.filename)
+                    if not member_name:
+                        continue
+                    if member_name.startswith('/') or member_name.startswith('../') or '/../' in f'/{member_name}':
+                        raise ValueError(f'压缩包内路径非法: {member_name}')
+                    target_path = _safe_remote_extract_target(base_dir, member_name)
+                    if info.is_dir():
+                        _sftp_mkdirs_posix(sftp, target_path)
+                        continue
+                    _sftp_mkdirs_posix(sftp, posixpath.dirname(target_path))
+                    with archive.open(info, 'r') as src, sftp.file(target_path, 'wb') as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                    try:
+                        mode = (int(info.external_attr) >> 16) & 0o777
+                        if mode:
+                            sftp.chmod(target_path, mode)
+                    except Exception:
+                        pass
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _collect_requested_server_ips():
+    requested = []
+    seen = set()
+
+    def _append(value):
+        if not isinstance(value, str):
+            return
+        server_ip = value.strip()
+        if not server_ip or server_ip in seen:
+            return
+        seen.add(server_ip)
+        requested.append(server_ip)
+
+    for key, value in (request.view_args or {}).items():
+        if 'server' in str(key).lower():
+            _append(value)
+
+    for key in _SERVER_ACCESS_KEYS:
+        _append(request.args.get(key))
+        _append(request.form.get(key))
+
+    json_body = request.get_json(silent=True)
+    if isinstance(json_body, dict):
+        for key in _SERVER_ACCESS_KEYS:
+            _append(json_body.get(key))
+
+    return requested
+
+
+def _server_access_denied_response(server_ip: str, client_ip: str):
+    return jsonify({
+        'success': False,
+        'error': f'客户端 {client_ip or "未知"} 无权访问服务器 {server_ip}'
+    }), 403
+
+
+@bp.before_request
+def enforce_server_visibility():
+    client_ip = extract_client_ipv4_from_request(request)
+    for server_ip in _collect_requested_server_ips():
+        if server_ip in SERVERS and not is_server_visible_to_client(server_ip, client_ip):
+            return _server_access_denied_response(server_ip, client_ip)
+    return None
+
+
+def _guess_image_mime_from_path(path: str):
+    try:
+        p = (path or '').lower()
+        if p.endswith(('.jpg', '.jpeg')):
+            return 'image/jpeg'
+        if p.endswith('.png'):
+            return 'image/png'
+        if p.endswith('.webp'):
+            return 'image/webp'
+        if p.endswith('.gif'):
+            return 'image/gif'
+        if p.endswith('.bmp'):
+            return 'image/bmp'
+        if p.endswith('.svg'):
+            return 'image/svg+xml'
+    except Exception:
+        return None
+    return None
+
+
+def _try_parse_jpeg_dimensions(data: bytes):
+    """Best-effort JPEG header parser for (width, height)."""
+    try:
+        if not isinstance(data, (bytes, bytearray)):
+            return None
+        buf = bytes(data)
+        if len(buf) < 4 or not buf.startswith(b'\xFF\xD8'):
+            return None
+
+        i = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3,
+            0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB,
+            0xCD, 0xCE, 0xCF,
+        }
+        while i + 1 < len(buf):
+            # Find marker prefix 0xFF.
+            if buf[i] != 0xFF:
+                i += 1
+                continue
+            # Skip fill bytes 0xFF.
+            while i < len(buf) and buf[i] == 0xFF:
+                i += 1
+            if i >= len(buf):
+                break
+            marker = buf[i]
+            i += 1
+
+            # Standalone markers.
+            if marker in {0xD8, 0xD9}:
+                continue
+            # Start of Scan: image data begins; stop parsing.
+            if marker == 0xDA:
+                break
+
+            if i + 2 > len(buf):
+                break
+            seg_len = (buf[i] << 8) + buf[i + 1]
+            i += 2
+            if seg_len < 2:
+                break
+
+            if marker in sof_markers:
+                # Segment: [precision(1), height(2), width(2), ...]
+                if i + 5 > len(buf):
+                    break
+                height = (buf[i + 1] << 8) + buf[i + 2]
+                width = (buf[i + 3] << 8) + buf[i + 4]
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+                return None
+
+            i += seg_len - 2
+    except Exception:
+        return None
+
+
+def _try_parse_image_dimensions(data: bytes, path_hint: str = ''):
+    """Best-effort parser for common raster image dimensions as (width, height)."""
+    try:
+        if not isinstance(data, (bytes, bytearray)):
+            return None
+        buf = bytes(data)
+        if len(buf) < 10:
+            return None
+
+        dims = _try_parse_jpeg_dimensions(buf)
+        if dims:
+            return dims
+
+        if buf.startswith(b'\x89PNG\r\n\x1a\n') and len(buf) >= 24:
+            width = int.from_bytes(buf[16:20], 'big', signed=False)
+            height = int.from_bytes(buf[20:24], 'big', signed=False)
+            if width > 0 and height > 0:
+                return width, height
+
+        if buf[:6] in (b'GIF87a', b'GIF89a') and len(buf) >= 10:
+            width = int.from_bytes(buf[6:8], 'little', signed=False)
+            height = int.from_bytes(buf[8:10], 'little', signed=False)
+            if width > 0 and height > 0:
+                return width, height
+
+        if buf.startswith(b'BM') and len(buf) >= 26:
+            dib_header_size = int.from_bytes(buf[14:18], 'little', signed=False)
+            if dib_header_size >= 12:
+                width = int.from_bytes(buf[18:22], 'little', signed=True)
+                height = int.from_bytes(buf[22:26], 'little', signed=True)
+                width = abs(int(width))
+                height = abs(int(height))
+                if width > 0 and height > 0:
+                    return width, height
+
+        lower = (path_hint or '').lower()
+        if lower.endswith('.svg'):
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def _get_remote_linux_imagemagick_tool(server_ip: str):
+    """Return 'magick' or 'convert' when available on a remote Linux server, else None."""
+    if not server_ip:
+        return None
+    now = time.time()
+    with _REMOTE_IMAGE_TOOL_CACHE_GUARD:
+        entry = _REMOTE_IMAGE_TOOL_CACHE.get(server_ip)
+        if entry and (now - float(entry.get('ts', 0) or 0)) < _REMOTE_IMAGE_TOOL_CACHE_TTL_SEC:
+            tool = entry.get('tool') or ''
+            return tool if tool in {'magick', 'convert'} else None
+
+    tool = None
+    try:
+        # Only meaningful for remote Linux.
+        if is_local_server(server_ip) or is_windows_server(server_ip):
+            tool = None
+        else:
+            cmd = (
+                "sh -lc \""
+                "if command -v magick >/dev/null 2>&1; then echo magick; "
+                "elif command -v convert >/dev/null 2>&1; then echo convert; "
+                "else echo; fi\""
+            )
+            out, _, _ = ssh_manager.execute_command(server_ip, cmd)
+            candidate = (out or '').strip().splitlines()
+            tool = (candidate[0].strip() if candidate else '') or None
+            if tool not in {'magick', 'convert'}:
+                tool = None
+    except Exception:
+        tool = None
+
+    with _REMOTE_IMAGE_TOOL_CACHE_GUARD:
+        _REMOTE_IMAGE_TOOL_CACHE[server_ip] = {'ts': now, 'tool': tool or ''}
+    return tool
+
+
+def _get_remote_windows_imagemagick_tool(server_ip: str):
+    """Return 'magick' when available on a remote Windows server, else None."""
+    if not server_ip:
+        return None
+    now = time.time()
+    with _REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD:
+        entry = _REMOTE_WIN_IMAGE_TOOL_CACHE.get(server_ip)
+        if entry and (now - float(entry.get('ts', 0) or 0)) < _REMOTE_WIN_IMAGE_TOOL_CACHE_TTL_SEC:
+            tool = entry.get('tool') or ''
+            return tool if tool == 'magick' else None
+
+    tool = None
+    try:
+        if is_local_server(server_ip) or (not is_windows_server(server_ip)):
+            tool = None
+        else:
+            # `where magick` is the most reliable on Windows (avoid `convert` name clash).
+            cmd = 'cmd /c "where magick 2>nul"'
+            out, _, _ = ssh_manager.execute_command(server_ip, cmd)
+            if (out or '').strip():
+                tool = 'magick'
+    except Exception:
+        tool = None
+
+    with _REMOTE_WIN_IMAGE_TOOL_CACHE_GUARD:
+        _REMOTE_WIN_IMAGE_TOOL_CACHE[server_ip] = {'ts': now, 'tool': tool or ''}
+    return tool
+
+
+def _exec_ssh_command_bytes(ssh, command: str, timeout_sec: float = 25.0):
+    """Execute command via paramiko and return (stdout_bytes, stderr_bytes, exit_code)."""
+    if not ssh or not command:
+        return b'', b'', 1
+    try:
+        stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout_sec)
+        out_b = stdout.read() if stdout else b''
+        err_b = stderr.read() if stderr else b''
+        try:
+            exit_code = stdout.channel.recv_exit_status() if stdout and stdout.channel else 0
+        except Exception:
+            exit_code = 0 if out_b else 1
+        return out_b or b'', err_b or b'', int(exit_code or 0)
+    except Exception as e:
+        return b'', str(e).encode('utf-8', errors='ignore'), 1
+
+
+def _windows_file_stat_via_ssh(ssh, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a Windows path via PowerShell."""
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                "$i=Get-Item -LiteralPath $p;"
+                "$len=[int64]$i.Length;"
+                "$ts=[int64]([DateTimeOffset]$i.LastWriteTimeUtc).ToUnixTimeSeconds();"
+                "Write-Output (\"{0} {1}\" -f $len,$ts);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code != 0:
+                raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh stat failed')
+            text = (out_b or b'').decode('utf-8', errors='ignore').strip()
+            parts = text.split()
+            if len(parts) >= 2:
+                size = int(parts[0])
+                mtime = int(parts[1])
+                return size, mtime
+            raise RuntimeError(f"bad stat output: {text}")
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _windows_thumbnail_via_imagemagick(ssh, path: str, geom: str, fmt_key: str, quality_eff: int, timeout_sec: float = 25.0):
+    """Return (data_bytes, mime) using `magick` on Windows via cmd.exe."""
+    if not ssh or not path:
+        return None, None
+    out_spec = 'webp:-' if fmt_key == 'webp' else ('png:-' if fmt_key == 'png' else 'jpg:-')
+    out_mime = 'image/webp' if fmt_key == 'webp' else ('image/png' if fmt_key == 'png' else 'image/jpeg')
+    q = int(quality_eff) if 1 <= int(quality_eff) <= 95 else 82
+
+    def _q(s: str) -> str:
+        # cmd.exe quoting: double quotes; escape inner quotes by doubling.
+        return '"' + str(s).replace('"', '""') + '"'
+
+    src = _q(path)
+    geom_q = _q(geom) if geom else ''
+    q_arg = f"-quality {q}"
+    thumb_arg = f"-thumbnail {geom_q}" if geom_q else ""
+    cmd = f"cmd /c \"magick {src} {thumb_arg} -strip {q_arg} {out_spec}\""
+    out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+    if exit_code == 0 and out_b:
+        return out_b, out_mime
+
+    if out_spec == 'webp:-':
+        cmd2 = f"cmd /c \"magick {src} {thumb_arg} -strip {q_arg} jpg:-\""
+        out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd2, timeout_sec=timeout_sec)
+        if exit_code == 0 and out_b:
+            return out_b, 'image/jpeg'
+    return None, None
+
+
+def _windows_thumbnail_via_powershell(ssh, path: str, target_w: int, target_h: int, quality_eff: int, timeout_sec: float = 25.0):
+    """Return (jpeg_bytes, 'image/jpeg') using System.Drawing on Windows."""
+    if not ssh or not path:
+        return None, None
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            q = int(quality_eff) if 1 <= int(quality_eff) <= 95 else 82
+            tw = int(target_w or 0)
+            th = int(target_h or 0)
+            if tw <= 0 and th <= 0:
+                tw, th = 0, 0
+
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                "Add-Type -AssemblyName System.Drawing;"
+                f"$p='{safe_p}';"
+                f"$tw={tw};$th={th};$q={q};"
+                "$img=[System.Drawing.Image]::FromFile($p);"
+                "$w=$img.Width; $h=$img.Height;"
+                "if($tw -le 0 -and $th -le 0){$nw=$w;$nh=$h} "
+                "elseif($tw -le 0){$nh=$th; $nw=[int]([math]::Round($w*($nh/[double]$h)))} "
+                "elseif($th -le 0){$nw=$tw; $nh=[int]([math]::Round($h*($nw/[double]$w)))} "
+                "else{$r=[math]::Min($tw/[double]$w,$th/[double]$h); if($r -gt 1){$r=1}; $nw=[int]([math]::Round($w*$r)); $nh=[int]([math]::Round($h*$r))};"
+                "if($nw -lt 1){$nw=1}; if($nh -lt 1){$nh=1};"
+                "$bmp=New-Object System.Drawing.Bitmap $nw,$nh;"
+                "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+                "$g.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic;"
+                "$g.SmoothingMode=[System.Drawing.Drawing2D.SmoothingMode]::HighQuality;"
+                "$g.PixelOffsetMode=[System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality;"
+                "$g.CompositingQuality=[System.Drawing.Drawing2D.CompositingQuality]::HighQuality;"
+                "$g.DrawImage($img,0,0,$nw,$nh);"
+                "$ms=New-Object System.IO.MemoryStream;"
+                "$codec=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1;"
+                "$ep=New-Object System.Drawing.Imaging.EncoderParameters 1;"
+                "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality),([int]$q);"
+                "$bmp.Save($ms,$codec,$ep);"
+                "$g.Dispose();$bmp.Dispose();$img.Dispose();"
+                "$b=$ms.ToArray();$ms.Dispose();"
+                "$o=[Console]::OpenStandardOutput();$o.Write($b,0,$b.Length);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0 and out_b:
+                return out_b, 'image/jpeg'
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh thumb failed')
+        except Exception as e:
+            last_err = e
+            continue
+    return None, None
+
+
+def _windows_sftp_path_candidates(path: str):
+    """
+    Generate candidate SFTP paths for Windows OpenSSH.
+
+    Windows file listings return paths like: C:\\dir\\file.jpg
+    But SFTP implementations often expect: C:/dir/file.jpg or /C:/dir/file.jpg
+    """
+    raw = str(path or '').strip()
+    if not raw:
+        return []
+
+    # Strip surrounding quotes if present.
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        raw = raw[1:-1].strip()
+
+    candidates = []
+    candidates.append(raw)
+
+    slash = raw.replace('\\', '/')
+    # Normalize repeated slashes for drive-letter paths (keep UNC-like leading '//' untouched).
+    slash = re.sub(r'^([A-Za-z]:)/+', r'\1/', slash)
+    slash = re.sub(r'^/([A-Za-z]:)/+', r'/\1/', slash)
+    if slash != raw:
+        candidates.append(slash)
+
+    # If looks like a drive path, try adding leading '/' (common in SFTP on Windows).
+    m = re.match(r'^([A-Za-z]):/(.*)$', slash)
+    if m:
+        drive = m.group(1)
+        rest = m.group(2)
+        candidates.append(f"/{drive}:/{rest}")
+
+    # Also handle already-prefixed form: /C:/...
+    m2 = re.match(r'^/([A-Za-z]):/(.*)$', slash)
+    if m2:
+        drive = m2.group(1)
+        rest = m2.group(2)
+        candidates.append(f"{drive}:/{rest}")
+
+    # Dedup, keep order.
+    seen = set()
+    out = []
+    for c in candidates:
+        if not c:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def _sftp_stat_with_fallback(sftp, path: str, is_windows: bool):
+    if not sftp:
+        raise FileNotFoundError("SFTP unavailable")
+    if not is_windows:
+        return sftp.stat(path), path
+    last_err = None
+    for p in _windows_sftp_path_candidates(path):
+        try:
+            return sftp.stat(p), p
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _sftp_open_with_fallback(sftp, path: str, mode: str, is_windows: bool):
+    if not sftp:
+        raise FileNotFoundError("SFTP unavailable")
+    if not is_windows:
+        return sftp.file(path, mode), path
+    last_err = None
+    for p in _windows_sftp_path_candidates(path):
+        try:
+            return sftp.file(p, mode), p
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _windows_pwsh_path_candidates(path: str):
+    raw = str(path or '').strip()
+    if not raw:
+        return []
+
+    # Strip SFTP-style leading "/C:/".
+    if raw.startswith('/') and re.match(r'^/[A-Za-z]:', raw):
+        raw = raw[1:]
+
+    candidates = []
+    # Prefer normalized cmd path (backslashes), but keep the original around.
+    try:
+        candidates.append(normalize_windows_path_for_cmd(raw))  # noqa: F405
+    except Exception:
+        candidates.append(raw)
+    candidates.append(raw)
+
+    # Also try slash form converted to cmd form.
+    try:
+        candidates.append(normalize_windows_path_for_cmd(raw.replace('\\', '/')))  # noqa: F405
+    except Exception:
+        pass
+
+    # Dedup.
+    seen = set()
+    out = []
+    for c in candidates:
+        c = str(c or '').strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
+
+
+def _read_windows_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) -> bytes:
+    """
+    Read a Windows file via PowerShell over SSH and return raw bytes.
+    This is a fallback when SFTP path mapping/chroot causes ENOENT.
+    """
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                "[byte[]]$b=[System.IO.File]::ReadAllBytes($p);"
+                "$o=[Console]::OpenStandardOutput();"
+                "$o.Write($b,0,$b.Length);"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0 and out_b:
+                return out_b
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _read_windows_file_range_via_ssh(ssh, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a Windows file via PowerShell."""
+    if length is None:
+        return _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    offset = max(int(offset or 0), 0)
+    length = max(int(length or 0), 0)
+    if length <= 0:
+        return b''
+
+    last_err = None
+    for p in _windows_pwsh_path_candidates(path):
+        try:
+            safe_p = _escape_pwsh_literal(p)  # noqa: F405
+            ps = (
+                "$ErrorActionPreference='Stop';"
+                f"$p='{safe_p}';"
+                f"$off=[int64]{offset};"
+                f"$len=[int]{length};"
+                "$fs=[System.IO.File]::Open($p,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite);"
+                "try {"
+                "$size=[int64]$fs.Length;"
+                "if($off -lt 0){$off=0};"
+                "if($off -gt $size){$off=$size};"
+                "$remain=[int64]($size-$off);"
+                "if($len -gt $remain){$len=[int]$remain};"
+                "if($len -lt 0){$len=0};"
+                "$null=$fs.Seek($off,[System.IO.SeekOrigin]::Begin);"
+                "$buf=New-Object byte[] $len;"
+                "$read=$fs.Read($buf,0,$len);"
+                "$o=[Console]::OpenStandardOutput();"
+                "if($read -gt 0){$o.Write($buf,0,$read)};"
+                "} finally {"
+                "$fs.Dispose();"
+                "}"
+            )
+            cmd = f"powershell -NoProfile -Command \"{ps}\""
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'pwsh range read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _read_posix_file_bytes_via_ssh(ssh, path: str, timeout_sec: float = 30.0) -> bytes:
+    """
+    Read a POSIX file via SSH and return raw bytes.
+    This is a fallback when SFTP path resolution differs from the shell-visible path.
+    """
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import pathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())\" "
+            f"{quoted}"
+        ),
+        (
+            "python -c "
+            "\"import pathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())\" "
+            f"{quoted}"
+        ),
+        f"cat -- {quoted}",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _read_posix_file_range_via_ssh(ssh, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a POSIX file via SSH."""
+    if length is None:
+        return _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    offset = max(int(offset or 0), 0)
+    length = max(int(length or 0), 0)
+    if length <= 0:
+        return b''
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import pathlib,sys;f=pathlib.Path(sys.argv[1]).open('rb');"
+            "f.seek(int(sys.argv[2]));sys.stdout.buffer.write(f.read(int(sys.argv[3])));f.close()\" "
+            f"{quoted} {offset} {length}"
+        ),
+        (
+            "python -c "
+            "\"import pathlib,sys;f=pathlib.Path(sys.argv[1]).open('rb');"
+            "f.seek(int(sys.argv[2]));sys.stdout.buffer.write(f.read(int(sys.argv[3])));f.close()\" "
+            f"{quoted} {offset} {length}"
+        ),
+        f"dd if={quoted} bs=1 skip={offset} count={length} status=none",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code == 0:
+                return out_b or b''
+            last_err = RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix range read failed')
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _read_remote_file_bytes(server_ip: str, path: str, timeout_sec: float = 30.0) -> bytes:
+    """Read remote file bytes via SFTP first, then fall back to SSH shell reads."""
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+            with fobj as f:
+                data = f.read()
+                if isinstance(data, (bytes, bytearray)):
+                    return bytes(data)
+                return bytes(data)
+        except Exception:
+            if is_windows:
+                return _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+            return _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _read_remote_file_range(server_ip: str, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    """Read a byte range from a remote file via SFTP first, then SSH shell fallbacks."""
+    if offset <= 0 and length is None:
+        return _read_remote_file_bytes(server_ip, path, timeout_sec=timeout_sec)
+
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    offset = max(int(offset or 0), 0)
+    length = None if length is None else max(int(length or 0), 0)
+    if length == 0:
+        return b''
+
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+            with fobj as f:
+                if offset:
+                    f.seek(offset)
+                data = f.read() if length is None else f.read(length)
+                if isinstance(data, (bytes, bytearray)):
+                    return bytes(data)
+                return bytes(data)
+        except Exception:
+            if is_windows:
+                return _read_windows_file_range_via_ssh(ssh, path, offset=offset, length=length, timeout_sec=timeout_sec)
+            return _read_posix_file_range_via_ssh(ssh, path, offset=offset, length=length, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _decode_text_bytes(data: bytes):
+    """Decode text bytes with BOM detection and common Chinese encoding fallbacks."""
+    if data is None:
+        return '', 'utf-8'
+    if not isinstance(data, (bytes, bytearray)):
+        return str(data), 'text'
+
+    payload = bytes(data)
+    if payload.startswith(codecs.BOM_UTF8):
+        return payload.decode('utf-8-sig', errors='replace'), 'utf-8-sig'
+    if payload.startswith(codecs.BOM_UTF16_LE) or payload.startswith(codecs.BOM_UTF16_BE):
+        return payload.decode('utf-16', errors='replace'), 'utf-16'
+    if payload.startswith(codecs.BOM_UTF32_LE) or payload.startswith(codecs.BOM_UTF32_BE):
+        return payload.decode('utf-32', errors='replace'), 'utf-32'
+
+    for encoding in ('utf-8', 'gb18030', 'gbk', 'big5'):
+        try:
+            return payload.decode(encoding), encoding
+        except Exception:
+            continue
+    return payload.decode('utf-8', errors='replace'), 'utf-8'
+
+
+def _decode_text_bytes_with_hint(data: bytes, encoding_hint: str = ''):
+    hint = str(encoding_hint or '').strip().lower()
+    if hint in {'utf-8', 'utf-8-sig', 'utf-16', 'utf-32', 'gb18030', 'gbk', 'big5'}:
+        try:
+            return bytes(data or b'').decode(hint, errors='replace'), hint
+        except Exception:
+            pass
+    return _decode_text_bytes(data)
+
+
+def _looks_like_binary_bytes(data: bytes) -> bool:
+    payload = bytes(data or b'')
+    if not payload:
+        return False
+    sample = payload[:TEXT_EDITOR_SAMPLE_BYTES]
+    if b'\x00' in sample:
+        return True
+    suspicious = 0
+    for value in sample:
+        if value in (9, 10, 13):
+            continue
+        if 32 <= value <= 126:
+            continue
+        if value >= 128:
+            continue
+        suspicious += 1
+    return suspicious / max(1, len(sample)) >= 0.30
+
+
+def _format_binary_preview(data: bytes, start_offset: int = 0) -> str:
+    payload = bytes(data or b'')
+    if not payload:
+        return '二进制文件为空。'
+
+    lines = [
+        '当前文件已按二进制模式打开，仅支持只读 HEX 预览。',
+        '左侧偏移量，右侧为 ASCII 对照。',
+        ''
+    ]
+    bytes_per_line = TEXT_EDITOR_BINARY_PREVIEW_BYTES_PER_LINE
+    for index in range(0, len(payload), bytes_per_line):
+        chunk = payload[index:index + bytes_per_line]
+        hex_part = ' '.join(f'{value:02X}' for value in chunk).ljust(bytes_per_line * 3 - 1)
+        ascii_part = ''.join(chr(value) if 32 <= value <= 126 else '.' for value in chunk)
+        lines.append(f'{start_offset + index:08X}  {hex_part}  {ascii_part}')
+    return '\n'.join(lines)
+
+
+def _stat_posix_file_via_ssh(ssh, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a POSIX path via SSH."""
+    if not ssh or not path:
+        raise FileNotFoundError(path)
+
+    quoted = shlex.quote(str(path))
+    commands = [
+        (
+            "python3 -c "
+            "\"import os,sys;st=os.stat(sys.argv[1]);print('%d %d' % (st.st_size, int(st.st_mtime)))\" "
+            f"{quoted}"
+        ),
+        (
+            "python -c "
+            "\"import os,sys;st=os.stat(sys.argv[1]);print('%d %d' % (st.st_size, int(st.st_mtime)))\" "
+            f"{quoted}"
+        ),
+        f"stat -c '%s %Y' -- {quoted}",
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=timeout_sec)
+            if exit_code != 0:
+                raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'posix stat failed')
+            text = (out_b or b'').decode('utf-8', errors='ignore').strip()
+            parts = text.split()
+            if len(parts) >= 2:
+                return int(parts[0]), int(parts[1])
+            raise RuntimeError(f"bad stat output: {text}")
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or FileNotFoundError(path)
+
+
+def _stat_remote_file(server_ip: str, path: str, timeout_sec: float = 12.0):
+    """Return (size_bytes:int, mtime_unix:int) for a remote file."""
+    ssh = ssh_manager.get_connection(server_ip)
+    if not ssh:
+        raise RuntimeError('SSH连接失败')
+
+    sftp = None
+    is_windows = is_windows_server(server_ip)
+    try:
+        try:
+            sftp = ssh.open_sftp()
+        except Exception:
+            sftp = None
+
+        try:
+            st, _ = _sftp_stat_with_fallback(sftp, path, is_windows)
+            return int(getattr(st, 'st_size', 0) or 0), int(getattr(st, 'st_mtime', 0) or 0)
+        except Exception:
+            if is_windows:
+                return _windows_file_stat_via_ssh(ssh, path, timeout_sec=timeout_sec)
+            return _stat_posix_file_via_ssh(ssh, path, timeout_sec=timeout_sec)
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+def _stat_file(server_ip: str, path: str, timeout_sec: float = 12.0):
+    if is_local_server(server_ip):
+        st = os.stat(path)
+        return int(st.st_size), int(st.st_mtime)
+    return _stat_remote_file(server_ip, path, timeout_sec=timeout_sec)
+
+
+def _read_file_range(server_ip: str, path: str, offset: int = 0, length: int = None, timeout_sec: float = 30.0) -> bytes:
+    offset = max(int(offset or 0), 0)
+    if is_local_server(server_ip):
+        with open(path, 'rb') as f:
+            if offset:
+                f.seek(offset)
+            data = f.read() if length is None else f.read(max(int(length or 0), 0))
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+            return bytes(data)
+    return _read_remote_file_range(server_ip, path, offset=offset, length=length, timeout_sec=timeout_sec)
+
+
+def _apply_netron_cors_headers(resp: Response):
+    try:
+        origin = (request.headers.get('Origin') or '').strip()
+        if origin in {'https://netron.app', 'https://www.netron.app'}:
+            resp.headers['Access-Control-Allow-Origin'] = origin
+            resp.headers['Vary'] = 'Origin'
+        resp.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
+    except Exception:
+        pass
+    return resp
+
+
+def _get_netron_package_dir():
+    try:
+        import netron
+        return os.path.dirname(netron.__file__)
+    except Exception:
+        return None
+
 
 @bp.route('/')
 def index():
@@ -12,15 +1068,23 @@ def index():
 
     # Resolve the client IPv4 for front-end logging.
     client_ipv4 = extract_client_ipv4_from_request(request) or None
+    visible_servers = get_visible_servers_for_client(client_ipv4)
 
     # Determine whether the client is an admin (IP + config gate).
     is_admin_client = is_admin_client_ip(client_ipv4)
     with CLIENT_PATH_LOCK:
-        remembered_paths = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
+        remembered_paths_raw = load_client_paths().get(client_ipv4, {}) if client_ipv4 else {}
+    remembered_paths = {
+        panel: panel_state
+        for panel, panel_state in remembered_paths_raw.items()
+        if not isinstance(panel_state, dict)
+        or not panel_state.get('server')
+        or panel_state.get('server') in visible_servers
+    }
 
     return render_template(
         'index.html',
-        servers=SERVERS,
+        servers=visible_servers,
         client_ipv4=client_ipv4,
         is_admin_client=is_admin_client,
         remembered_paths=remembered_paths,
@@ -31,6 +1095,7 @@ def index():
 def api_image_stream():
     server_ip = request.args.get('server')
     path = request.args.get('path')
+    small_image_dim_limit = 100
     def _safe_int(value):
         try:
             return int(value)
@@ -42,89 +1107,481 @@ def api_image_stream():
     quality = _safe_int(request.args.get('quality', 0))
     interp = (request.args.get('interp') or '').strip().lower()
     img_format = (request.args.get('format') or '').strip().lower()
+    fmt_requested = img_format in {'jpg', 'jpeg', 'png', 'webp'}
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
+
+    resize_requested = bool(new_w or new_h)
+    encode_requested = bool(quality or interp or img_format)
+    transform_requested = resize_requested or encode_requested
+
+    # Normalize params for cache key.
+    quality_eff = quality if 1 <= quality <= 95 else 82
+    interp_key = interp if interp in {'lanczos', 'lanczos4', 'sharp'} else 'area'
+    fmt_key = img_format if img_format in {'jpg', 'jpeg', 'png', 'webp'} else ''
+    if fmt_key == 'jpeg':
+        fmt_key = 'jpg'
+    if transform_requested and not fmt_key:
+        fmt_key = 'jpg'
+
+    is_local = is_local_server(server_ip)
+    is_windows = is_windows_server(server_ip)
+    ssh = None
+    sftp = None
+    engine = 'unknown'
+    resolved_remote_path = path
 
     try:
         import cv2
         import numpy as np
 
-        def resize_bytes(img_bytes: bytes):
-            if not new_w and not new_h:
-                return img_bytes, None
-            arr = np.frombuffer(img_bytes, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+        def _decode_image_bytes(img_bytes: bytes):
+            try:
+                decode_flag = cv2.IMREAD_UNCHANGED
+                if resize_requested and (new_w > 0 or new_h > 0):
+                    lower = (path or '').lower()
+                    is_jpeg = lower.endswith(('.jpg', '.jpeg')) or (isinstance(img_bytes, (bytes, bytearray)) and bytes(img_bytes[:2]) == b'\xFF\xD8')
+                    if is_jpeg:
+                        desired_w = new_w if new_w > 0 else new_h
+                        desired_h = new_h if new_h > 0 else new_w
+                        if desired_w and not desired_h:
+                            desired_h = desired_w
+                        if desired_h and not desired_w:
+                            desired_w = desired_h
+                        dims = _try_parse_jpeg_dimensions(bytes(img_bytes[:131072]))
+                        if dims and desired_w and desired_h:
+                            orig_w, orig_h = dims
+                            reduce_factor = 1
+                            if orig_w // 8 >= desired_w and orig_h // 8 >= desired_h:
+                                reduce_factor = 8
+                            elif orig_w // 4 >= desired_w and orig_h // 4 >= desired_h:
+                                reduce_factor = 4
+                            elif orig_w // 2 >= desired_w and orig_h // 2 >= desired_h:
+                                reduce_factor = 2
+
+                            if reduce_factor == 8:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_8
+                            elif reduce_factor == 4:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_4
+                            elif reduce_factor == 2:
+                                decode_flag = cv2.IMREAD_REDUCED_COLOR_2
+                            else:
+                                decode_flag = cv2.IMREAD_COLOR
+
+                arr = np.frombuffer(img_bytes, dtype=np.uint8)
+                return cv2.imdecode(arr, decode_flag)
+            except Exception:
+                return None
+
+        def _is_small_original_image(img) -> bool:
+            try:
+                if img is None:
+                    return False
+                h, w = img.shape[:2]
+                return int(w) > 0 and int(h) > 0 and int(w) < small_image_dim_limit and int(h) < small_image_dim_limit
+            except Exception:
+                return False
+
+        def _raw_image_payload(img_bytes: bytes):
+            return img_bytes, (_guess_image_mime_from_path(path) or 'application/octet-stream')
+
+        def _try_read_remote_small_original():
+            try:
+                head = _read_remote_file_range(server_ip, path, offset=0, length=131072, timeout_sec=8.0)
+                dims = _try_parse_image_dimensions(head, path)
+                if not dims:
+                    return None, None
+                width, height = dims
+                if int(width) <= 0 or int(height) <= 0:
+                    return None, None
+                if int(width) >= small_image_dim_limit or int(height) >= small_image_dim_limit:
+                    return None, None
+            except Exception:
+                return None, None
+
+            try:
+                raw_bytes = None
+                try:
+                    fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        raw_bytes = f.read()
+                        if not isinstance(raw_bytes, (bytes, bytearray)):
+                            raw_bytes = bytes(raw_bytes)
+                except Exception:
+                    if is_windows:
+                        raw_bytes = _read_windows_file_bytes_via_ssh(ssh, path)
+                    else:
+                        raw_bytes = _read_posix_file_bytes_via_ssh(ssh, path)
+
+                if not raw_bytes:
+                    return None, None
+
+                img = _decode_image_bytes(raw_bytes)
+                if _is_small_original_image(img):
+                    return _raw_image_payload(raw_bytes)
+            except Exception:
+                return None, None
+            return None, None
+
+        def _transform_cv_image(img):
             if img is None:
-                return img_bytes, None
+                return None, None
             h, w = img.shape[:2]
             if w <= 0 or h <= 0:
-                return img_bytes, None
+                return None, None
 
-            target_w, target_h = new_w, new_h
-            if target_w <= 0 and target_h <= 0:
-                return img_bytes, None
-            if target_w > 0 and target_h > 0:
-                ratio = min(target_w / w, target_h / h)
-            elif target_w > 0:
-                ratio = target_w / w
-            else:
-                ratio = target_h / h
-            if ratio <= 0 or ratio >= 1:
-                return img_bytes, None
+            out_img = img
+            did_resize = False
+            if resize_requested and (new_w > 0 or new_h > 0):
+                target_w, target_h = new_w, new_h
+                if target_w > 0 and target_h > 0:
+                    ratio = min(target_w / w, target_h / h)
+                elif target_w > 0:
+                    ratio = target_w / w
+                else:
+                    ratio = target_h / h
 
-            target_w = max(1, int(w * ratio))
-            target_h = max(1, int(h * ratio))
-            interp_method = cv2.INTER_AREA
-            if interp in {'lanczos', 'lanczos4', 'sharp'}:
-                interp_method = cv2.INTER_LANCZOS4
-            resized = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
-            q = quality if 1 <= quality <= 95 else 82
-            fmt = img_format if img_format in {'jpg', 'jpeg', 'png', 'webp'} else ''
+                # Only downscale; keep original size when ratio >= 1 unless a re-encode is requested.
+                if ratio > 0 and ratio < 1:
+                    target_w = max(1, int(w * ratio))
+                    target_h = max(1, int(h * ratio))
+                    interp_method = cv2.INTER_AREA if interp_key == 'area' else cv2.INTER_LANCZOS4
+                    out_img = cv2.resize(img, (target_w, target_h), interpolation=interp_method)
+                    did_resize = True
 
-            if fmt in {'jpg', 'jpeg', ''}:
-                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-                if not ok:
-                    return img_bytes, None
-                return enc.tobytes(), 'image/jpeg'
+            if resize_requested and not did_resize and not encode_requested and not fmt_requested:
+                return None, None
+
+            fmt = fmt_key
+            if fmt not in {'jpg', 'png', 'webp'}:
+                fmt = 'jpg'
+
+            q = quality_eff
             if fmt == 'webp':
-                ok, enc = cv2.imencode('.webp', resized, [int(cv2.IMWRITE_WEBP_QUALITY), q])
+                ok, enc = cv2.imencode('.webp', out_img, [int(cv2.IMWRITE_WEBP_QUALITY), q])
                 if ok:
                     return enc.tobytes(), 'image/webp'
-                ok, enc = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+                # Fallback to jpeg.
+                ok, enc = cv2.imencode('.jpg', out_img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
                 if ok:
                     return enc.tobytes(), 'image/jpeg'
-                return img_bytes, None
+                return None, None
+            if fmt == 'png':
+                ok, enc = cv2.imencode('.png', out_img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                if ok:
+                    return enc.tobytes(), 'image/png'
+                return None, None
 
-            ok, enc = cv2.imencode('.png', resized, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
-            if not ok:
-                return img_bytes, None
-            return enc.tobytes(), 'image/png'
+            ok, enc = cv2.imencode('.jpg', out_img, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+            if ok:
+                return enc.tobytes(), 'image/jpeg'
+            return None, None
 
         # Local read.
-        if is_local_server(server_ip):
-            with open(path, 'rb') as f:
-                data = f.read()
-            data, mime = resize_bytes(data)
-            return Response(data, mimetype=mime or 'application/octet-stream')
-        # Remote read.
-        ssh = ssh_manager.get_connection(server_ip)
-        if not ssh:
-            return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
-        sftp = ssh.open_sftp()
-        try:
-            with sftp.file(path, 'rb') as f:
-                data = f.read()
-                if not isinstance(data, (bytes, bytearray)):
-                    data = bytes(data)
-            data, mime = resize_bytes(data)
-            return Response(data, mimetype=mime or 'application/octet-stream')
-        finally:
+        if is_local:
+            if not transform_requested:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw'
+                return resp
+
+            local_head = b''
+            local_dims = None
+            try:
+                with open(path, 'rb') as hf:
+                    local_head = hf.read(131072)
+                local_dims = _try_parse_image_dimensions(local_head, path)
+            except Exception:
+                local_head = b''
+                local_dims = None
+
+            if local_dims and int(local_dims[0]) < small_image_dim_limit and int(local_dims[1]) < small_image_dim_limit:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw-small-original'
+                return resp
+
+            img_read_flag = cv2.IMREAD_UNCHANGED
+            try:
+                lower = (path or '').lower()
+                if resize_requested and (new_w > 0 or new_h > 0) and lower.endswith(('.jpg', '.jpeg')):
+                    desired_w = new_w if new_w > 0 else new_h
+                    desired_h = new_h if new_h > 0 else new_w
+                    if desired_w and not desired_h:
+                        desired_h = desired_w
+                    if desired_h and not desired_w:
+                        desired_w = desired_h
+                    if desired_w and desired_h:
+                        dims = _try_parse_jpeg_dimensions(local_head)
+                        if dims:
+                            orig_w, orig_h = dims
+                            reduce_factor = 1
+                            if orig_w // 8 >= desired_w and orig_h // 8 >= desired_h:
+                                reduce_factor = 8
+                            elif orig_w // 4 >= desired_w and orig_h // 4 >= desired_h:
+                                reduce_factor = 4
+                            elif orig_w // 2 >= desired_w and orig_h // 2 >= desired_h:
+                                reduce_factor = 2
+                            if reduce_factor == 8:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_8
+                            elif reduce_factor == 4:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_4
+                            elif reduce_factor == 2:
+                                img_read_flag = cv2.IMREAD_REDUCED_COLOR_2
+                            else:
+                                img_read_flag = cv2.IMREAD_COLOR
+            except Exception:
+                img_read_flag = cv2.IMREAD_UNCHANGED
+
+            img = cv2.imread(path, img_read_flag)
+            if img is None:
+                with open(path, 'rb') as f:
+                    data = f.read()
+                resp = Response(data, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = 'raw'
+                return resp
+
+            if _is_small_original_image(img):
+                with open(path, 'rb') as f:
+                    data = f.read()
+                mime = _guess_image_mime_from_path(path)
+                engine = 'raw-small-original'
+            else:
+                data, mime = _transform_cv_image(img)
+                did_transform = bool(data and mime)
+                engine = 'opencv' if did_transform else 'raw'
+                if not did_transform:
+                    # Fallback to raw bytes when encode is bypassed/failed.
+                    with open(path, 'rb') as f:
+                        data = f.read()
+                    mime = _guess_image_mime_from_path(path)
+        else:
+            if not ssh:
+                ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            if not sftp:
+                try:
+                    sftp = ssh.open_sftp()
+                except Exception:
+                    sftp = None
+
+            if not transform_requested:
+                data_in = None
+                try:
+                    fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        data_in = f.read()
+                        if not isinstance(data_in, (bytes, bytearray)):
+                            data_in = bytes(data_in)
+                except Exception:
+                    if is_windows:
+                        data_in = _read_windows_file_bytes_via_ssh(ssh, path)
+                        engine = 'windows-pwsh'
+                    else:
+                        data_in = _read_posix_file_bytes_via_ssh(ssh, path)
+                        engine = 'posix-ssh'
+                resp = Response(data_in, mimetype=_guess_image_mime_from_path(path) or 'application/octet-stream')
+                resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+                resp.headers['X-TurboFile-Image-Engine'] = engine if engine != 'unknown' else 'raw'
+                return resp
+
+            did_transform = False
+            data = None
+            mime = None
+
+            data, mime = _try_read_remote_small_original()
+            if data and mime:
+                did_transform = True
+                engine = 'raw-small-original'
+
+            # Windows: prefer SFTP read + local OpenCV transform first (fast path similar to older versions).
+            # This avoids spawning a PowerShell/ImageMagick process per image when SFTP access works.
+            if is_windows and (not did_transform):
+                try:
+                    data_in = None
+                    try:
+                        fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', True)
+                        with fobj as f:
+                            data_in = f.read()
+                            if not isinstance(data_in, (bytes, bytearray)):
+                                data_in = bytes(data_in)
+                    except Exception:
+                        data_in = None
+
+                    if data_in:
+                        img = _decode_image_bytes(data_in)
+                        if _is_small_original_image(img):
+                            data, mime = _raw_image_payload(data_in)
+                            did_transform = True
+                            engine = 'raw-small-original'
+                        else:
+                            data, mime = _transform_cv_image(img)
+                            did_transform = bool(data and mime)
+                            if did_transform:
+                                engine = 'opencv'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            # Windows fallback: remote thumbnail generation (handles cases where SFTP path mapping fails).
+            if is_windows and (not did_transform):
+                try:
+                    target_w = new_w if new_w > 0 else new_h
+                    target_h = new_h if new_h > 0 else new_w
+                    if not target_w:
+                        target_w = 0
+                    if not target_h:
+                        target_h = 0
+                    if target_w and not target_h:
+                        target_h = target_w
+                    if target_h and not target_w:
+                        target_w = target_h
+                    geom = f"{int(target_w)}x{int(target_h)}>" if (target_w and target_h) else ""
+
+                    win_tool = _get_remote_windows_imagemagick_tool(server_ip)
+                    if win_tool == 'magick':
+                        out_b, out_mime = _windows_thumbnail_via_imagemagick(ssh, path, geom, fmt_key, quality_eff, timeout_sec=25.0)
+                        if out_b and out_mime:
+                            data, mime = out_b, out_mime
+                            did_transform = True
+                            engine = 'windows-imagemagick'
+                    if not did_transform:
+                        # For grid thumbnails, use a faster scaling preset to reduce per-image latency.
+                        is_thumb = max(int(target_w or 0), int(target_h or 0)) <= 900
+                        out_b, out_mime = _windows_thumbnail_via_powershell(
+                            ssh,
+                            path,
+                            int(target_w or 0),
+                            int(target_h or 0),
+                            quality_eff,
+                            fast=bool(is_thumb),
+                            timeout_sec=25.0
+                        )
+                        if out_b and out_mime:
+                            data, mime = out_b, out_mime
+                            did_transform = True
+                            engine = 'windows-powershell-resize'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            # Prefer remote thumbnail generation to avoid transferring the full original image over SSH.
+            remote_tool = None
+            try:
+                if not is_windows_server(server_ip):
+                    remote_tool = _get_remote_linux_imagemagick_tool(server_ip)
+            except Exception:
+                remote_tool = None
+
+            if (not did_transform) and remote_tool:
+                try:
+                    target_w = new_w if new_w > 0 else new_h
+                    target_h = new_h if new_h > 0 else new_w
+                    if not target_w:
+                        target_w = 0
+                    if not target_h:
+                        target_h = 0
+                    if target_w and not target_h:
+                        target_h = target_w
+                    if target_h and not target_w:
+                        target_w = target_h
+                    if target_w and target_h:
+                        geom = f"{target_w}x{target_h}>"
+                    elif target_w:
+                        geom = f"{target_w}x{target_w}>"
+                    else:
+                        geom = ""
+
+                    out_mime = 'image/webp' if fmt_key == 'webp' else ('image/png' if fmt_key == 'png' else 'image/jpeg')
+                    out_spec = 'webp:-' if fmt_key == 'webp' else ('png:-' if fmt_key == 'png' else 'jpg:-')
+
+                    filter_opt = ""
+                    if interp_key != 'area':
+                        filter_opt = " -filter Lanczos"
+                    quality_opt = f" -quality {int(quality_eff)}" if 1 <= quality_eff <= 95 else ""
+                    thumb_opt = f" -thumbnail {shlex.quote(geom)}" if geom else ""
+
+                    # IM7: magick <in> ... <out>; IM6: convert <in> ... <out>
+                    im_cmd = remote_tool
+                    src = shlex.quote(path)
+                    cmd = f"{im_cmd} {src}{thumb_opt}{filter_opt} -strip{quality_opt} {out_spec}"
+                    out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd, timeout_sec=25.0)
+
+                    if exit_code != 0 or not out_b:
+                        # Fallback when webp delegate is missing etc.
+                        if out_spec == 'webp:-':
+                            cmd2 = f"{im_cmd} {src}{thumb_opt}{filter_opt} -strip{quality_opt} jpg:-"
+                            out_b, err_b, exit_code = _exec_ssh_command_bytes(ssh, cmd2, timeout_sec=25.0)
+                            if exit_code == 0 and out_b:
+                                out_mime = 'image/jpeg'
+                        if exit_code != 0 or not out_b:
+                            raise RuntimeError((err_b or b'').decode('utf-8', errors='ignore') or 'remote thumbnail failed')
+
+                    data = out_b
+                    mime = out_mime
+                    did_transform = True
+                    engine = 'remote-imagemagick'
+                except Exception:
+                    did_transform = False
+                    data = None
+                    mime = None
+
+            if not did_transform:
+                data_in = None
+                try:
+                    fobj, resolved_remote_path = _sftp_open_with_fallback(sftp, path, 'rb', is_windows)
+                    with fobj as f:
+                        data_in = f.read()
+                        if not isinstance(data_in, (bytes, bytearray)):
+                            data_in = bytes(data_in)
+                except Exception:
+                    if is_windows:
+                        data_in = _read_windows_file_bytes_via_ssh(ssh, path)
+                        engine = 'windows-pwsh'
+                    else:
+                        data_in = _read_posix_file_bytes_via_ssh(ssh, path)
+                        engine = 'posix-ssh'
+
+                img = _decode_image_bytes(data_in)
+                if _is_small_original_image(img):
+                    data, mime = _raw_image_payload(data_in)
+                    did_transform = True
+                    engine = 'raw-small-original'
+                else:
+                    data, mime = _transform_cv_image(img)
+                    did_transform = bool(data and mime)
+                    if not did_transform:
+                        data = data_in
+                        mime = _guess_image_mime_from_path(path)
+                        engine = 'raw' if engine == 'unknown' else engine
+                    else:
+                        if engine == 'windows-pwsh':
+                            engine = 'windows-pwsh+opencv'
+                        elif engine == 'posix-ssh':
+                            engine = 'posix-ssh+opencv'
+                        else:
+                            engine = 'opencv'
+
+        resp = Response(data, mimetype=mime or 'application/octet-stream')
+        resp.headers['X-TurboFile-Image-Cache'] = 'BYPASS'
+        resp.headers['X-TurboFile-Image-Engine'] = engine
+        return resp
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if sftp:
             try:
                 sftp.close()
             except Exception:
                 pass
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @bp.route('/api/file/read', methods=['GET'])
@@ -134,28 +1591,40 @@ def api_file_read():
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
     try:
-        if is_local_server(server_ip):
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            return jsonify({'success': True, 'content': content})
-        else:
-            ssh = ssh_manager.get_connection(server_ip)
-            if not ssh:
-                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
-            sftp = ssh.open_sftp()
-            try:
-                with sftp.file(path, 'r') as f:
-                    data = f.read()
-                    if isinstance(data, (bytes, bytearray)):
-                        content = data.decode('utf-8', errors='ignore')
-                    else:
-                        content = str(data)
-                return jsonify({'success': True, 'content': content})
-            finally:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+        file_size, mtime = _stat_file(server_ip, path, timeout_sec=15.0)
+        encoding_hint = ''
+
+        if file_size > 0:
+            sample = _read_file_range(
+                server_ip,
+                path,
+                offset=0,
+                length=min(TEXT_EDITOR_SAMPLE_BYTES, file_size),
+                timeout_sec=20.0
+            )
+            _, encoding_hint = _decode_text_bytes(sample)
+
+        data = _read_file_range(server_ip, path, offset=0, length=None, timeout_sec=180.0)
+        content, encoding = _decode_text_bytes_with_hint(data, encoding_hint)
+        actual_end = len(data or b'')
+
+        return jsonify({
+            'success': True,
+            'content': content,
+            'encoding': encoding,
+            'binary': False,
+            'mode': 'full',
+            'file_size': file_size,
+            'mtime': mtime,
+            'read_offset': 0,
+            'read_end': actual_end,
+            'chunk_size': actual_end,
+            'read_only': False,
+            'truncated': False,
+            'can_load_prev': False,
+            'can_load_next': False,
+            'editable': True,
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -165,12 +1634,16 @@ def api_file_save():
     server_ip = data.get('server')
     path = data.get('path')
     content = data.get('content', '')
+    encoding = (data.get('encoding') or 'utf-8').strip().lower()
+    if encoding not in {'utf-8', 'utf-8-sig', 'utf-16', 'utf-32', 'gb18030', 'gbk', 'big5'}:
+        encoding = 'utf-8'
     if not server_ip or not path:
         return jsonify({'success': False, 'error': '缺少参数'}), 400
     try:
+        data_bytes = content.encode(encoding) if isinstance(content, str) else bytes(content)
         if is_local_server(server_ip):
-            with open(path, 'w', encoding='utf-8', errors='ignore') as f:
-                f.write(content if isinstance(content, str) else str(content))
+            with open(path, 'wb') as f:
+                f.write(data_bytes)
             return jsonify({'success': True})
         else:
             ssh = ssh_manager.get_connection(server_ip)
@@ -178,8 +1651,8 @@ def api_file_save():
                 return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
             sftp = ssh.open_sftp()
             try:
-                with sftp.file(path, 'w') as f:
-                    data_bytes = content.encode('utf-8') if isinstance(content, str) else bytes(content)
+                fobj, _ = _sftp_open_with_fallback(sftp, path, 'wb', is_windows_server(server_ip))
+                with fobj as f:
                     f.write(data_bytes)
                 return jsonify({'success': True})
             finally:
@@ -191,9 +1664,81 @@ def api_file_save():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@bp.route('/api/netron/model', methods=['GET'])
+def api_netron_model():
+    server_ip = request.args.get('server')
+    path = request.args.get('path')
+
+    if not server_ip or not path:
+        return jsonify({'success': False, 'error': '缺少参数'}), 400
+    if not str(path).lower().endswith('.onnx'):
+        return jsonify({'success': False, 'error': '仅支持 ONNX 文件'}), 400
+
+    sftp = None
+    try:
+        if is_local_server(server_ip):
+            with open(path, 'rb') as f:
+                data = f.read()
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return jsonify({'success': False, 'error': 'SSH连接失败'}), 500
+            try:
+                sftp = ssh.open_sftp()
+            except Exception:
+                sftp = None
+
+            try:
+                fobj, _ = _sftp_open_with_fallback(sftp, path, 'rb', is_windows_server(server_ip))
+                with fobj as f:
+                    data = f.read()
+                    if not isinstance(data, (bytes, bytearray)):
+                        data = bytes(data)
+            except Exception:
+                if is_windows_server(server_ip):
+                    data = _read_windows_file_bytes_via_ssh(ssh, path, timeout_sec=180.0)
+                else:
+                    data = _read_posix_file_bytes_via_ssh(ssh, path, timeout_sec=180.0)
+
+        resp = Response(data, mimetype='application/octet-stream')
+        resp.headers['Cache-Control'] = 'no-store'
+        resp.headers['X-Content-Type-Options'] = 'nosniff'
+        return _apply_netron_cors_headers(resp)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        if sftp:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+
+@bp.route('/netron')
+def netron_redirect():
+    return redirect('/netron/', code=302)
+
+
+@bp.route('/netron/')
+def netron_index():
+    netron_dir = _get_netron_package_dir()
+    if not netron_dir:
+        return jsonify({'success': False, 'error': 'Netron 未安装'}), 500
+    return send_from_directory(netron_dir, 'index.html')
+
+
+@bp.route('/netron/<path:asset_path>')
+def netron_asset(asset_path):
+    netron_dir = _get_netron_package_dir()
+    if not netron_dir:
+        return jsonify({'success': False, 'error': 'Netron 未安装'}), 500
+    return send_from_directory(netron_dir, asset_path)
+
+
 @bp.route('/api/servers')
 def get_servers():
-    return jsonify(SERVERS)
+    client_ip = extract_client_ipv4_from_request(request)
+    return jsonify(get_visible_servers_for_client(client_ip))
 
 @bp.route('/api/windows_drives/<server_ip>')
 def get_windows_drives(server_ip):
@@ -236,16 +1781,39 @@ def get_windows_drives(server_ip):
                     continue
                 name = str(item.get('name', letter) or letter)
                 dtype = str(item.get('type', 'local') or 'local')
+                root = normalize_windows_path_for_transfer(f"{letter}/")  # noqa: F405
                 drives.append({
                     'letter': letter,
                     'name': name,
-                    'type': 'network' if dtype == 'network' else 'local'
+                    'type': 'network' if dtype == 'network' else 'local',
+                    'path': root
                 })
         except Exception:
             drives = []
 
         if not drives:
             raise RuntimeError('获取磁盘列表失败')
+
+        # Add a WinSCP-like quick entry to Desktop (put it first).
+        try:
+            desktop_cmd = (
+                "powershell -NoProfile -Command "
+                "\"[Environment]::GetFolderPath('Desktop')\""
+            )
+            desktop_out, _, _ = ssh_manager.execute_command(server_ip, desktop_cmd)
+            desktop_raw = str(desktop_out or '').strip()
+            desktop_path = normalize_windows_path_for_transfer(desktop_raw) if desktop_raw else ''  # noqa: F405
+            if desktop_path:
+                drives.insert(0, {
+                    'letter': '',
+                    'name': '桌面',
+                    'type': 'desktop',
+                    'kind': 'desktop',
+                    'path': desktop_path
+                })
+        except Exception:
+            # Best-effort only; keep drive list usable even if desktop query fails.
+            pass
 
         return jsonify({'success': True, 'drives': drives})
     except Exception as e:
@@ -262,6 +1830,8 @@ def browse_directory(server_ip):
     path = request.args.get('path', default_path)
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
     force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
+    sort_by = normalize_browse_sort_by(request.args.get('sort_by'))
+    sort_order = normalize_browse_sort_order(request.args.get('sort_order'))
     try:
         offset = int(request.args.get('offset', 0))
     except ValueError:
@@ -286,7 +1856,7 @@ def browse_directory(server_ip):
             print(f"🔄 强制刷新: 清除了 {cleared_count} 个缓存项 - {server_ip}:{path}")
 
         # Fetch directory list (rebuild after cache clear).
-        files = get_directory_listing_optimized(server_ip, path, show_hidden)
+        files = get_directory_listing_optimized(server_ip, path, show_hidden, sort_by, sort_order)
         total_count = len(files)
 
         # Pagination slice.
@@ -303,6 +1873,8 @@ def browse_directory(server_ip):
             'path': path,
             'files': paged_files,
             'show_hidden': show_hidden,
+            'sort_by': sort_by,
+            'sort_order': sort_order,
             'force_refresh': force_refresh,
             'cache_cleared': cleared_count if force_refresh else 0,
             'response_time': round(response_time, 2),  # Include response timing.
@@ -329,6 +1901,8 @@ def quick_search(server_ip):
     path = request.args.get('path', '')
     keyword = request.args.get('keyword', '').strip()
     show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
+    sort_by = normalize_browse_sort_by(request.args.get('sort_by'))
+    sort_order = normalize_browse_sort_order(request.args.get('sort_order'))
 
     if not server_ip or server_ip not in SERVERS:
         return jsonify({'success': False, 'error': '无效的服务器'}), 400
@@ -336,7 +1910,7 @@ def quick_search(server_ip):
         return jsonify({'success': False, 'error': '缺少路径或关键字'}), 400
 
     try:
-        files = get_cached_listing(server_ip, path, show_hidden)
+        files = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
         if files is not None:
             if not files:
                 return jsonify({
@@ -465,13 +2039,41 @@ def handle_start_transfer(data):
     # Get client IP.
     client_ip = _get_client_ip()
 
+    source_server = data.get('source_server')
+    target_server = data.get('target_server')
+    target_path = data.get('target_path')
+    source_files = data.get('source_files') or []
+    mode = data.get('mode', 'copy')
+    fast_ssh = data.get('fast_ssh', True)
+
+    select_all = bool(data.get('select_all', False))
+    source_dir = data.get('source_dir') or ''
+    exclude_paths = data.get('exclude_paths') or []
+
+    if not source_server or not target_server or not target_path:
+        emit('transfer_cancelled', {'status': 'error', 'message': '参数不完整：请提供源/目标服务器与目标路径'})
+        return
+    for server_ip in (source_server, target_server):
+        if server_ip in SERVERS and not is_server_visible_to_client(server_ip, client_ip):
+            emit('transfer_cancelled', {
+                'status': 'error',
+                'message': f'客户端 {client_ip or "未知"} 无权访问服务器 {server_ip}'
+            })
+            return
+    if select_all and not source_dir:
+        emit('transfer_cancelled', {'status': 'error', 'message': '全选传输缺少 source_dir'})
+        return
+
     # Record transfer task.
     active_transfers[transfer_id] = {
-        'source_server': data['source_server'],
-        'source_files': data['source_files'],
-        'target_server': data['target_server'],
-        'target_path': data['target_path'],
-        'mode': data.get('mode', 'copy'),
+        'source_server': source_server,
+        'source_files': source_files,
+        'target_server': target_server,
+        'target_path': target_path,
+        'mode': mode,
+        'select_all': select_all,
+        'source_dir': source_dir,
+        'exclude_paths': exclude_paths,
         'parallel_enabled': parallel_enabled,
         'start_time': datetime.now(),
         'client_ip': client_ip
@@ -481,12 +2083,15 @@ def handle_start_transfer(data):
     # Start immediate parallel transfer.
     start_instant_parallel_transfer(
         transfer_id,
-        data['source_server'],
-        data['source_files'],
-        data['target_server'],
-        data['target_path'],
-        data.get('mode', 'copy'),
-        data.get('fast_ssh', True),
+        source_server,
+        source_files,
+        target_server,
+        target_path,
+        mode,
+        fast_ssh,
+        select_all=select_all,
+        source_dir=source_dir,
+        exclude_paths=exclude_paths,
         parallel_enabled=parallel_enabled
     )
 
@@ -603,15 +2208,152 @@ def delete_files():
     start_ts = time.time()
     client_ip = _get_client_ip()
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         server_ip = data.get('server')
         paths = data.get('paths', [])  # Support batch delete.
+        delete_all = bool(data.get('delete_all', False))
+        base_dir = data.get('base_dir') or ''
+        exclude_paths = data.get('exclude_paths') or []
+        show_hidden = bool(data.get('show_hidden', False))
 
-        if not server_ip or not paths:
+        if not server_ip:
             return jsonify({'success': False, 'error': '缺少必要参数'})
 
         is_windows = is_windows_server(server_ip)
         is_local = is_local_server(server_ip)
+
+        if delete_all:
+            if not base_dir:
+                return jsonify({'success': False, 'error': '缺少必要参数'}), 400
+
+            deleted_count = 0
+            failed_items = []
+            parent_dirs = {str(base_dir).replace('\\', '/')}
+
+            if is_local:
+                # Local delete: delete immediate children of base_dir.
+                if is_windows:
+                    # Best-effort: try PowerShell on local Windows (rare).
+                    win_dir = normalize_windows_path_for_cmd(base_dir)
+                    exclude_win = [normalize_windows_path_for_cmd(p) for p in exclude_paths if p]
+                    ps_dir = _escape_pwsh_literal(win_dir)
+                    ps_ex = ",".join([f"'{_escape_pwsh_literal(p)}'" for p in exclude_win])
+                    force_flag = "-Force" if show_hidden else ""
+                    ps_script = (
+                        "$failed=@();"
+                        f"$dir='{ps_dir}';"
+                        f"$exclude=@({ps_ex});"
+                        f"$items=Get-ChildItem -LiteralPath $dir {force_flag};"
+                        "foreach($it in $items){"
+                        "  $p=$it.FullName;"
+                        "  if($exclude -contains $p){ continue }"
+                        "  $err='';"
+                        "  try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                        "  if(Test-Path -LiteralPath $p){"
+                        "    if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                        "    $failed += [pscustomobject]@{path=$p; error=$err}"
+                        "  }"
+                        "}"
+                        "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                        "exit 0"
+                    )
+                    cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                    try:
+                        subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+                    except subprocess.CalledProcessError as e:
+                        failed_items.append({'path': base_dir, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else str(e)})
+                else:
+                    find_args = ['find', base_dir, '-mindepth', '1', '-maxdepth', '1']
+                    if not show_hidden:
+                        find_args += ['!', '-name', '.*']
+                    for p in exclude_paths:
+                        if p:
+                            find_args += ['!', '-path', p]
+                    find_args += ['-exec', 'rm', '-rf', '--', '{}', '+']
+                    try:
+                        subprocess.check_output(['sudo', '-n'] + find_args, stderr=subprocess.STDOUT)
+                    except subprocess.CalledProcessError:
+                        # Fallback without sudo.
+                        subprocess.check_output(find_args, stderr=subprocess.STDOUT)
+            else:
+                # Remote delete: delete immediate children of base_dir.
+                if is_windows:
+                    win_dir = normalize_windows_path_for_cmd(base_dir)
+                    exclude_win = [normalize_windows_path_for_cmd(p) for p in exclude_paths if p]
+                    ps_dir = _escape_pwsh_literal(win_dir)
+                    ps_ex = ",".join([f"'{_escape_pwsh_literal(p)}'" for p in exclude_win])
+                    force_flag = "-Force" if show_hidden else ""
+                    ps_script = (
+                        "$failed=@();"
+                        f"$dir='{ps_dir}';"
+                        f"$exclude=@({ps_ex});"
+                        f"$items=Get-ChildItem -LiteralPath $dir {force_flag};"
+                        "foreach($it in $items){"
+                        "  $p=$it.FullName;"
+                        "  if($exclude -contains $p){ continue }"
+                        "  $err='';"
+                        "  try{ Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }catch{ $err=$_.Exception.Message }"
+                        "  if(Test-Path -LiteralPath $p){"
+                        "    if([string]::IsNullOrEmpty($err)){ $err='删除失败' }"
+                        "    $failed += [pscustomobject]@{path=$p; error=$err}"
+                        "  }"
+                        "}"
+                        "if($failed.Count -gt 0){ $failed | ConvertTo-Json -Compress; exit 1 }"
+                        "exit 0"
+                    )
+                    delete_cmd = f'powershell -NoProfile -Command "{ps_script}"'
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, delete_cmd)
+                    if exit_code != 0:
+                        failed_items.append({'path': base_dir, 'error': stderr or stdout or '删除失败'})
+                else:
+                    parts = [
+                        "find",
+                        shlex.quote(base_dir),
+                        "-mindepth 1",
+                        "-maxdepth 1",
+                    ]
+                    if not show_hidden:
+                        parts.append("! -name '.*'")
+                    for p in exclude_paths:
+                        if p:
+                            parts.append(f"! -path {shlex.quote(p)}")
+                    parts.append("-exec rm -rf -- {} +")
+                    find_cmd = " ".join(parts)
+                    rm_cmd_sudo = f"sudo -n {find_cmd}"
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, rm_cmd_sudo)
+                    if exit_code != 0:
+                        stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, find_cmd)
+                    if exit_code != 0:
+                        failed_items.append({'path': base_dir, 'error': stderr or stdout or '删除失败'})
+
+            # Clear cache for affected dirs to refresh the browser view.
+            cache_cleared = 0
+            try:
+                for d in parent_dirs:
+                    cache_cleared += clear_cached_listing(server_ip, d)
+            except Exception:
+                pass
+
+            if failed_items:
+                return jsonify({
+                    'success': False,
+                    'deleted_all': False,
+                    'deleted_count': deleted_count,
+                    'failed_items': failed_items,
+                    'cache_cleared': cache_cleared,
+                    'error': '删除失败'
+                })
+
+            return jsonify({
+                'success': True,
+                'deleted_all': True,
+                'deleted_count': deleted_count,
+                'cache_cleared': cache_cleared,
+                'message': '删除完成'
+            })
+
+        if not paths:
+            return jsonify({'success': False, 'error': '缺少必要参数'})
 
         deleted_count = 0
         failed_items = []
@@ -959,7 +2701,7 @@ def api_client_path_save():
 
 @bp.route('/api/compare_files', methods=['POST'])
 def compare_files():
-    """Compare two files and return a line-by-line diff (VSCode-style)."""
+    """Read two files and return their full text for Monaco diff rendering."""
     try:
         data = request.get_json(silent=True) or {}
         server_a = data.get('server_a')
@@ -972,73 +2714,22 @@ def compare_files():
 
         def read_text(server, path):
             if is_local_server(server):
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    return f.read()
-            ssh = ssh_manager.get_connection(server)
-            if not ssh:
-                raise RuntimeError('SSH连接失败')
-            sftp = ssh.open_sftp()
-            try:
-                with sftp.file(path, 'r') as f:
+                with open(path, 'rb') as f:
                     data_bytes = f.read()
-                if isinstance(data_bytes, (bytes, bytearray)):
-                    return data_bytes.decode('utf-8', errors='ignore')
-                return str(data_bytes)
-            finally:
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+            else:
+                data_bytes = _read_remote_file_bytes(server, path, timeout_sec=60.0)
+            text, encoding = _decode_text_bytes(data_bytes)
+            return text, encoding
 
-        left_text = read_text(server_a, path_a).splitlines()
-        right_text = read_text(server_b, path_b).splitlines()
-
-        sm = SequenceMatcher(None, left_text, right_text)
-        diff_lines = []
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag == 'equal':
-                for k in range(i2 - i1):
-                    diff_lines.append({
-                        'left_no': i1 + k + 1,
-                        'right_no': j1 + k + 1,
-                        'left': left_text[i1 + k],
-                        'right': right_text[j1 + k],
-                        'tag': 'equal'
-                    })
-            elif tag == 'replace':
-                max_len = max(i2 - i1, j2 - j1)
-                for k in range(max_len):
-                    left_line = left_text[i1 + k] if (i1 + k) < i2 else ''
-                    right_line = right_text[j1 + k] if (j1 + k) < j2 else ''
-                    diff_lines.append({
-                        'left_no': i1 + k + 1 if (i1 + k) < i2 else None,
-                        'right_no': j1 + k + 1 if (j1 + k) < j2 else None,
-                        'left': left_line,
-                        'right': right_line,
-                        'tag': 'replace'
-                    })
-            elif tag == 'delete':
-                for k in range(i2 - i1):
-                    diff_lines.append({
-                        'left_no': i1 + k + 1,
-                        'right_no': None,
-                        'left': left_text[i1 + k],
-                        'right': '',
-                        'tag': 'delete'
-                    })
-            elif tag == 'insert':
-                for k in range(j2 - j1):
-                    diff_lines.append({
-                        'left_no': None,
-                        'right_no': j1 + k + 1,
-                        'left': '',
-                        'right': right_text[j1 + k],
-                        'tag': 'insert'
-                    })
+        left_text, left_encoding = read_text(server_a, path_a)
+        right_text, right_encoding = read_text(server_b, path_b)
 
         return jsonify({
             'success': True,
-            'lines': diff_lines
+            'left_content': left_text,
+            'right_content': right_text,
+            'left_encoding': left_encoding,
+            'right_encoding': right_encoding,
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1192,6 +2883,102 @@ def run_file():
             'message': f'开始运行: {file_path}'
         })
 
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@bp.route('/api/terminal/open', methods=['POST'])
+def open_terminal():
+    """Open an interactive terminal bound to the selected server and current path."""
+    try:
+        data = request.get_json(silent=True) or {}
+        server_ip = str(data.get('server') or '').strip()
+        client_sid = str(data.get('sid') or '').strip()
+        client_token = str(data.get('client_token') or '').strip()
+        browser_token = str(data.get('browser_token') or '').strip()
+        cwd = str(data.get('cwd') or '').strip()
+        panel = str(data.get('panel') or '').strip()
+        profile = str(data.get('profile') or '').strip()
+        rows = data.get('rows')
+        cols = data.get('cols')
+
+        if not server_ip:
+            return jsonify({'success': False, 'error': '缺少服务器参数'})
+        if server_ip not in SERVERS:
+            return jsonify({'success': False, 'error': f'未知服务器: {server_ip}'})
+        if not client_sid:
+            return jsonify({'success': False, 'error': '终端连接缺少客户端会话标识'})
+        if not client_token:
+            return jsonify({'success': False, 'error': '终端连接缺少浏览器会话标识'})
+
+        if panel:
+            close_terminal_sessions_for_client_panel(client_token, panel)
+
+        terminal_id, error = open_terminal_session(
+            server_ip,
+            cwd or get_default_path(server_ip),
+            rows,
+            cols,
+            sid=client_sid,
+            panel=panel,
+            client_token=client_token,
+            browser_token=browser_token,
+            profile=profile
+        )
+        if not terminal_id:
+            return jsonify({'success': False, 'error': error or '终端创建失败'})
+
+        server_cfg = SERVERS.get(server_ip) or {}
+        return jsonify({
+            'success': True,
+            'terminal_id': terminal_id,
+            'server': server_ip,
+            'host': server_cfg.get('host') or server_ip,
+            'name': server_cfg.get('name') or server_ip,
+            'panel': panel,
+            'cwd': cwd or get_default_path(server_ip) or '',
+            'profile': normalize_terminal_profile(server_ip, profile)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@bp.route('/api/terminal/restore', methods=['POST'])
+def restore_terminal_sessions():
+    """Rebind detached terminal sessions to the current socket after page refresh/reconnect."""
+    try:
+        data = request.get_json(silent=True) or {}
+        client_sid = str(data.get('sid') or '').strip()
+        client_token = str(data.get('client_token') or '').strip()
+        browser_token = str(data.get('browser_token') or '').strip()
+        if not client_sid:
+            return jsonify({'success': False, 'error': '缺少客户端 socket 会话标识'})
+        if not client_token:
+            return jsonify({'success': False, 'error': '缺少浏览器会话标识'})
+
+        client_ip = extract_client_ipv4_from_request(request)
+        sessions = []
+        rebound_sessions = rebind_terminal_sessions(client_token, client_sid)
+        if not rebound_sessions and browser_token:
+            rebound_sessions = recover_detached_terminal_sessions_for_browser(browser_token, client_token, client_sid)
+
+        for item in rebound_sessions:
+            server_ip = str(item.get('server') or '').strip()
+            if not server_ip or server_ip not in SERVERS:
+                continue
+            if not is_server_visible_to_client(server_ip, client_ip):
+                continue
+            server_cfg = SERVERS.get(server_ip) or {}
+            sessions.append({
+                **item,
+                'name': server_cfg.get('name') or server_ip,
+                'host': server_cfg.get('host') or server_ip,
+                'profiles': get_terminal_profile_options(server_ip)
+            })
+
+        return jsonify({
+            'success': True,
+            'sessions': sessions
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1363,13 +3150,15 @@ def extract_archive():
             else:
                 try:
                     if name.endswith('.zip'):
-                        subprocess.check_output(['unzip', '-o', file_path, '-d', base_dir], stderr=subprocess.STDOUT)
+                        _extract_zip_local_linux(file_path, base_dir)
                     elif is_tar_like(name):
                         subprocess.check_output(['tar', '-xf', file_path, '-C', base_dir], stderr=subprocess.STDOUT)
                     else:
                         return jsonify({'success': False, 'error': '不支持的压缩格式'})
                 except subprocess.CalledProcessError as e:
                     return jsonify({'success': False, 'error': e.output.decode('utf-8', errors='replace') if hasattr(e, 'output') else '解压失败'})
+                except Exception as e:
+                    return jsonify({'success': False, 'error': str(e) or '解压失败'})
         else:
             if is_windows:
                 safe_src = _escape_pwsh_literal(file_path)
@@ -1383,14 +3172,17 @@ def extract_archive():
                     return jsonify({'success': False, 'error': stderr or '解压失败'})
             else:
                 if name.endswith('.zip'):
-                    cmd = f"unzip -o {shlex.quote(file_path)} -d {shlex.quote(base_dir)}"
+                    try:
+                        _extract_zip_remote_linux(server_ip, file_path, base_dir)
+                    except Exception as e:
+                        return jsonify({'success': False, 'error': str(e) or '解压失败'})
                 elif is_tar_like(name):
                     cmd = f"tar -xf {shlex.quote(file_path)} -C {shlex.quote(base_dir)}"
+                    stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
+                    if exit_code != 0:
+                        return jsonify({'success': False, 'error': stderr or '解压失败'})
                 else:
                     return jsonify({'success': False, 'error': '不支持的压缩格式'})
-                stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, cmd)
-                if exit_code != 0:
-                    return jsonify({'success': False, 'error': stderr or '解压失败'})
 
         return jsonify({'success': True, 'message': '解压完成'})
     except Exception as e:
@@ -1486,6 +3278,19 @@ def send_run_input():
         return jsonify({'success': False, 'error': str(e)})
 
 
+def _get_socket_owned_terminal(data):
+    terminal_id = str((data or {}).get('terminal_id') or '').strip()
+    if not terminal_id:
+        return None, '缺少 terminal_id'
+    with TERMINAL_TASKS_LOCK:
+        task = TERMINAL_TASKS.get(terminal_id)
+    if not task:
+        return None, '终端会话不存在或已结束'
+    if task.get('sid') != request.sid:
+        return None, '无权访问该终端会话'
+    return task, ''
+
+
 @bp.route('/api/active_transfers', methods=['GET'])
 def get_active_transfers():
     """Return active transfer tasks."""
@@ -1523,10 +3328,97 @@ def get_active_transfers():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+@bp.route('/api/active_terminals', methods=['GET'])
+def get_active_terminals():
+    """Return active terminal sessions."""
+    try:
+        sessions = []
+        for item in list_active_terminal_sessions():
+            server_ip = str(item.get('server') or '').strip()
+            server_cfg = SERVERS.get(server_ip) or {}
+            sessions.append({
+                **item,
+                'name': server_cfg.get('name') or server_ip,
+                'host': server_cfg.get('host') or server_ip,
+            })
+
+        return jsonify({
+            'success': True,
+            'active_count': len(sessions),
+            'sessions': sessions
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 @socketio.on('connect')
 def handle_connect():
     print('客户端已连接')
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    try:
+        mark_terminal_sessions_detached_for_sid(request.sid)
+    except Exception:
+        pass
     print('客户端已断开连接')
+
+
+@socketio.on('terminal_input')
+def handle_terminal_input(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = send_terminal_input(str((data or {}).get('terminal_id') or ''), (data or {}).get('data', ''))
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端输入失败'
+        })
+
+
+@socketio.on('terminal_resize')
+def handle_terminal_resize(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = resize_terminal_session(
+        str((data or {}).get('terminal_id') or ''),
+        (data or {}).get('rows'),
+        (data or {}).get('cols')
+    )
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端缩放失败'
+        })
+
+
+@socketio.on('terminal_close')
+def handle_terminal_close(data):
+    task, error = _get_socket_owned_terminal(data)
+    if not task:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': error
+        })
+        return
+    ok, err = close_terminal_session(str((data or {}).get('terminal_id') or ''))
+    if not ok:
+        emit('terminal_status', {
+            'terminal_id': str((data or {}).get('terminal_id') or ''),
+            'status': 'error',
+            'message': err or '终端关闭失败'
+        })

@@ -11,6 +11,10 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-400.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="{{ url_for('static', filename='vendor/fonts/ubuntu-mono-700.woff2') }}?v=terminal-ubuntu-2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm/xterm.css') }}">
+    <link rel="stylesheet" data-name="vs/editor/editor.main" href="{{ url_for('static', filename='vendor/monaco/min/vs/editor/editor.main.css') }}?v=monaco-0.47.0-fontfix-12">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
 <body>
@@ -18,7 +22,7 @@
 
 
         <!-- Header area -->
-        <div class="row flex-shrink-0" style="margin-bottom: 2px;">
+        <div id="appHeaderRow" class="row flex-shrink-0" style="margin-bottom: 2px;">
             <div class="col-12">
                 <div class="d-flex align-items-center justify-content-center">
                     <!-- Product title group -->
@@ -33,7 +37,7 @@
         </div>
 
         <!-- Server selection panel -->
-        <div class="row g-1 flex-shrink-0" style="margin-bottom: 3px;">
+        <div id="serverSelectionRow" class="row g-1 flex-shrink-0" style="margin-bottom: 3px;">
             <div class="col-md-6">
                 <div class="server-panel" style="padding: 4px 6px;">
                     <h6 style="font-size: 0.85rem; margin-bottom: 2px;">
@@ -42,8 +46,8 @@
                     <select id="sourceServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🔍 请选择源服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
-                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and info.get('host', ip) == client_ipv4) %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ info.get('host', ip) }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
@@ -57,8 +61,8 @@
                     <select id="targetServer" class="form-select" style="font-size: 0.85rem;">
                         <option value="" disabled selected hidden>🎯 请选择服务器</option>
                         {% for ip, info in servers.items() %}
-                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and ip == client_ipv4) %}
-                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ ip }})</option>
+                        {% if info.get('os_type') != 'windows' or is_admin_client or (client_ipv4 and info.get('host', ip) == client_ipv4) %}
+                        <option value="{{ ip }}">🖥️ {{ info.name }} ({{ info.get('host', ip) }})</option>
                         {% endif %}
                         {% endfor %}
                     </select>
@@ -67,23 +71,29 @@
         </div>
 
         <!-- File browser -->
-        <div class="row flex-grow-1" style="min-height: 0;">
+        <div id="workspaceRow" class="row flex-grow-1" style="min-height: 0;">
             <div class="resizable-container" style="height: 100%;">
                 <div class="resizable-panel" id="sourcePanel" style="width: 50%; height: 100%;">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
+                    <div id="sourcePanelHeader" class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-files text-info"></i> 左侧文件浏览
                         </h6>
-                        <div class="d-flex align-items-center" style="gap: 10px;">
-                            <small id="sourceFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
-                            <small id="sourceSelectedInfo" style="font-size: 0.75rem; color: #0d6efd; display: none;"></small>
-                            <button class="btn btn-outline-primary btn-sm" onclick="refreshSource()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
-                                <i class="bi bi-arrow-clockwise"></i> 刷新
-                            </button>
-                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                        <div class="d-flex align-items-center panel-toolbar">
+                            <small id="sourceFileCount" class="panel-meta-text" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="sourceSelectedInfo" class="panel-meta-text" style="font-size: 0.75rem; color: #0d6efd; display: none;"></small>
+                            <div class="browse-sort-controls">
+                                <select id="sourceSortBy" class="form-select form-select-sm browse-sort-select" onchange="handleBrowseSortChange('source')" title="排序方式">
+                                    <option value="name">名称</option>
+                                    <option value="modified">时间</option>
+                                    <option value="size">大小</option>
+                                    <option value="type">类型</option>
+                                </select>
+                                <button id="sourceSortOrderBtn" type="button" class="btn btn-outline-primary btn-sm panel-refresh-btn browse-sort-order-btn" onclick="toggleBrowseSortOrder('source')" title="切换升降序">升</button>
+                            </div>
+                            <div class="form-check form-switch panel-hidden-switch" style="font-size: 0.75rem;">
                                 <input class="form-check-input" type="checkbox" id="sourceShowHidden" onchange="toggleHiddenFiles('source')">
                                 <label class="form-check-label" for="sourceShowHidden" style="font-size: 0.75rem;">
-                                    显示隐藏文件
+                                    隐藏文件
                                 </label>
                             </div>
                         </div>
@@ -94,6 +104,11 @@
                             <span id="sourcePathDisplay" class="path-display">/</span>
                         </div>
                         <div class="path-actions">
+                            <button type="button" class="btn btn-sm" title="刷新目录内容"
+                                    onclick="refreshSource()"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-arrow-clockwise text-primary" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(true, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -114,12 +129,61 @@
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-grid-3x3-gap text-info" style="font-size: 0.9rem;"></i>
                             </button>
+                            <button type="button" class="btn btn-sm" title="打开终端"
+                                    onclick="toggleTerminalForPanel('source')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-terminal text-primary" style="font-size: 0.9rem;"></i>
+                            </button>
                         </div>
                     </div>
-                    <div id="sourceFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
-                        <div class="text-center text-muted p-3">
-                            <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
-                            <p class="mb-0" style="font-size: 0.85rem;">请先选择服务器</p>
+                    <div class="panel-workspace">
+                        <div id="sourceFileBrowser" class="file-browser panel-browser" style="padding-bottom: 10px;">
+                            <div class="text-center text-muted p-3">
+                                <i class="bi bi-server fs-3 mb-2 d-block opacity-50"></i>
+                                <p class="mb-0" style="font-size: 0.85rem;">请先选择服务器</p>
+                            </div>
+                        </div>
+                        <div id="sourceTerminalDrawer" class="terminal-drawer" style="display: none;">
+                            <div class="terminal-drawer-resizer"
+                                 title="拖动调整终端高度，双击恢复默认高度"
+                                 onpointerdown="startTerminalResize(event, 'source')"
+                                 oncontextmenu="return false;"
+                                 ondblclick="resetTerminalDrawerHeight('source')"></div>
+                            <div class="terminal-drawer-header">
+                                <div class="terminal-drawer-tabs" aria-hidden="true">
+                                    <span class="terminal-drawer-tab">PROBLEMS</span>
+                                    <span class="terminal-drawer-tab">OUTPUT</span>
+                                    <span class="terminal-drawer-tab">DEBUG CONSOLE</span>
+                                    <span class="terminal-drawer-tab">PORTS</span>
+                                    <span class="terminal-drawer-tab active">TERMINAL</span>
+                                </div>
+                                <div class="terminal-drawer-titlebar">
+                                    <div class="terminal-drawer-title">
+                                        <i class="bi bi-terminal"></i>
+                                        <span id="sourceTerminalLabel">bash - TurboFile</span>
+                                        <span id="sourceTerminalStatus" class="terminal-status-pill">未连接</span>
+                                    </div>
+                                    <div class="terminal-drawer-actions">
+                                    <button type="button" id="sourceTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn terminal-icon-btn" title="全屏" onclick="toggleTerminalMaximize('source')">
+                                        <i class="bi bi-arrows-fullscreen"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="清屏" onclick="clearTerminalForPanel('source')"><i class="bi bi-trash"></i></button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="关闭" onclick="closeTerminalForPanel('source')"><i class="bi bi-x-lg"></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="sourceTerminalSearchBar" class="terminal-searchbar" style="display: none;">
+                                <input id="sourceTerminalSearchInput" type="text" class="form-control form-control-sm terminal-search-input" placeholder="搜索终端内容" autocomplete="off" spellcheck="false" oninput="handleTerminalSearchInput('source')" onkeydown="handleTerminalSearchInputKeydown(event, 'source')">
+                                <span id="sourceTerminalSearchResults" class="terminal-search-results">0/0</span>
+                                <button type="button" id="sourceTerminalSearchCaseBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="区分大小写" onclick="toggleTerminalSearchCase('source')">Aa</button>
+                                <button type="button" id="sourceTerminalSearchRegexBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="正则表达式" onclick="toggleTerminalSearchRegex('source')">.*</button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="上一个结果" onclick="findPreviousTerminalSearch('source')"><i class="bi bi-chevron-up"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="下一个结果" onclick="findNextTerminalSearch('source')"><i class="bi bi-chevron-down"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="关闭搜索" onclick="closeTerminalSearch('source')"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                            <div class="terminal-drawer-body">
+                                <div id="sourceTerminalHost" class="terminal-host"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -127,20 +191,26 @@
                 <div class="resizer" id="verticalResizer"></div>
 
                 <div class="resizable-panel" id="targetPanel" style="width: 50%; height: 100%;">
-                    <div class="d-flex justify-content-between align-items-center mb-1">
+                    <div id="targetPanelHeader" class="d-flex justify-content-between align-items-center mb-1">
                         <h6 style="font-size: 0.9rem; margin-bottom: 0;">
                             <i class="bi bi-folder-check text-success"></i> 右侧文件浏览
                         </h6>
-                        <div class="d-flex align-items-center" style="gap: 10px;">
-                            <small id="targetFileCount" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
-                            <small id="targetSelectedInfo" style="font-size: 0.75rem; color: #198754; display: none;"></small>
-                            <button class="btn btn-outline-success btn-sm" onclick="refreshTarget()" title="刷新目录内容" style="font-size: 0.75rem; padding: 2px 6px;">
-                                <i class="bi bi-arrow-clockwise"></i> 刷新
-                            </button>
-                            <div class="form-check form-switch" style="font-size: 0.75rem;">
+                        <div class="d-flex align-items-center panel-toolbar">
+                            <small id="targetFileCount" class="panel-meta-text" style="font-size: 0.75rem; color: #64748b;">共 0 项</small>
+                            <small id="targetSelectedInfo" class="panel-meta-text" style="font-size: 0.75rem; color: #198754; display: none;"></small>
+                            <div class="browse-sort-controls">
+                                <select id="targetSortBy" class="form-select form-select-sm browse-sort-select" onchange="handleBrowseSortChange('target')" title="排序方式">
+                                    <option value="name">名称</option>
+                                    <option value="modified">时间</option>
+                                    <option value="size">大小</option>
+                                    <option value="type">类型</option>
+                                </select>
+                                <button id="targetSortOrderBtn" type="button" class="btn btn-outline-success btn-sm panel-refresh-btn browse-sort-order-btn" onclick="toggleBrowseSortOrder('target')" title="切换升降序">升</button>
+                            </div>
+                            <div class="form-check form-switch panel-hidden-switch" style="font-size: 0.75rem;">
                                 <input class="form-check-input" type="checkbox" id="targetShowHidden" onchange="toggleHiddenFiles('target')">
                                 <label class="form-check-label" for="targetShowHidden" style="font-size: 0.75rem;">
-                                    显示隐藏文件
+                                    隐藏文件
                                 </label>
                             </div>
                         </div>
@@ -151,6 +221,11 @@
                             <span id="targetPathDisplay" class="path-display">/</span>
                         </div>
                         <div class="path-actions">
+                            <button type="button" class="btn btn-sm" title="刷新目录内容"
+                                    onclick="refreshTarget()"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-arrow-clockwise text-success" style="font-size: 0.85rem;"></i>
+                            </button>
                             <button type="button" class="btn btn-sm" title="查找文件/文件夹"
                                     onclick="quickLocateInPanel(false, event)"
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
@@ -171,12 +246,61 @@
                                     style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
                                 <i class="bi bi-grid-3x3-gap text-success" style="font-size: 0.9rem;"></i>
                             </button>
+                            <button type="button" class="btn btn-sm" title="打开终端"
+                                    onclick="toggleTerminalForPanel('target')"
+                                    style="padding:0 4px; background: transparent; border: none; border-radius:4px;">
+                                <i class="bi bi-terminal text-success" style="font-size: 0.9rem;"></i>
+                            </button>
                         </div>
                     </div>
-                    <div id="targetFileBrowser" class="file-browser" style="height: calc(100% - 50px); padding-bottom: 10px;">
-                        <div class="text-center text-muted p-3">
-                            <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
-                            <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
+                    <div class="panel-workspace">
+                        <div id="targetFileBrowser" class="file-browser panel-browser" style="padding-bottom: 10px;">
+                            <div class="text-center text-muted p-3">
+                                <i class="bi bi-cloud-upload fs-3 mb-2 d-block opacity-50"></i>
+                                <p class="mb-0" style="font-size: 0.85rem;">请先选择目标服务器</p>
+                            </div>
+                        </div>
+                        <div id="targetTerminalDrawer" class="terminal-drawer" style="display: none;">
+                            <div class="terminal-drawer-resizer"
+                                 title="拖动调整终端高度，双击恢复默认高度"
+                                 onpointerdown="startTerminalResize(event, 'target')"
+                                 oncontextmenu="return false;"
+                                 ondblclick="resetTerminalDrawerHeight('target')"></div>
+                            <div class="terminal-drawer-header">
+                                <div class="terminal-drawer-tabs" aria-hidden="true">
+                                    <span class="terminal-drawer-tab">PROBLEMS</span>
+                                    <span class="terminal-drawer-tab">OUTPUT</span>
+                                    <span class="terminal-drawer-tab">DEBUG CONSOLE</span>
+                                    <span class="terminal-drawer-tab">PORTS</span>
+                                    <span class="terminal-drawer-tab active">TERMINAL</span>
+                                </div>
+                                <div class="terminal-drawer-titlebar">
+                                    <div class="terminal-drawer-title">
+                                        <i class="bi bi-terminal"></i>
+                                        <span id="targetTerminalLabel">bash - TurboFile</span>
+                                        <span id="targetTerminalStatus" class="terminal-status-pill">未连接</span>
+                                    </div>
+                                    <div class="terminal-drawer-actions">
+                                    <button type="button" id="targetTerminalMaximizeBtn" class="btn btn-sm btn-outline-light terminal-action-btn terminal-icon-btn" title="全屏" onclick="toggleTerminalMaximize('target')">
+                                        <i class="bi bi-arrows-fullscreen"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="清屏" onclick="clearTerminalForPanel('target')"><i class="bi bi-trash"></i></button>
+                                    <button type="button" class="btn btn-sm btn-outline-light terminal-icon-btn" title="关闭" onclick="closeTerminalForPanel('target')"><i class="bi bi-x-lg"></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="targetTerminalSearchBar" class="terminal-searchbar" style="display: none;">
+                                <input id="targetTerminalSearchInput" type="text" class="form-control form-control-sm terminal-search-input" placeholder="搜索终端内容" autocomplete="off" spellcheck="false" oninput="handleTerminalSearchInput('target')" onkeydown="handleTerminalSearchInputKeydown(event, 'target')">
+                                <span id="targetTerminalSearchResults" class="terminal-search-results">0/0</span>
+                                <button type="button" id="targetTerminalSearchCaseBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="区分大小写" onclick="toggleTerminalSearchCase('target')">Aa</button>
+                                <button type="button" id="targetTerminalSearchRegexBtn" class="btn btn-sm btn-outline-light terminal-search-option" title="正则表达式" onclick="toggleTerminalSearchRegex('target')">.*</button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="上一个结果" onclick="findPreviousTerminalSearch('target')"><i class="bi bi-chevron-up"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="下一个结果" onclick="findNextTerminalSearch('target')"><i class="bi bi-chevron-down"></i></button>
+                                <button type="button" class="btn btn-sm btn-outline-light" title="关闭搜索" onclick="closeTerminalSearch('target')"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                            <div class="terminal-drawer-body">
+                                <div id="targetTerminalHost" class="terminal-host"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -184,34 +308,34 @@
         </div>
 
         <!-- Transfer control panel -->
-        <div class="row flex-shrink-0">
+        <div id="transferControlRow" class="row flex-shrink-0">
             <div class="col-12">
                 <div class="card">
                     <div class="card-body" style="padding: 8px 12px;">
-                        <div class="text-center" style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
+                        <div class="text-center transfer-action-row" style="display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;">
                             <!-- Transfer mode selector (separated styles) -->
                             <input type="radio" class="btn-check" name="transferMode" id="modeCopy" value="copy" checked>
-                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeCopy">
+                            <label class="btn btn-outline-primary transfer-mode-btn codex-auth-btn" for="modeCopy">
                                 <i class="bi bi-files"></i> 复制
                             </label>
 
                             <input type="radio" class="btn-check" name="transferMode" id="modeMove" value="move">
-                            <label class="btn btn-outline-primary transfer-mode-btn" for="modeMove">
+                            <label class="btn btn-outline-primary transfer-mode-btn codex-auth-btn" for="modeMove">
                                 <i class="bi bi-scissors"></i> 剪切
                             </label>
 
                             <!-- Start transfer button -->
-                            <button id="startTransferBtn" class="btn btn-primary me-2" onclick="startTransfer()" style="padding: 6px 16px;">
+                            <button id="startTransferBtn" class="btn btn-primary me-2 codex-auth-btn codex-auth-btn-light" onclick="startTransfer()" style="padding: 6px 16px;">
                                 <i class="bi bi-lightning-charge-fill"></i> 开始传输
                             </button>
 
                             <!-- Cancel transfer button -->
-                            <button id="cancelTransferBtn" class="btn btn-danger me-2" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none; padding: 6px 16px;" title="单击取消传输，双击强制终止">
+                            <button id="cancelTransferBtn" class="btn btn-danger me-2 codex-auth-btn codex-auth-btn-danger" onclick="cancelTransfer()" ondblclick="forceCancelTransfer()" style="display: none; padding: 6px 16px;" title="单击取消传输，双击强制终止">
                                 <i class="bi bi-stop-circle-fill"></i> 取消传输
                             </button>
 
                             <!-- View logs button -->
-                            <button class="btn btn-primary" onclick="showLogModal()" style="padding: 6px 12px;" title="查看传输日志">
+                            <button class="btn btn-primary codex-auth-btn codex-auth-btn-light" onclick="showLogModal()" style="padding: 6px 12px;" title="查看传输日志">
                                 <i class="bi bi-journal-text"></i> 查看日志
                             </button>
                         </div>
@@ -320,6 +444,10 @@
             <i class="bi bi-box-arrow-down text-success"></i>
             <span>解压</span>
         </div>
+        <div class="menu-item" data-action="copy-path">
+            <i class="bi bi-clipboard text-primary"></i>
+            <span>复制路径</span>
+        </div>
         <div class="menu-item" data-action="download-windows">
             <i class="bi bi-windows text-primary"></i>
             <span>下载到Windows</span>
@@ -361,19 +489,22 @@
         </div>
     </div>
 
-    <div id="imagePreviewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1100;">
-        <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
-            <img alt="preview" style="max-width: 95vw; max-height: 85vh; object-fit: contain; user-select: none; cursor: grab;">
-        </div>
-        <button id="imagePreviewCloseBtn" type="button" class="image-preview-close-btn" style="position: absolute; top: 16px; right: 16px; z-index: 1202;">
-            关闭
-        </button>
-        <div id="imagePreviewCaption"></div>
-        <div class="image-preview-nav">
-            <button id="imagePrevBtn" type="button" class="image-preview-nav-btn" aria-label="上一张">‹</button>
-            <button id="imageNextBtn" type="button" class="image-preview-nav-btn" aria-label="下一张">›</button>
-        </div>
-    </div>
+	    <div id="imagePreviewModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 1100;">
+	        <div class="image-preview-stage">
+	            <div class="image-preview-viewport">
+	                <img class="image-preview-layer is-active" alt="preview">
+	                <img class="image-preview-layer" alt="preview">
+	            </div>
+	        </div>
+	        <button id="imagePreviewCloseBtn" type="button" class="image-preview-close-btn" style="position: absolute; top: 16px; right: 16px; z-index: 1202;">
+	            关闭
+	        </button>
+	        <div id="imagePreviewCaption"></div>
+	        <div class="image-preview-nav">
+	            <button id="imagePrevBtn" type="button" class="image-preview-nav-btn" aria-label="上一张">‹</button>
+	            <button id="imageNextBtn" type="button" class="image-preview-nav-btn" aria-label="下一张">›</button>
+	        </div>
+	    </div>
 
     <div id="imageGridModal" style="display: none; position: fixed; inset: 0; overflow: auto; background: #11161f; z-index: 1050;">
         <div class="image-grid-header">
@@ -409,7 +540,7 @@
             </div>
             <div class="diff-body">
                 <div class="diff-grid">
-                    <div id="diffRows" class="diff-rows"></div>
+                    <div id="diffMonacoContainer" class="diff-monaco"></div>
                 </div>
                 <div id="diffSummary" class="diff-summary"></div>
             </div>
@@ -421,33 +552,28 @@
             <div class="editor-header">
                 <div class="editor-title modal-title">
                     <i class="bi bi-file-earmark-text"></i>
-                    <span>文本编辑器</span>
+                    <span id="editorTitleText">文本编辑器</span>
                 </div>
                 <div class="d-flex align-items-center gap-2">
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorTheme()">切换背景</button>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(false)">查找</button>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(true)">替换</button>
-                    <button type="button" class="btn btn-primary btn-sm" onclick="saveEditorContent()">保存</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorTheme()">切换主题</button>
+                    <button id="editorFindToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(false)">查找</button>
+                    <button id="editorReplaceToggleBtn" type="button" class="btn btn-secondary btn-sm" onclick="showFindReplace(true)">替换</button>
+                    <button id="editorSaveBtn" type="button" class="btn btn-primary btn-sm" onclick="saveEditorContent()">保存</button>
                     <button type="button" class="btn btn-danger btn-sm" onclick="closeEditorModal()">关闭</button>
                 </div>
             </div>
             <div class="editor-body">
-                <div id="editorGutter" class="editor-gutter">
-                    <div id="editorLineNumbers" class="editor-line-numbers"></div>
-                </div>
-                <div class="editor-text-wrapper">
-                    <pre id="editorHighlightLayer" class="editor-highlight-layer"></pre>
-                    <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
-                </div>
+                <div id="editorMonacoContainer" class="editor-monaco"></div>
             </div>
-            <div id="findReplaceBar" class="find-replace-bar">
-                <input id="findInput" type="text" placeholder="查找" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-                <span id="findCount" class="text-muted" style="font-size: 12px;"></span>
-                <button type="button" onclick="findNext()">下一个</button>
-                <input id="replaceInput" type="text" placeholder="替换" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-                <button id="replaceBtn" type="button" onclick="replaceOne()">替换</button>
-                <button id="replaceAllBtn" type="button" onclick="replaceAll()">全部替换</button>
-                <button type="button" class="secondary" onclick="hideFindReplace()">关闭</button>
+            <div id="editorStatusBar" class="editor-statusbar" style="display: none;">
+                <div id="editorStatusText" class="editor-status-text"></div>
+                <div class="editor-status-actions">
+                    <button id="editorHeadBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('head')">文件开头</button>
+                    <button id="editorPrevBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('prev')">上一块</button>
+                    <button id="editorNextBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('next')">下一块</button>
+                    <button id="editorTailBtn" type="button" class="btn btn-secondary btn-sm" onclick="loadEditorFileChunk('tail')">文件结尾</button>
+                    <button id="editorFollowBtn" type="button" class="btn btn-secondary btn-sm" onclick="toggleEditorFollowTail()">自动追尾</button>
+                </div>
             </div>
         </div>
     </div>
@@ -496,7 +622,16 @@
         <div class="modal-dialog modal-dialog-centered ui-dialog">
             <div class="modal-content ui-dialog-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="uiDialogTitle">提示</h5>
+                    <div class="ui-dialog-heading">
+                        <div class="ui-dialog-icon-badge" id="uiDialogIconBadge" aria-hidden="true">
+                            <i id="uiDialogIcon" class="bi bi-search"></i>
+                        </div>
+                        <div class="ui-dialog-heading-text">
+                            <div id="uiDialogEyebrow" class="ui-dialog-eyebrow" style="display: none;">Quick Search</div>
+                            <h5 class="modal-title" id="uiDialogTitle">提示</h5>
+                            <div id="uiDialogSubtitle" class="ui-dialog-subtitle" style="display: none;"></div>
+                        </div>
+                    </div>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -507,7 +642,12 @@
                         <span></span>
                     </div>
                     <div id="uiDialogInputRow" class="ui-dialog-input-row" style="display: none;">
-                        <input id="uiDialogInput" type="text" class="form-control form-control-sm" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                        <div class="ui-dialog-input-shell">
+                            <i class="bi bi-search ui-dialog-input-icon" aria-hidden="true"></i>
+                            <input id="uiDialogInput" type="text" class="form-control form-control-sm ui-dialog-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                            <span id="uiDialogInputHint" class="ui-dialog-input-hint" style="display: none;">Enter</span>
+                        </div>
+                        <div id="uiDialogMeta" class="ui-dialog-meta" style="display: none;"></div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -518,16 +658,32 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
-        <script>
-      window.TURBOFILE_BOOT = {
-        servers: {{ servers|tojson }},
-        remembered_paths: {{ remembered_paths|tojson }},
-        client_ipv4: {{ client_ipv4|tojson|default('null') }},
-        transfer_bytes_enabled: {{ transfer_bytes_enabled|tojson }}
-      };
-    </script>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
-</body>
-</html>
+	    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+	    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+	    <script id="turbofileBoot" type="application/json">
+	      {{ {
+	        'servers': servers,
+	        'remembered_paths': remembered_paths,
+	        'client_ipv4': (client_ipv4 | default(none, true)),
+	        'transfer_bytes_enabled': transfer_bytes_enabled
+	      } | tojson }}
+	    </script>
+	    <script>
+	      (function () {
+	        try {
+	          const el = document.getElementById('turbofileBoot');
+	          window.TURBOFILE_BOOT = el ? JSON.parse(el.textContent || '{}') : {};
+	        } catch (e) {
+	          window.TURBOFILE_BOOT = {};
+	          console.error('Failed to parse TURBOFILE_BOOT:', e);
+	        }
+	      })();
+	    </script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-fit.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-webgl.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/xterm/xterm-addon-search.js') }}"></script>
+        <script src="{{ url_for('static', filename='vendor/monaco/min/vs/loader.js') }}?v=monaco-0.47.0-fontfix-12"></script>
+        <script src="{{ url_for('static', filename='js/app.js') }}?v=monaco-0.47.0-fontfix-12"></script>
+	</body>
+	</html>

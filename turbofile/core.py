@@ -26,6 +26,9 @@ import uuid
 import signal
 import select
 import pty
+import fcntl
+import termios
+import struct
 from difflib import SequenceMatcher
 
 from .extensions import socketio
@@ -43,6 +46,23 @@ def load_config():
         raise ValueError("配置文件格式无效，顶层应为对象")
     return cfg
 
+
+def _normalize_servers(raw_servers):
+    """Normalize configured servers into a stable server-id -> meta mapping."""
+    if not isinstance(raw_servers, dict) or not raw_servers:
+        raise RuntimeError("配置缺少 servers 列表")
+
+    normalized = {}
+    for server_id, server_cfg in raw_servers.items():
+        if not isinstance(server_cfg, dict):
+            raise ValueError(f"服务器配置格式无效: {server_id}")
+        entry = dict(server_cfg)
+        entry["host"] = str(entry.get("host") or server_id).strip() or str(server_id)
+        if not entry.get("name"):
+            entry["name"] = str(server_id)
+        normalized[str(server_id)] = entry
+    return normalized
+
 CONFIG = load_config()
 
 secret_key = CONFIG.get('secret_key')
@@ -53,9 +73,8 @@ TURBOFILE_HOST_IP = CONFIG.get('host_ip') or ''
 if not TURBOFILE_HOST_IP:
     raise RuntimeError("配置缺少 host_ip")
 
-SERVERS = CONFIG.get('servers')
-if not isinstance(SERVERS, dict) or not SERVERS:
-    raise RuntimeError("配置缺少 servers 列表")
+SERVERS = _normalize_servers(CONFIG.get('servers'))
+CONFIG['servers'] = SERVERS
 
 ADMIN_MODE_ENABLED = bool(CONFIG.get('admin_mode_enabled'))
 ADMIN_CLIENT_IPS = set(CONFIG.get('admin_client_ips') or [])
@@ -93,6 +112,62 @@ def is_admin_client_ip(ip: str) -> bool:
         return False
 
 
+def get_server_host(server_ip: str) -> str:
+    """Return the real host/IP used to connect to a configured server."""
+    try:
+        server_cfg = SERVERS.get(server_ip) or {}
+        host = str(server_cfg.get('host') or server_ip).strip()
+        return host or str(server_ip)
+    except Exception:
+        return str(server_ip)
+
+
+def build_remote_spec(server_ip: str, user: str, remote_path: str) -> str:
+    """Build rsync/scp style user@host:path spec from server id + configured host."""
+    return f'{user}@{get_server_host(server_ip)}:{remote_path}'
+
+
+def get_server_visible_client_ips(server_ip: str):
+    """Return a normalized client-IP allowlist for a server; empty means unrestricted."""
+    try:
+        server = SERVERS.get(server_ip) or {}
+        raw = server.get('visible_client_ips')
+        if not raw:
+            return set()
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, (list, tuple, set)):
+            return {str(ip).strip() for ip in raw if str(ip).strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def is_server_visible_to_client(server_ip: str, client_ip: str) -> bool:
+    """Return whether the given configured server should be visible to a client IP."""
+    try:
+        if server_ip not in SERVERS:
+            return False
+        allowed_client_ips = get_server_visible_client_ips(server_ip)
+        if not allowed_client_ips:
+            return True
+        return bool(client_ip and client_ip in allowed_client_ips)
+    except Exception:
+        return False
+
+
+def get_visible_servers_for_client(client_ip: str):
+    """Return the configured server map filtered by client-IP visibility rules."""
+    try:
+        return {
+            server_ip: server_cfg
+            for server_ip, server_cfg in SERVERS.items()
+            if is_server_visible_to_client(server_ip, client_ip)
+        }
+    except Exception:
+        return {}
+
+
 
 @lru_cache(maxsize=1)
 def get_current_host_ip():
@@ -117,13 +192,8 @@ def determine_transfer_mode(source_server, target_server):
     - 'remote_to_remote': from remote to another remote
     - 'remote_to_local': from remote to TurboFile host
     """
-    current_host = get_current_host_ip()
-
-
-    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
-
-    is_source_local = source_server in local_aliases
-    is_target_local = target_server in local_aliases
+    is_source_local = is_local_server(source_server)
+    is_target_local = is_local_server(target_server)
 
     if is_source_local and not is_target_local:
         return 'local_to_remote'
@@ -138,8 +208,9 @@ def determine_transfer_mode(source_server, target_server):
 def is_local_server(server_ip):
     """Return whether the server is the local TurboFile host."""
     current_host = get_current_host_ip()
-    local_aliases = ["localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP]
-    return server_ip in local_aliases
+    local_aliases = {"localhost", "127.0.0.1", current_host, TURBOFILE_HOST_IP}
+    resolved_host = get_server_host(server_ip)
+    return server_ip in local_aliases or resolved_host in local_aliases
 
 
 def load_client_paths():
@@ -544,7 +615,7 @@ def clear_log_if_too_large(max_lines: int = None) -> bool:
 def _normalize_ip_for_log(server_ip: str) -> str:
     """Normalize local aliases to the real host IP; leave others unchanged."""
     try:
-        return TURBOFILE_HOST_IP if is_local_server(server_ip) else server_ip
+        return TURBOFILE_HOST_IP if is_local_server(server_ip) else get_server_host(server_ip)
     except Exception:
         return server_ip
 
@@ -918,6 +989,10 @@ class SSHManager:
         pool = self.connection_pools[server_ip]
         for i, ssh in enumerate(pool):
             if ssh and ssh.get_transport() and ssh.get_transport().is_active():
+                try:
+                    ssh.get_transport().set_keepalive(TERMINAL_SSH_KEEPALIVE_SECONDS)
+                except Exception:
+                    pass
 
                 pool.append(pool.pop(i))
                 return ssh
@@ -939,7 +1014,7 @@ class SSHManager:
 
 
             connect_kwargs = {
-                'hostname': server_ip,
+                'hostname': get_server_host(server_ip),
                 'username': server_config["user"],
                 'port': server_config.get("port", 22),
                 'timeout': 5,
@@ -965,6 +1040,13 @@ class SSHManager:
                 connect_kwargs['password'] = server_config["password"]
                 ssh.connect(**connect_kwargs)
                 print(f"✅ 使用密码连接到服务器 {server_ip}")
+
+            try:
+                transport = ssh.get_transport()
+                if transport:
+                    transport.set_keepalive(TERMINAL_SSH_KEEPALIVE_SECONDS)
+            except Exception:
+                pass
 
 
             if len(pool) >= self.connection_pool_size:
@@ -1032,6 +1114,26 @@ class SSHManager:
 ssh_manager = SSHManager()
 RUN_TASKS = {}
 RUN_TASKS_LOCK = threading.Lock()
+TERMINAL_TASKS = {}
+TERMINAL_TASKS_LOCK = threading.Lock()
+TERMINAL_DETACH_GRACE_SECONDS = 43200
+TERMINAL_REAPER_INTERVAL_SECONDS = 30
+TERMINAL_SSH_KEEPALIVE_SECONDS = 15
+TERMINAL_LOCAL_POLL_INTERVAL_SECONDS = 0.015
+TERMINAL_REMOTE_IDLE_SLEEP_SECONDS = 0.01
+_TERMINAL_REAPER_STARTED = False
+_TERMINAL_REAPER_LOCK = threading.Lock()
+
+TERMINAL_PROFILE_OPTIONS_POSIX = (
+    {'id': 'bash', 'label': 'Bash'},
+    {'id': 'login', 'label': '登录 Shell'},
+    {'id': 'sh', 'label': 'Sh'},
+)
+
+TERMINAL_PROFILE_OPTIONS_WINDOWS = (
+    {'id': 'powershell', 'label': 'PowerShell'},
+    {'id': 'cmd', 'label': 'CMD'},
+)
 
 def get_ssh_command_with_port(server_ip, fast_ssh=True):
     """Build an SSH command string with custom port support."""
@@ -1132,6 +1234,7 @@ def normalize_windows_path_for_cmd(p: str) -> str:
 def get_default_path(server_ip):
     """Get the default server path."""
     server_config = SERVERS.get(server_ip, {})
+    configured_default = server_config.get("default_path")
 
 
     if is_windows_server(server_ip):
@@ -1147,12 +1250,11 @@ def get_default_path(server_ip):
             print(f"⚠️  无法获取Windows用户主目录: {e}")
 
 
-        return "C:/"
+        return configured_default or "C:/"
 
 
-    if server_ip == "10.190.21.253":
-        return "/var/services/homes/Algorithm"
-
+    if configured_default:
+        return configured_default
 
     user = server_config.get("user", "th")
     return f"/home/{user}"
@@ -1372,39 +1474,128 @@ def _natural_sort_key(name: str):
     except Exception:
         return [name.lower()]
 
-def sort_file_items(items):
-    """Sort WinSCP-style: directories first, then natural name order."""
+BROWSE_SORT_BY_NAME = 'name'
+BROWSE_SORT_BY_MODIFIED = 'modified'
+BROWSE_SORT_BY_SIZE = 'size'
+BROWSE_SORT_BY_TYPE = 'type'
+BROWSE_SORT_ORDER_ASC = 'asc'
+BROWSE_SORT_ORDER_DESC = 'desc'
+BROWSE_SORT_BY_CHOICES = {
+    BROWSE_SORT_BY_NAME,
+    BROWSE_SORT_BY_MODIFIED,
+    BROWSE_SORT_BY_SIZE,
+    BROWSE_SORT_BY_TYPE,
+}
+BROWSE_SORT_ORDER_CHOICES = {
+    BROWSE_SORT_ORDER_ASC,
+    BROWSE_SORT_ORDER_DESC,
+}
+
+
+def normalize_browse_sort_by(value):
+    sort_by = str(value or BROWSE_SORT_BY_NAME).strip().lower()
+    return sort_by if sort_by in BROWSE_SORT_BY_CHOICES else BROWSE_SORT_BY_NAME
+
+
+def normalize_browse_sort_order(value):
+    sort_order = str(value or BROWSE_SORT_ORDER_ASC).strip().lower()
+    return sort_order if sort_order in BROWSE_SORT_ORDER_CHOICES else BROWSE_SORT_ORDER_ASC
+
+
+def _file_extension_sort_key(name: str):
     try:
-        return sorted(
-            items,
-            key=lambda x: (
-                0 if x.get('is_directory') else 1,
-                _natural_sort_key(x.get('name', ''))
-            )
-        )
+        file_name = str(name or '')
+        if file_name.startswith('.') and file_name.count('.') == 1:
+            return ''
+        _, ext = os.path.splitext(file_name)
+        return ext[1:].lower()
+    except Exception:
+        return ''
+
+
+def _coerce_modified_timestamp(value):
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value or '').strip()
+        if not text:
+            return 0
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y/%m/%d %H:%M:%S', '%Y/%m/%d %H:%M'):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except Exception:
+                continue
+        text = text.replace('上午', 'AM').replace('下午', 'PM')
+        for fmt in ('%Y-%m-%d %p %I:%M', '%Y/%m/%d %p %I:%M', '%m/%d/%Y %p %I:%M'):
+            try:
+                return int(datetime.strptime(text, fmt).timestamp())
+            except Exception:
+                continue
+    except Exception:
+        return 0
+    return 0
+
+
+def _get_item_modified_ts(item):
+    try:
+        if isinstance(item, dict):
+            ts = item.get('modified_ts')
+            if isinstance(ts, (int, float)):
+                return int(ts)
+            return _coerce_modified_timestamp(item.get('modified'))
+    except Exception:
+        return 0
+    return 0
+
+
+def sort_file_items(items, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
+    """Sort file items with directories pinned first and configurable secondary ordering."""
+    try:
+        sort_by = normalize_browse_sort_by(sort_by)
+        sort_order = normalize_browse_sort_order(sort_order)
+        reverse = sort_order == BROWSE_SORT_ORDER_DESC
+
+        def _secondary_key(item):
+            name_key = _natural_sort_key(str(item.get('name', '')))
+            if sort_by == BROWSE_SORT_BY_MODIFIED:
+                return (_get_item_modified_ts(item), name_key)
+            if sort_by == BROWSE_SORT_BY_SIZE:
+                return (int(item.get('size') or 0), name_key)
+            if sort_by == BROWSE_SORT_BY_TYPE:
+                if item.get('is_directory'):
+                    return ('', name_key)
+                return (_file_extension_sort_key(item.get('name', '')), name_key)
+            return name_key
+
+        ordered = sorted(items, key=_secondary_key, reverse=reverse)
+        return sorted(ordered, key=lambda x: 0 if x.get('is_directory') else 1)
     except Exception:
         return items
 
-def get_cache_key(server_ip, path, show_hidden):
+
+def get_cache_key(server_ip, path, show_hidden, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Build cache key."""
-    return f"{server_ip}:{path}:{show_hidden}"
+    return (
+        f"{server_ip}:{path}:{show_hidden}:"
+        f"{normalize_browse_sort_by(sort_by)}:{normalize_browse_sort_order(sort_order)}"
+    )
 
 def is_cache_valid(cache_entry):
     """Check whether cache is valid."""
     return time.time() - cache_entry['timestamp'] < cache_timeout
 
-def get_cached_listing(server_ip, path, show_hidden):
+def get_cached_listing(server_ip, path, show_hidden, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Get cached file list."""
-    cache_key = get_cache_key(server_ip, path, show_hidden)
+    cache_key = get_cache_key(server_ip, path, show_hidden, sort_by, sort_order)
     if cache_key in file_cache:
         cache_entry = file_cache[cache_key]
         if is_cache_valid(cache_entry):
             return cache_entry['data']
     return None
 
-def set_cached_listing(server_ip, path, show_hidden, data):
+def set_cached_listing(server_ip, path, show_hidden, data, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Set file list cache."""
-    cache_key = get_cache_key(server_ip, path, show_hidden)
+    cache_key = get_cache_key(server_ip, path, show_hidden, sort_by, sort_order)
     file_cache[cache_key] = {
         'data': data,
         'timestamp': time.time()
@@ -1431,12 +1622,16 @@ def clear_cached_listing(server_ip, path, show_hidden=None):
 
         return len(keys_to_remove)
     else:
+        keys_to_remove = []
+        prefix = f"{server_ip}:{path}:{show_hidden}:"
+        for cache_key in file_cache.keys():
+            if cache_key.startswith(prefix):
+                keys_to_remove.append(cache_key)
 
-        cache_key = get_cache_key(server_ip, path, show_hidden)
-        if cache_key in file_cache:
-            del file_cache[cache_key]
-            return 1
-        return 0
+        for key in keys_to_remove:
+            del file_cache[key]
+
+        return len(keys_to_remove)
 
 def clear_all_cache():
     """Clear all caches."""
@@ -1515,7 +1710,7 @@ def is_winscp_hidden_file(name, permissions="", path="/"):
 
     return False
 
-def get_directory_listing(server_ip, path=None, show_hidden=False):
+def get_directory_listing(server_ip, path=None, show_hidden=False, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Get a remote directory listing.
 
     Args:
@@ -1528,7 +1723,7 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
         path = get_default_path(server_ip)
 
 
-    cached_result = get_cached_listing(server_ip, path, show_hidden)
+    cached_result = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
     if cached_result is not None:
         return cached_result
     if is_local_server(server_ip):
@@ -1549,10 +1744,11 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "path": item_path,
                     "is_directory": is_dir,
                     "size": size,
-                    "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "modified_ts": int(mtime)
                 })
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         except Exception:
             return []
@@ -1641,17 +1837,18 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                         "path": full_path,
                         "is_directory": is_directory,
                         "size": size,
-                        "modified": f"{date_str} {full_time}"
+                        "modified": f"{date_str} {full_time}",
+                        "modified_ts": _coerce_modified_timestamp(f"{date_str} {full_time}")
                     })
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         else:
 
 
 
-            command = f"ls -la {shlex.quote(path)} | tail -n +2"
+            command = f"LC_ALL=C ls -la --time-style=long-iso {shlex.quote(path)} | tail -n +2"
 
             output, error, _ = ssh_manager.execute_command(server_ip, command)
 
@@ -1693,13 +1890,13 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     continue
 
                 parts = line.split()
-                if len(parts) < 9:
+                if len(parts) < 8:
                     continue
 
                 permissions = parts[0]
                 size = parts[4]
-                date_parts = parts[5:8]
-                name = ' '.join(parts[8:])
+                date_parts = parts[5:7]
+                name = ' '.join(parts[7:])
 
                 if not show_hidden and name.startswith('.'):
                     continue
@@ -1720,14 +1917,15 @@ def get_directory_listing(server_ip, path=None, show_hidden=False):
                     "path": os.path.join(path, name),
                     "is_directory": is_directory,
                     "size": int(size) if size.isdigit() else 0,
-                    "modified": ' '.join(date_parts)
+                    "modified": ' '.join(date_parts),
+                    "modified_ts": _coerce_modified_timestamp(' '.join(date_parts))
                 })
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
 
-def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
+def get_directory_listing_optimized(server_ip, path=None, show_hidden=False, sort_by=BROWSE_SORT_BY_NAME, sort_order=BROWSE_SORT_ORDER_ASC):
     """Optimized directory listing focused on response speed."""
 
 
@@ -1735,7 +1933,7 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
         path = get_default_path(server_ip)
 
 
-    cached_result = get_cached_listing(server_ip, path, show_hidden)
+    cached_result = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
     if cached_result is not None:
         return cached_result
 
@@ -1761,20 +1959,21 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False):
                             "path": os.path.join(path, entry.name),
                             "is_directory": is_dir,
                             "size": size,
-                            "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                            "modified": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                            "modified_ts": int(mtime)
                         })
                     except (OSError, PermissionError):
 
                         continue
 
-            items = sort_file_items(items)
-            set_cached_listing(server_ip, path, show_hidden, items)
+            items = sort_file_items(items, sort_by, sort_order)
+            set_cached_listing(server_ip, path, show_hidden, items, sort_by, sort_order)
             return items
         except Exception:
             return []
     else:
 
-        return get_directory_listing(server_ip, path, show_hidden)
+        return get_directory_listing(server_ip, path, show_hidden, sort_by, sort_order)
 
 def start_speed_update_timer(transfer_id, source_server, target_server):
     """Start the speed update timer to improve transfer performance."""
@@ -2073,10 +2272,11 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
             if not sources:
                 return {'success': False, 'message': 'empty sources'}
 
+            target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
             if target_password:
-                cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+                cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [target_spec]
             else:
-                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [f'{target_user}@{target_server}:{rsync_target_path}/']
+                cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd] + sources + [target_spec]
 
             part_id = f"rsync_{uuid.uuid4().hex}"
             return_code = _run_rsync_subprocess_with_progress(cmd, transfer_id, part_id)
@@ -2099,7 +2299,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     continue
                 if source_is_windows:
                     src_path = convert_windows_path_to_cygwin(src_path)
-                sources.append(f'{source_user}@{source_server}:{src_path}')
+                sources.append(build_remote_spec(source_server, source_user, src_path))
 
             if not sources:
                 return {'success': False, 'message': 'empty sources'}
@@ -2135,7 +2335,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     if not src_path:
                         continue
                     src_path = convert_windows_path_to_cygwin(src_path)
-                    sources.append(f'{source_user}@{source_server}:{src_path}')
+                    sources.append(build_remote_spec(source_server, source_user, src_path))
 
                 if not sources:
                     return {'success': False, 'message': 'empty sources'}
@@ -2181,7 +2381,7 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
                     return {'success': False, 'message': 'empty sources'}
 
                 sources_arg = ' '.join([shlex.quote(s) for s in sources])
-                dest = shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')
+                dest = shlex.quote(build_remote_spec(target_server, target_user, f'{rsync_target_path}/'))
                 if target_password:
                     remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} {sources_arg} {dest}"
                 else:
@@ -2209,7 +2409,160 @@ def transfer_batch_instant(transfer_id, source_server, source_files, target_serv
     except Exception as e:
         return {'success': False, 'message': str(e)}
 
-def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True):
+def _build_rsync_excludes_for_dir(source_dir: str, exclude_paths: list):
+    src = str(source_dir or '').replace('\\', '/').rstrip('/')
+    patterns = []
+    for p in (exclude_paths or []):
+        if not p:
+            continue
+        path = str(p).replace('\\', '/')
+        if src and (path == src or path.startswith(src + '/')):
+            rel = path[len(src):].lstrip('/')
+            if rel:
+                # Anchor exclude at transfer root to avoid accidental partial matches.
+                patterns.append('/' + rel)
+    # Deduplicate but keep stable order.
+    seen = set()
+    out = []
+    for pat in patterns:
+        if pat in seen:
+            continue
+        seen.add(pat)
+        out.append(pat)
+    return out
+
+
+def transfer_directory_contents_instant(transfer_id, source_server, source_dir, target_server, target_path, mode="copy", fast_ssh=True, exclude_paths=None):
+    """
+    Transfer "current directory contents" via a single rsync command:
+      rsync -a <source_dir>/ <target_dir>/
+    This avoids constructing a huge file list (Ctrl+A on large directories).
+    """
+    try:
+        if not source_dir or not target_path:
+            return {'success': False, 'message': 'empty source_dir or target_path'}
+
+        source_is_windows = is_windows_server(source_server)
+        target_is_windows = is_windows_server(target_server)
+        src_dir_raw = str(source_dir)
+        tgt_dir_raw = str(target_path)
+
+        src_dir = convert_windows_path_to_cygwin(src_dir_raw) if source_is_windows else src_dir_raw
+        tgt_dir = convert_windows_path_to_cygwin(tgt_dir_raw) if target_is_windows else tgt_dir_raw
+
+        # Normalize trailing slash semantics: "dir/" means copy contents.
+        src_with_slash = src_dir.rstrip('/') + '/'
+        tgt_with_slash = tgt_dir.rstrip('/') + '/'
+
+        rsync_opts = [
+            "-a",
+            "--inplace",
+            "--whole-file",
+            "--no-compress",
+            "--numeric-ids",
+            "--timeout=600",
+            "-s",
+            "--no-perms",
+            "--no-owner",
+            "--no-group",
+            "--omit-dir-times",
+        ]
+        if source_is_windows or target_is_windows:
+            rsync_opts.append("--iconv=UTF-8,UTF-8")
+
+        # Exclude specific paths (relative to source_dir).
+        for pat in _build_rsync_excludes_for_dir(source_dir, exclude_paths or []):
+            rsync_opts.append(f"--exclude={shlex.quote(pat)}")
+
+        # Move mode: remove source files after successful transfer.
+        if mode == "move":
+            rsync_opts.append("--remove-source-files")
+
+        _append_rsync_progress_opts(rsync_opts)
+        rsync_opts_str = ' '.join(rsync_opts)
+
+        ssh = None
+
+        if source_server == target_server:
+            ssh = ssh_manager.get_connection(source_server)
+            if not ssh:
+                raise Exception(f"无法连接到源服务器 {source_server}")
+            remote_cmd = f"rsync {rsync_opts_str} {shlex.quote(src_with_slash)} {shlex.quote(tgt_with_slash)}"
+        elif source_is_windows and not target_is_windows:
+            source_user = SERVERS[source_server]['user']
+            source_password = SERVERS[source_server].get('password')
+
+            ssh_to_source = RSYNC_SSH_CMD
+            source_port = SERVERS[source_server].get('port', 22)
+            if source_port != 22:
+                ssh_to_source = f"{ssh_to_source} -p {source_port}"
+
+            source_spec = shlex.quote(build_remote_spec(source_server, source_user, src_with_slash))
+            if source_password:
+                remote_cmd = (
+                    f"sshpass -p {shlex.quote(source_password)} "
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} "
+                    f"{source_spec} {shlex.quote(tgt_with_slash)}"
+                )
+            else:
+                remote_cmd = (
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_source)} "
+                    f"{source_spec} {shlex.quote(tgt_with_slash)}"
+                )
+
+            ssh = ssh_manager.get_connection(target_server)
+            if not ssh:
+                raise Exception(f"无法连接到目标服务器 {target_server}")
+        else:
+            ssh = ssh_manager.get_connection(source_server)
+            if not ssh:
+                raise Exception(f"无法连接到源服务器 {source_server}")
+            target_user = SERVERS[target_server]['user']
+            target_password = SERVERS[target_server].get('password')
+
+            # SSH options for rsync target.
+            ssh_to_target = RSYNC_SSH_CMD
+            target_port = SERVERS[target_server].get('port', 22)
+            if target_port != 22:
+                ssh_to_target = f"{ssh_to_target} -p {target_port}"
+
+            dest = shlex.quote(build_remote_spec(target_server, target_user, tgt_with_slash))
+            if target_password:
+                remote_cmd = (
+                    f"sshpass -p {shlex.quote(target_password)} "
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} "
+                    f"{shlex.quote(src_with_slash)} {dest}"
+                )
+            else:
+                remote_cmd = (
+                    f"rsync {rsync_opts_str} -e {shlex.quote(ssh_to_target)} "
+                    f"{shlex.quote(src_with_slash)} {dest}"
+                )
+
+        emit_transfer_log(transfer_id, f"📁 全选目录传输: {source_dir} -> {target_server}:{target_path}")
+        part_id = f"rsync_{uuid.uuid4().hex}"
+        exit_status, error = _run_remote_rsync_with_progress(ssh, remote_cmd, transfer_id, part_id)
+        if exit_status != 0:
+            return {'success': False, 'message': f'rsync exit {exit_status}: {error}'}
+
+        # Cleanup empty dirs after move (best-effort).
+        if mode == "move":
+            try:
+                if source_is_windows:
+                    # Cygwin find may exist in cwRsync environment.
+                    cleanup_cmd = f"find {shlex.quote(src_dir)} -type d -empty -delete"
+                else:
+                    cleanup_cmd = f"find {shlex.quote(src_dir_raw)} -type d -empty -delete"
+                ssh_manager.execute_command(source_server, cleanup_cmd)
+            except Exception:
+                emit_transfer_log(transfer_id, "⚠️ 剪切模式：清理空目录失败（已忽略）")
+
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'message': str(e)}
+
+
+def start_instant_parallel_transfer(transfer_id, source_server, source_files, target_server, target_path, mode="copy", fast_ssh=True, parallel_enabled=True, select_all=False, source_dir="", exclude_paths=None):
     """Start instant parallel transfer tasks without pre-analysis."""
     def _log_transfer_summary(status: str, total_time: str = "", error: str = ""):
         meta = active_transfers.get(transfer_id, {})
@@ -2218,6 +2571,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         tgt_server = meta.get('target_server', target_server)
         target_base = meta.get('target_path', target_path)
         files = meta.get('source_files', source_files)
+        src_dir = meta.get('source_dir') or source_dir
         if isinstance(files, list):
             file_names = ','.join([f.get('name', '') for f in files if isinstance(f, dict)])
             source_paths = ';'.join([f.get('path', '') for f in files if isinstance(f, dict)])
@@ -2228,7 +2582,7 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
         append_transfer_log_record(
             source_ip=src_server,
             target_ip=tgt_server,
-            source_path=source_paths or target_base,
+            source_path=source_paths or src_dir or target_base,
             target_full_path=target_base,
             duration_sec=_hhmmss_to_seconds(total_time),
             status=status,
@@ -2241,7 +2595,10 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
     def transfer_worker():
         try:
-            total_files = len(source_files)
+            if select_all and source_dir:
+                total_files = 1
+            else:
+                total_files = len(source_files)
 
 
             if (is_windows_server(source_server) or is_windows_server(target_server)):
@@ -2254,6 +2611,39 @@ def start_instant_parallel_transfer(transfer_id, source_server, source_files, ta
 
 
             progress_manager.init_transfer(transfer_id, total_files)
+
+            if select_all and source_dir:
+                time_tracker.start_transfer(transfer_id)
+                result = transfer_directory_contents_instant(
+                    transfer_id,
+                    source_server,
+                    source_dir,
+                    target_server,
+                    target_path,
+                    mode=mode,
+                    fast_ssh=fast_ssh,
+                    exclude_paths=exclude_paths or [],
+                )
+                total_time = time_tracker.end_transfer(transfer_id)
+                emit_transfer_bytes_snapshot(transfer_id)
+                if result and result.get('success'):
+                    socketio.emit('transfer_complete', {
+                        'transfer_id': transfer_id,
+                        'status': 'success',
+                        'message': '目录内容传输完成',
+                        'total_time': total_time
+                    })
+                    _log_transfer_summary('success', total_time)
+                else:
+                    error_msg = (result or {}).get('message', 'unknown error')
+                    socketio.emit('transfer_complete', {
+                        'transfer_id': transfer_id,
+                        'status': 'error',
+                        'message': f'目录内容传输失败: {error_msg}',
+                        'total_time': total_time
+                    })
+                    _log_transfer_summary('error', total_time, error_msg)
+                return
 
 
             if not PERFORMANCE_CONFIG.get('reduce_websocket_traffic', True):
@@ -2681,15 +3071,17 @@ def transfer_single_rsync(source_path, target_server, target_path, file_name, is
         ssh_cmd = f"{ssh_cmd} -p {target_port}"
 
     if is_directory:
+        target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', target_spec]
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_path}/', target_spec]
     else:
+        target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
         if target_password:
-            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
+            cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, target_spec]
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, f'{target_user}@{target_server}:{rsync_target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_path, target_spec]
 
 
     part_id = f"rsync_{uuid.uuid4().hex}"
@@ -2768,24 +3160,26 @@ def transfer_directory_parallel(source_path, target_server, target_path, file_na
 
             if task['type'] == 'subdir':
 
+                target_spec = build_remote_spec(target_server, target_user, f"{remote_target_root}/{task['target_subpath']}/")
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        f"{task['source']}/", target_spec
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD,
-                        f"{task['source']}/", f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        f"{task['source']}/", target_spec
                     ]
             else:
 
                 file_paths = [os.path.join(task['source_dir'], f) for f in task['files']]
+                target_spec = build_remote_spec(target_server, target_user, f"{remote_target_root}/{task['target_subpath']}/")
                 if target_password:
                     cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        target_spec
                     ]
                 else:
                     cmd = ['rsync'] + rsync_opts + ['-e', RSYNC_SSH_CMD] + file_paths + [
-                        f"{target_user}@{target_server}:{remote_target_root}/{task['target_subpath']}/"
+                        target_spec
                     ]
 
             try:
@@ -2874,15 +3268,17 @@ def transfer_file_via_remote_to_local_rsync_instant(source_server, source_path, 
         ssh_cmd = f"{ssh_cmd} -p {source_port}"
 
     if is_directory:
+        source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/{file_name}/']
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}/', f'{target_path}/{file_name}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/{file_name}/']
     else:
+        source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
         if source_password:
-            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['sshpass', '-p', source_password, 'rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/']
         else:
-            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, f'{source_user}@{source_server}:{rsync_source_path}', f'{target_path}/']
+            cmd = ['rsync'] + rsync_opts + ['-e', ssh_cmd, source_spec, f'{target_path}/']
 
 
     part_id = f"rsync_{uuid.uuid4().hex}"
@@ -3167,16 +3563,18 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
         source_port = SERVERS[source_server].get('port', 22)
         if source_port != 22:
             ssh_to_source = f"{ssh_to_source} -p {source_port}"
+        directory_source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
+        file_source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
         if is_directory:
             if source_password:
-                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
         else:
             if source_password:
-                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
             else:
-                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
 
         print(f"🔄 目标服务器执行的拉取命令: {remote_cmd}")
 
@@ -3221,17 +3619,19 @@ def transfer_file_via_remote_rsync_instant(source_server, source_path, target_se
     target_port = SERVERS[target_server].get('port', 22)
     if target_port != 22:
         ssh_to_target = f"{ssh_to_target} -p {target_port}"
+    directory_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
+    file_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
 
     if is_directory:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
     else:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
 
     print(f"🔄 远程rsync命令: {remote_cmd}")
 
@@ -3314,18 +3714,20 @@ def transfer_file_via_remote_rsync(source_server, source_path, target_server, ta
 
 
     sshpass_cmd = "sshpass"
+    directory_target_spec = build_remote_spec(target_server, target_user, f'{target_path}/{file_name}/')
+    file_target_spec = build_remote_spec(target_server, target_user, f'{target_path}/')
 
 
     if is_directory:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(directory_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{target_path}/{file_name}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(f'{source_path}/')} {shlex.quote(directory_target_spec)}"
     else:
         if target_password:
-            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
+            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(file_target_spec)}"
         else:
-            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(f'{target_user}@{target_server}:{target_path}/')}"
+            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_cmd)} {shlex.quote(source_path)} {shlex.quote(file_target_spec)}"
 
 
     ssh = ssh_manager.get_connection(source_server)
@@ -3503,16 +3905,18 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
                         print(f"🔧 源服务器使用自定义端口: {source_port}")
 
                     rsync_source_path = convert_windows_path_to_cygwin(source_path)
+                    directory_source_spec = build_remote_spec(source_server, source_user, f'{rsync_source_path}/')
+                    file_source_spec = build_remote_spec(source_server, source_user, rsync_source_path)
                     if is_directory:
                         if source_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}/')} {shlex.quote(f'{target_path}/{file_name}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(directory_source_spec)} {shlex.quote(f'{target_path}/{file_name}/')}"
                     else:
                         if source_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(source_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(f'{source_user}@{source_server}:{rsync_source_path}')} {shlex.quote(f'{target_path}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_source)} {shlex.quote(file_source_spec)} {shlex.quote(f'{target_path}/')}"
 
 
                     ssh = ssh_manager.get_connection(target_server)
@@ -3526,17 +3930,19 @@ def start_sequential_transfer(transfer_id, source_server, source_files, target_s
 
                     rsync_target_path = convert_windows_path_to_cygwin(target_path) if target_is_windows else target_path
                     rsync_source_path = convert_windows_path_to_cygwin(source_path) if source_is_windows else source_path
+                    directory_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/{file_name}/')
+                    file_target_spec = build_remote_spec(target_server, target_user, f'{rsync_target_path}/')
 
                     if is_directory:
                         if target_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/{file_name}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(f'{rsync_source_path}/')} {shlex.quote(directory_target_spec)}"
                     else:
                         if target_password:
-                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                            remote_cmd = f"{sshpass_cmd} -p {shlex.quote(target_password)} rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
                         else:
-                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(f'{target_user}@{target_server}:{rsync_target_path}/')}"
+                            remote_cmd = f"rsync {' '.join(rsync_base_opts)} -e {shlex.quote(ssh_to_target)} {shlex.quote(rsync_source_path)} {shlex.quote(file_target_spec)}"
 
 
                     ssh = ssh_manager.get_connection(source_server)
@@ -3760,6 +4166,637 @@ def _escape_pwsh_literal(path: str) -> str:
 def _human_timestamp():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+def _clamp_terminal_cols(cols):
+    try:
+        cols = int(cols)
+    except Exception:
+        cols = 120
+    return max(40, min(cols, 400))
+
+def _clamp_terminal_rows(rows):
+    try:
+        rows = int(rows)
+    except Exception:
+        rows = 30
+    return max(10, min(rows, 200))
+
+def _set_local_terminal_size(fd, rows, cols):
+    try:
+        if fd is None:
+            return
+        winsize = struct.pack('HHHH', _clamp_terminal_rows(rows), _clamp_terminal_cols(cols), 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+    except Exception:
+        pass
+
+def _resolve_local_terminal_cwd(cwd: str) -> str:
+    try:
+        candidate = os.path.abspath(os.path.expanduser(cwd or ''))
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    except Exception:
+        pass
+    return os.path.expanduser('~')
+
+def get_terminal_profile_options(server_ip: str):
+    return list(TERMINAL_PROFILE_OPTIONS_WINDOWS if is_windows_server(server_ip) else TERMINAL_PROFILE_OPTIONS_POSIX)
+
+def _normalize_terminal_profile_by_platform(is_windows: bool, profile: str = '') -> str:
+    options = TERMINAL_PROFILE_OPTIONS_WINDOWS if is_windows else TERMINAL_PROFILE_OPTIONS_POSIX
+    default_profile = 'powershell' if is_windows else 'bash'
+    allowed = {str(option.get('id') or '').strip() for option in options}
+    candidate = str(profile or '').strip().lower()
+    return candidate if candidate in allowed else default_profile
+
+def normalize_terminal_profile(server_ip: str, profile: str = '') -> str:
+    return _normalize_terminal_profile_by_platform(is_windows_server(server_ip), profile)
+
+def _build_bash_integration_rcfile_payload() -> str:
+    return (
+        "if [ -f /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi\n"
+        "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n"
+        "__turbofile_prompt(){\n"
+        "  local _tf_ec=$?;\n"
+        "  printf '\\033]777;cwd=%s\\007' \"$PWD\";\n"
+        "  printf '\\033]777;status=%s\\007' \"$_tf_ec\";\n"
+        "}\n"
+        "if [ -n \"${PROMPT_COMMAND-}\" ]; then\n"
+        "  PROMPT_COMMAND=\"__turbofile_prompt;${PROMPT_COMMAND}\"\n"
+        "else\n"
+        "  PROMPT_COMMAND=\"__turbofile_prompt\"\n"
+        "fi\n"
+        "PS0=$'\\033]777;command_start\\007'\n"
+        "rm -f -- \"${BASH_SOURCE[0]}\" 2>/dev/null || true\n"
+    )
+
+def _build_linux_terminal_command(cwd: str, profile: str = 'bash') -> str:
+    profile = _normalize_terminal_profile_by_platform(False, profile)
+    target_dir = shlex.quote(cwd or '~')
+    if profile == 'login':
+        return (
+            f'export TERM=xterm-256color COLORTERM=truecolor; '
+            f'cd {target_dir} 2>/dev/null || cd ~; '
+            f'exec ${{SHELL:-/bin/bash}} -il'
+        )
+    if profile == 'sh':
+        return (
+            f'export TERM=xterm-256color COLORTERM=truecolor; '
+            f'cd {target_dir} 2>/dev/null || cd ~; '
+            f'exec /bin/sh -i'
+        )
+    rc_payload = _build_bash_integration_rcfile_payload()
+    script = (
+        "rcfile=$(mktemp /tmp/turbofile-bashrc.XXXXXX 2>/dev/null || mktemp); "
+        "cat > \"$rcfile\" <<'__TURBOFILE_BASH_RC__'\n"
+        f"{rc_payload}"
+        "__TURBOFILE_BASH_RC__\n"
+        f"export TERM=xterm-256color COLORTERM=truecolor; "
+        f"cd {target_dir} 2>/dev/null || cd ~; "
+        f"exec bash --rcfile \"$rcfile\" -i"
+    )
+    return script
+
+def _build_windows_shell_integration_prompt() -> str:
+    return (
+        "$global:__TurboFileOriginalPrompt = $function:prompt; "
+        "function global:prompt { "
+        "$tfCode = if ($?) { 0 } elseif ($LASTEXITCODE -is [int]) { [int]$LASTEXITCODE } else { 1 }; "
+        "[Console]::Out.Write(\"`e]777;cwd=$($PWD.Path)`a\"); "
+        "[Console]::Out.Write(\"`e]777;status=$tfCode`a\"); "
+        "if ($global:__TurboFileOriginalPrompt) { & $global:__TurboFileOriginalPrompt } "
+        "else { \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" } "
+        "}; "
+    )
+
+def _build_windows_terminal_command(cwd: str, profile: str = 'powershell') -> str:
+    profile = _normalize_terminal_profile_by_platform(True, profile)
+    if profile == 'cmd':
+        target_dir = normalize_windows_path_for_cmd(cwd or '').replace('"', '""')
+        return f'cmd.exe /Q /K "chcp 65001>nul && cd /d \\"{target_dir}\\""'
+
+    target_dir = _escape_pwsh_literal(normalize_windows_path_for_cmd(cwd or ''))
+    script = (
+        "$PSStyle.OutputRendering = 'PlainText' 2>$null; "
+        "[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); "
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        f"try {{ Set-Location -LiteralPath '{target_dir}' }} catch {{ Set-Location -LiteralPath $HOME }}; "
+        f"{_build_windows_shell_integration_prompt()}"
+        "Clear-Host"
+    )
+    escaped_script = script.replace('"', '`"')
+    return (
+        "powershell.exe -NoLogo -NoExit -NoProfile -ExecutionPolicy Bypass "
+        f"-Command \"{escaped_script}\""
+    )
+
+def emit_terminal_output(terminal_id, data, final=False, exit_code=None, sid=None):
+    """Push terminal output to the requesting client only."""
+    try:
+        payload = {
+            'terminal_id': terminal_id,
+            'data': data,
+            'final': bool(final),
+            'exit_code': exit_code
+        }
+        target_room = sid
+        if not target_room:
+            with TERMINAL_TASKS_LOCK:
+                task = TERMINAL_TASKS.get(terminal_id)
+                if task:
+                    target_room = task.get('sid')
+        if target_room:
+            socketio.emit('terminal_output', payload, room=target_room)
+    except Exception as e:
+        print(f"❌ 发送终端输出失败: {e}")
+
+def emit_terminal_status(terminal_id, status, message='', sid=None, extra=None):
+    """Push terminal status updates to the requesting client only."""
+    try:
+        payload = {
+            'terminal_id': terminal_id,
+            'status': status,
+            'message': message or ''
+        }
+        if isinstance(extra, dict):
+            payload.update(extra)
+        target_room = sid
+        if not target_room:
+            with TERMINAL_TASKS_LOCK:
+                task = TERMINAL_TASKS.get(terminal_id)
+                if task:
+                    target_room = task.get('sid')
+        if target_room:
+            socketio.emit('terminal_status', payload, room=target_room)
+    except Exception as e:
+        print(f"❌ 发送终端状态失败: {e}")
+
+def _get_terminal_task(terminal_id):
+    with TERMINAL_TASKS_LOCK:
+        return TERMINAL_TASKS.get(terminal_id)
+
+def _pop_terminal_task(terminal_id):
+    with TERMINAL_TASKS_LOCK:
+        return TERMINAL_TASKS.pop(terminal_id, None)
+
+def _terminal_session_payload(terminal_id, task):
+    if not terminal_id or not isinstance(task, dict):
+        return None
+    detached_at = task.get('detached_at')
+    detached_seconds = None
+    if isinstance(detached_at, (int, float)):
+        detached_seconds = max(0, int(time.time() - detached_at))
+    return {
+        'terminal_id': terminal_id,
+        'server': task.get('server') or '',
+        'host': task.get('host') or '',
+        'panel': task.get('panel') or '',
+        'cwd': task.get('cwd') or '',
+        'profile': task.get('profile') or '',
+        'client_token': task.get('client_token') or '',
+        'browser_token': task.get('browser_token') or '',
+        'detached': bool(task.get('sid') is None),
+        'detached_seconds': detached_seconds,
+        'opened_at': task.get('opened_at') or 0,
+    }
+
+def list_terminal_sessions_for_client(client_token: str):
+    token = str(client_token or '').strip()
+    if not token:
+        return []
+    sessions = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('client_token') != token:
+                continue
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                sessions.append(payload)
+    sessions.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return sessions
+
+def list_active_terminal_sessions():
+    sessions = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                sessions.append(payload)
+    sessions.sort(
+        key=lambda item: (
+            str(item.get('server') or ''),
+            str(item.get('panel') or ''),
+            float(item.get('opened_at') or 0),
+        )
+    )
+    return sessions
+
+def close_terminal_sessions_for_client_panel(client_token: str, panel: str):
+    token = str(client_token or '').strip()
+    panel_name = str(panel or '').strip()
+    if not token or not panel_name:
+        return
+    with TERMINAL_TASKS_LOCK:
+        terminal_ids = [
+            terminal_id
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('client_token') == token and task.get('panel') == panel_name
+        ]
+    for terminal_id in terminal_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def mark_terminal_sessions_detached_for_sid(sid):
+    if not sid:
+        return 0
+    detached = 0
+    now = time.time()
+    with TERMINAL_TASKS_LOCK:
+        for task in TERMINAL_TASKS.values():
+            if task.get('sid') != sid:
+                continue
+            task['sid'] = None
+            task['detached_at'] = now
+            detached += 1
+    return detached
+
+def rebind_terminal_sessions(client_token: str, sid: str):
+    token = str(client_token or '').strip()
+    new_sid = str(sid or '').strip()
+    if not token or not new_sid:
+        return []
+    rebound = []
+    with TERMINAL_TASKS_LOCK:
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('client_token') != token:
+                continue
+            task['sid'] = new_sid
+            task['detached_at'] = None
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                rebound.append(payload)
+    rebound.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return rebound
+
+def recover_detached_terminal_sessions_for_browser(browser_token: str, new_client_token: str, sid: str):
+    browser = str(browser_token or '').strip()
+    new_token = str(new_client_token or '').strip()
+    new_sid = str(sid or '').strip()
+    if not browser or not new_token or not new_sid:
+        return []
+
+    with TERMINAL_TASKS_LOCK:
+        detached_items = [
+            (terminal_id, task)
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('browser_token') == browser and task.get('sid') is None
+        ]
+        if not detached_items:
+            return []
+
+        latest_task = max(
+            detached_items,
+            key=lambda item: float(item[1].get('detached_at') or item[1].get('opened_at') or 0)
+        )[1]
+        source_client_token = str(latest_task.get('client_token') or '').strip()
+        if not source_client_token:
+            return []
+
+        rebound = []
+        for terminal_id, task in TERMINAL_TASKS.items():
+            if task.get('browser_token') != browser:
+                continue
+            if task.get('sid') is not None:
+                continue
+            if str(task.get('client_token') or '').strip() != source_client_token:
+                continue
+            task['sid'] = new_sid
+            task['detached_at'] = None
+            task['client_token'] = new_token
+            payload = _terminal_session_payload(terminal_id, task)
+            if payload:
+                rebound.append(payload)
+
+    rebound.sort(key=lambda item: (item.get('panel') or '', item.get('opened_at') or 0))
+    return rebound
+
+def _reap_detached_terminal_sessions():
+    now = time.time()
+    with TERMINAL_TASKS_LOCK:
+        stale_ids = [
+            terminal_id
+            for terminal_id, task in TERMINAL_TASKS.items()
+            if task.get('sid') is None
+            and isinstance(task.get('detached_at'), (int, float))
+            and (now - float(task.get('detached_at') or 0)) >= TERMINAL_DETACH_GRACE_SECONDS
+        ]
+    for terminal_id in stale_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def _terminal_reaper_loop():
+    while True:
+        try:
+            _reap_detached_terminal_sessions()
+        except Exception:
+            pass
+        time.sleep(TERMINAL_REAPER_INTERVAL_SECONDS)
+
+def ensure_terminal_reaper_started():
+    global _TERMINAL_REAPER_STARTED
+    with _TERMINAL_REAPER_LOCK:
+        if _TERMINAL_REAPER_STARTED:
+            return
+        threading.Thread(target=_terminal_reaper_loop, daemon=True, name='turbofile-terminal-reaper').start()
+        _TERMINAL_REAPER_STARTED = True
+
+def open_terminal_session(server_ip, cwd, rows, cols, sid=None, panel=None, client_token=None, browser_token=None, profile=None):
+    """Create a terminal session and start background streaming."""
+    terminal_id = f"term_{uuid.uuid4().hex}"
+    rows = _clamp_terminal_rows(rows)
+    cols = _clamp_terminal_cols(cols)
+    is_local = is_local_server(server_ip)
+    is_windows = is_windows_server(server_ip)
+    host = get_server_host(server_ip)
+    profile = normalize_terminal_profile(server_ip, profile)
+
+    try:
+        ensure_terminal_reaper_started()
+        if is_local:
+            work_dir = _resolve_local_terminal_cwd(cwd)
+            master_fd, slave_fd = pty.openpty()
+            _set_local_terminal_size(slave_fd, rows, cols)
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            local_command = _build_windows_terminal_command(work_dir, profile) if is_windows else _build_linux_terminal_command(work_dir, profile)
+            proc = subprocess.Popen(
+                ['/bin/bash', '-lc', local_command],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=work_dir,
+                env=env,
+                preexec_fn=os.setsid,
+                close_fds=True
+            )
+            os.close(slave_fd)
+            session = {
+                'type': 'local',
+                'server': server_ip,
+                'host': host,
+                'sid': sid,
+                'panel': panel,
+                'cwd': work_dir,
+                'profile': profile,
+                'client_token': str(client_token or '').strip(),
+                'browser_token': str(browser_token or '').strip(),
+                'opened_at': time.time(),
+                'detached_at': None,
+                'fd': master_fd,
+                'process': proc,
+                'encoding': 'utf-8',
+                'closing': False,
+            }
+        else:
+            ssh = ssh_manager.get_connection(server_ip)
+            if not ssh:
+                return None, f'无法连接到服务器 {server_ip}'
+            transport = ssh.get_transport()
+            if not transport or not transport.is_active():
+                return None, f'服务器 {server_ip} 的 SSH 连接不可用'
+            channel = transport.open_session(timeout=5)
+            channel.get_pty(term='xterm-256color', width=cols, height=rows)
+            command = _build_windows_terminal_command(cwd, profile) if is_windows else _build_linux_terminal_command(cwd, profile)
+            channel.exec_command(command)
+            session = {
+                'type': 'remote',
+                'server': server_ip,
+                'host': host,
+                'sid': sid,
+                'panel': panel,
+                'cwd': cwd or get_default_path(server_ip),
+                'profile': profile,
+                'client_token': str(client_token or '').strip(),
+                'browser_token': str(browser_token or '').strip(),
+                'opened_at': time.time(),
+                'detached_at': None,
+                'channel': channel,
+                'encoding': 'utf-8',
+                'closing': False,
+            }
+
+        with TERMINAL_TASKS_LOCK:
+            TERMINAL_TASKS[terminal_id] = session
+
+        socketio.start_background_task(stream_terminal_output, terminal_id)
+        emit_terminal_status(
+            terminal_id,
+            'opened',
+            sid=sid,
+            extra={
+                'server': server_ip,
+                'host': host,
+                'panel': panel,
+                'cwd': session.get('cwd') or '',
+                'profile': profile
+            }
+        )
+        return terminal_id, None
+    except Exception as e:
+        return None, str(e)
+
+def resize_terminal_session(terminal_id, rows, cols):
+    """Resize a running terminal session."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+    rows = _clamp_terminal_rows(rows)
+    cols = _clamp_terminal_cols(cols)
+    try:
+        if session['type'] == 'local':
+            _set_local_terminal_size(session.get('fd'), rows, cols)
+        else:
+            channel = session.get('channel')
+            if channel:
+                channel.resize_pty(width=cols, height=rows)
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def send_terminal_input(terminal_id, data):
+    """Send raw terminal input bytes to a running session."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+    payload = data or ''
+    try:
+        if session['type'] == 'local':
+            fd = session.get('fd')
+            if fd is None:
+                return False, '本地终端不可写'
+            os.write(fd, payload.encode('utf-8', errors='ignore'))
+        else:
+            channel = session.get('channel')
+            if not channel:
+                return False, '远程终端不可写'
+            channel.send(payload)
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def close_terminal_session(terminal_id, emit_status=True):
+    """Close a running terminal session."""
+    session = _pop_terminal_task(terminal_id)
+    if not session:
+        return False, '终端会话不存在'
+
+    session['closing'] = True
+    try:
+        if session['type'] == 'local':
+            proc = session.get('process')
+            fd = session.get('fd')
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            if proc and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    time.sleep(0.2)
+                    if proc.poll() is None:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+        else:
+            channel = session.get('channel')
+            if channel:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+        if emit_status:
+            emit_terminal_status(terminal_id, 'closed', sid=session.get('sid'))
+        return True, ''
+    except Exception as e:
+        return False, str(e)
+
+def close_terminal_sessions_for_sid(sid):
+    """Close all terminal sessions owned by the given socket id."""
+    if not sid:
+        return
+    with TERMINAL_TASKS_LOCK:
+        terminal_ids = [terminal_id for terminal_id, task in TERMINAL_TASKS.items() if task.get('sid') == sid]
+    for terminal_id in terminal_ids:
+        close_terminal_session(terminal_id, emit_status=False)
+
+def stream_terminal_output(terminal_id):
+    """Background thread: stream raw terminal output."""
+    session = _get_terminal_task(terminal_id)
+    if not session:
+        return
+
+    exit_code = 0
+    final_note = '\r\n[终端已断开]\r\n'
+
+    try:
+        if session['type'] == 'local':
+            proc = session.get('process')
+            fd = session.get('fd')
+            while True:
+                if fd is None:
+                    break
+                rlist, _, _ = select.select([fd], [], [], TERMINAL_LOCAL_POLL_INTERVAL_SECONDS)
+                if fd in rlist:
+                    chunks = []
+                    while True:
+                        try:
+                            data = os.read(fd, 65536)
+                        except OSError:
+                            data = b''
+                        if not data:
+                            break
+                        chunks.append(data)
+                        more_ready, _, _ = select.select([fd], [], [], 0)
+                        if fd not in more_ready:
+                            break
+                    if chunks:
+                        emit_terminal_output(
+                            terminal_id,
+                            b''.join(chunks).decode('utf-8', errors='replace'),
+                            sid=session.get('sid')
+                        )
+                    elif proc is None or proc.poll() is not None:
+                        break
+                if proc is not None and proc.poll() is not None:
+                    try:
+                        tail_chunks = []
+                        while True:
+                            tail = os.read(fd, 4096)
+                            if not tail:
+                                break
+                            tail_chunks.append(tail)
+                        if tail_chunks:
+                            emit_terminal_output(
+                                terminal_id,
+                                b''.join(tail_chunks).decode('utf-8', errors='replace'),
+                                sid=session.get('sid')
+                            )
+                    except Exception:
+                        pass
+                    break
+            if proc is not None:
+                proc.wait(timeout=1)
+                exit_code = proc.returncode
+                final_note = f'\r\n[终端已结束，退出码 {exit_code}]\r\n'
+        else:
+            channel = session.get('channel')
+            while channel is not None:
+                had_data = False
+                stdout_chunks = []
+                stderr_chunks = []
+                while channel.recv_ready():
+                    data = channel.recv(65536)
+                    if not data:
+                        break
+                    stdout_chunks.append(data)
+                while channel.recv_stderr_ready():
+                    data = channel.recv_stderr(65536)
+                    if not data:
+                        break
+                    stderr_chunks.append(data)
+                if stdout_chunks:
+                    emit_terminal_output(
+                        terminal_id,
+                        b''.join(stdout_chunks).decode(session.get('encoding') or 'utf-8', errors='replace'),
+                        sid=session.get('sid')
+                    )
+                    had_data = True
+                if stderr_chunks:
+                    emit_terminal_output(
+                        terminal_id,
+                        b''.join(stderr_chunks).decode(session.get('encoding') or 'utf-8', errors='replace'),
+                        sid=session.get('sid')
+                    )
+                    had_data = True
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                if not had_data:
+                    time.sleep(TERMINAL_REMOTE_IDLE_SLEEP_SECONDS)
+            if channel is not None:
+                try:
+                    exit_code = channel.recv_exit_status()
+                    final_note = f'\r\n[终端已结束，退出码 {exit_code}]\r\n'
+                except Exception:
+                    final_note = '\r\n[终端已断开]\r\n'
+    except Exception as e:
+        final_note = f'\r\n[终端异常: {e}]\r\n'
+        exit_code = -1
+    finally:
+        with TERMINAL_TASKS_LOCK:
+            TERMINAL_TASKS.pop(terminal_id, None)
+        emit_terminal_output(terminal_id, final_note, final=True, exit_code=exit_code, sid=session.get('sid'))
+        emit_terminal_status(terminal_id, 'closed', extra={'exit_code': exit_code}, sid=session.get('sid'))
+
 def emit_run_output(run_id, message, is_error=False, final=False, exit_code=None, sid=None):
     """Push runtime output to the requesting client only."""
     try:
@@ -3974,14 +5011,14 @@ def transfer_file_via_local_rsync(source_path, target_server, target_path, file_
             cmd = ['sshpass', '-p', target_password, 'rsync'] + rsync_opts + [
                 '-e', ssh_opts_str,
                 source_with_slash,
-                f"{target_user}@{target_server}:{target_full_path}"
+                build_remote_spec(target_server, target_user, target_full_path)
             ]
         else:
 
             cmd = ['rsync'] + rsync_opts + [
                 '-e', ssh_opts_str,
                 source_with_slash,
-                f"{target_user}@{target_server}:{target_full_path}"
+                build_remote_spec(target_server, target_user, target_full_path)
             ]
 
 

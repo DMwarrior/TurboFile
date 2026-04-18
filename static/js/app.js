@@ -1,14 +1,26 @@
-
-        const socket = io();
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            rememberUpgrade: true,
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 250,
+            reconnectionDelayMax: 2000,
+            timeout: 10000
+        });
         let currentTransferId = null;
-        let latestTransferredBytes = 0;
-        let selectedSourceFiles = [];
-        let selectedTargetFiles = [];
-        let currentTransferDirection = 'ltr';
-        let currentTransferMode = 'copy';
-        let currentSourcePath = '';
-        let currentTargetPath = '';
-        let transferContext = null;
+	        let latestTransferredBytes = 0;
+	        let selectedSourceFiles = [];
+	        let selectedTargetFiles = [];
+	        const selectAllState = {
+	            source: { active: false, excluded: new Set(), path: null },
+	            target: { active: false, excluded: new Set(), path: null }
+	        };
+	        let currentTransferDirection = 'ltr';
+	        let currentTransferMode = 'copy';
+	        let currentSourcePath = '';
+	        let currentTargetPath = '';
+	        let transferContext = null;
 
 
         let windowsDrivesSource = [];
@@ -17,9 +29,12 @@
 
         const BROWSE_PAGE_SIZE = 400;
         const BROWSE_PAGE_SIZE_MAX = 2000;
+        const BROWSE_SORT_STORAGE_KEY = 'turbofile-browse-sort';
+        const BROWSE_SORT_BY_CHOICES = ['name', 'modified', 'size', 'type'];
+        const BROWSE_SORT_ORDER_CHOICES = ['asc', 'desc'];
         const browseState = {
-            source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null },
-            target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null }
+            source: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null, sortBy: 'name', sortOrder: 'asc' },
+            target: { path: null, offset: 0, total: 0, hasMore: false, loading: false, controller: null, loadedCount: 0, requestToken: '', fullItems: [], fullOffset: 0, fullHasMore: false, loadingAll: false, virtualOffset: 0, rowHeight: 0, lastScrollTop: 0, jumpTimer: null, pendingJump: null, sortBy: 'name', sortOrder: 'asc' }
         };
         const browsePositionMemory = {
             source: new Map(),
@@ -37,7 +52,29 @@
         let transferRefreshOverride = null; // { refreshSource: boolean, refreshTarget: boolean } | null
 
 
-        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false };
+        const uiDialogState = { instance: null, resolve: null, type: 'alert', bound: false, promptSelection: null, variant: '' };
+        const EDITOR_LARGE_FILE_CHUNK_BYTES = 256 * 1024;
+        const EDITOR_FOLLOW_INTERVAL_MS = 2000;
+        const editorViewState = {
+            server: '',
+            path: '',
+            title: '',
+            fileSize: 0,
+            readOffset: 0,
+            readEnd: 0,
+            chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+            mode: 'full',
+            encoding: 'utf-8',
+            binary: false,
+            readOnly: false,
+            truncated: false,
+            followTail: false,
+            followTimer: 0,
+            loading: false,
+            requestToken: '',
+            renderToken: '',
+            lastContent: ''
+        };
 
         const DRAG_TRANSFER_TYPE = 'application/x-turbofile-transfer';
         let dragTransferPayload = null;
@@ -55,13 +92,21 @@
         function _getUiDialogElements() {
             return {
                 modal: document.getElementById('uiDialogModal'),
+                dialog: document.querySelector('#uiDialogModal .ui-dialog'),
+                content: document.querySelector('#uiDialogModal .ui-dialog-content'),
                 title: document.getElementById('uiDialogTitle'),
+                eyebrow: document.getElementById('uiDialogEyebrow'),
+                subtitle: document.getElementById('uiDialogSubtitle'),
+                iconBadge: document.getElementById('uiDialogIconBadge'),
+                icon: document.getElementById('uiDialogIcon'),
                 message: document.getElementById('uiDialogMessage'),
                 list: document.getElementById('uiDialogList'),
                 warning: document.getElementById('uiDialogWarning'),
                 warningText: document.querySelector('#uiDialogWarning span'),
                 inputRow: document.getElementById('uiDialogInputRow'),
                 input: document.getElementById('uiDialogInput'),
+                inputHint: document.getElementById('uiDialogInputHint'),
+                meta: document.getElementById('uiDialogMeta'),
                 confirmBtn: document.getElementById('uiDialogConfirm'),
                 cancelBtn: document.getElementById('uiDialogCancel')
             };
@@ -138,7 +183,12 @@
                 els.modal.addEventListener('shown.bs.modal', () => {
                     if (uiDialogState.type === 'prompt' && els.input) {
                         els.input.focus();
-                        els.input.select();
+                        const selection = uiDialogState.promptSelection;
+                        if (selection && Number.isInteger(selection.start) && Number.isInteger(selection.end)) {
+                            els.input.setSelectionRange(selection.start, selection.end);
+                        } else {
+                            els.input.select();
+                        }
                     } else if (els.confirmBtn) {
                         els.confirmBtn.focus();
                     }
@@ -163,9 +213,29 @@
 
             const els = _getUiDialogElements();
             uiDialogState.type = options.type || 'alert';
+            uiDialogState.variant = options.variant || '';
+
+            if (els.dialog) {
+                els.dialog.classList.toggle('ui-dialog-spotlight', uiDialogState.variant === 'spotlight-search');
+            }
 
             if (els.title) {
                 els.title.textContent = options.title || '提示';
+            }
+            if (els.eyebrow) {
+                const eyebrow = options.eyebrow || '';
+                els.eyebrow.textContent = eyebrow;
+                els.eyebrow.style.display = eyebrow ? 'block' : 'none';
+            }
+            if (els.subtitle) {
+                const subtitle = options.subtitle || '';
+                els.subtitle.textContent = subtitle;
+                els.subtitle.style.display = subtitle ? 'block' : 'none';
+            }
+            if (els.icon && els.iconBadge) {
+                const iconClass = options.iconClass || (uiDialogState.variant === 'spotlight-search' ? 'bi bi-search' : 'bi bi-info-circle');
+                els.icon.className = iconClass;
+                els.iconBadge.style.display = iconClass ? 'inline-flex' : 'none';
             }
             if (els.message) {
                 const msg = options.message || '';
@@ -199,11 +269,23 @@
                     els.inputRow.style.display = 'block';
                     els.input.value = options.defaultValue || '';
                     els.input.placeholder = options.placeholder || '';
+                    uiDialogState.promptSelection = options.promptSelection || null;
                 } else {
                     els.inputRow.style.display = 'none';
                     els.input.value = '';
                     els.input.placeholder = '';
+                    uiDialogState.promptSelection = null;
                 }
+            }
+            if (els.inputHint) {
+                const inputHint = uiDialogState.type === 'prompt' ? (options.inputHint || '') : '';
+                els.inputHint.textContent = inputHint;
+                els.inputHint.style.display = inputHint ? 'inline-flex' : 'none';
+            }
+            if (els.meta) {
+                const meta = uiDialogState.type === 'prompt' ? (options.meta || '') : '';
+                els.meta.textContent = meta;
+                els.meta.style.display = meta ? 'block' : 'none';
             }
 
             if (els.confirmBtn) {
@@ -269,6 +351,19 @@
             return parts.length ? parts[parts.length - 1] : '';
         }
 
+        function _getRenameSelectionRange(name, isDirectory = false) {
+            const text = String(name || '');
+            if (!text) return { start: 0, end: 0 };
+            if (isDirectory) return { start: 0, end: text.length };
+
+            const dotIndex = text.lastIndexOf('.');
+            if (dotIndex <= 0 || dotIndex === text.length - 1) {
+                return { start: 0, end: text.length };
+            }
+
+            return { start: 0, end: dotIndex };
+        }
+
         function cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, files, mode) {
             transferContext = {
                 sourceServer: sourceServer || '',
@@ -285,13 +380,15 @@
         }
 
         function _buildOptimisticItems(targetPath, files) {
-            const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            const now = Date.now();
+            const ts = new Date(now).toISOString().slice(0, 19).replace('T', ' ');
             return (files || []).map(f => ({
                 name: f.name,
                 path: _joinPath(targetPath, f.name),
                 is_directory: !!f.is_directory,
                 size: 0,
-                modified: ts
+                modified: ts,
+                modified_ts: Math.floor(now / 1000)
             }));
         }
 
@@ -306,7 +403,7 @@
 
             const state = isSource ? browseState.source : browseState.target;
             const baseIndex = state.loadedCount || 0;
-            const sorted = sortFilesWinSCPStyle([...items]);
+            const sorted = sortFilesForPanel([...items], isSource);
 
             sorted.forEach((file, idx) => {
                 const icon = file.is_directory ? 'bi-folder-fill text-warning' : 'bi-file-earmark text-info';
@@ -506,21 +603,22 @@
             return panel === 'target' ? currentTargetPath : currentSourcePath;
         }
 
-        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null, skipMoveConfirm = false) {
-            if (isTransferring) {
-                addLogWarning('⚠️ 已有传输任务在进行中');
-                return false;
-            }
+	        async function startTransferWithParams(sourceServer, targetServer, targetPath, sourceFiles, mode, direction, refreshOverride = null, skipMoveConfirm = false) {
+	            if (isTransferring) {
+	                addLogWarning('⚠️ 已有传输任务在进行中');
+	                return false;
+	            }
 
-            const files = _cloneTransferFiles(sourceFiles || []);
-            if (!files.length) {
-                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
-                return false;
-            }
+	            const selectAllPayload = (sourceFiles && sourceFiles.select_all) ? sourceFiles : null;
+	            const files = selectAllPayload ? [] : _cloneTransferFiles(sourceFiles || []);
+	            if (!selectAllPayload && !files.length) {
+	                addLogWarning('⚠️ 请选择要传输的文件或文件夹');
+	                return false;
+	            }
 
-            const finalMode = (mode === 'move') ? 'move' : 'copy';
-            currentTransferMode = finalMode;
-            currentTransferDirection = direction || currentTransferDirection || 'ltr';
+	            const finalMode = (mode === 'move') ? 'move' : 'copy';
+	            currentTransferMode = finalMode;
+	            currentTransferDirection = direction || currentTransferDirection || 'ltr';
 
             const fastSSH = true;
             const parallelTransfer = true;
@@ -528,8 +626,7 @@
 
             if (finalMode === 'move' && !skipMoveConfirm) {
                 const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
-                    title: '剪切确认',
-                    danger: true
+                    title: '剪切确认'
                 });
                 if (!ok) {
                     return false;
@@ -537,25 +634,43 @@
             }
 
 
-            if (!sourceServer || !targetServer || !targetPath) {
-                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
-                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
-                return false;
-            }
+	            if (!sourceServer || !targetServer || !targetPath) {
+	                addLogWarning('⚠️ 请选择源服务器、目标服务器和目标路径');
+	                await showAlertDialog('请选择源服务器、目标服务器和目标路径');
+	                return false;
+	            }
 
 
-            if (sourceServer === targetServer) {
-                const hasConflict = files.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
-                    return false;
-                }
-            }
+	            if (sourceServer === targetServer) {
+	                if (selectAllPayload && selectAllPayload.source_dir) {
+	                    const srcDir = String(selectAllPayload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const conflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (conflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return false;
+	                    }
+	                } else {
+	                    const hasConflict = files.some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return false;
+	                    }
+	                }
+	            }
 
-            cacheTransferContext(sourceServer, targetServer, '', targetPath, files, finalMode);
+	            cacheTransferContext(
+	                sourceServer,
+	                targetServer,
+	                selectAllPayload ? (selectAllPayload.source_dir || '') : '',
+	                targetPath,
+	                files,
+	                finalMode
+	            );
 
 
             transferRefreshOverride = refreshOverride;
@@ -569,24 +684,40 @@
             if (startBtn) startBtn.style.display = 'none';
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
-            const fileNames = files.map(f => f.name).join(', ');
-            addLogInfo(`📤 源: ${sourceServer} (${files.length}项)`);
-            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
-            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            const fileNames = files.map(f => f.name).join(', ');
+	            if (selectAllPayload) {
+	                const excludedCount = (selectAllPayload.exclude_paths || []).length;
+	                const excludedText = excludedCount > 0 ? `，排除 ${excludedCount} 项` : '';
+	                addLogInfo(`📤 源: ${sourceServer} (当前目录全部${excludedText})`);
+	            } else {
+	                addLogInfo(`📤 源: ${sourceServer} (${files.length}项)`);
+	            }
+	            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+	            if (selectAllPayload) {
+	                addLogInfo(`📋 目录: ${selectAllPayload.source_dir || ''}`);
+	            } else {
+	                addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            }
 
 
-            socket.emit('start_transfer', {
-                source_server: sourceServer,
-                source_files: files,
-                target_server: targetServer,
-                target_path: targetPath,
-                mode: finalMode,
-                fast_ssh: fastSSH,
-                parallel_transfer: parallelTransfer
-            });
+	            const payload = {
+	                source_server: sourceServer,
+	                source_files: files,
+	                target_server: targetServer,
+	                target_path: targetPath,
+	                mode: finalMode,
+	                fast_ssh: fastSSH,
+	                parallel_transfer: parallelTransfer
+	            };
+	            if (selectAllPayload) {
+	                payload.select_all = true;
+	                payload.source_dir = selectAllPayload.source_dir || '';
+	                payload.exclude_paths = selectAllPayload.exclude_paths || [];
+	            }
+	            socket.emit('start_transfer', payload);
 
-            return true;
-        }
+	            return true;
+	        }
 
         function setTransferClipboardFromSelection(mode) {
             if (isTransferring) {
@@ -840,13 +971,22 @@
             }
         }
 
+        function getServerHost(serverIP) {
+            try {
+                const meta = SERVERS_DATA && SERVERS_DATA[serverIP];
+                return (meta && meta.host) ? String(meta.host) : String(serverIP || '');
+            } catch (_) {
+                return String(serverIP || '');
+            }
+        }
+
         function _suggestWindowsServer(windowsServers) {
             const list = Array.isArray(windowsServers) ? windowsServers : _listWindowsServers();
             if (!list.length) return '';
 
             const clientIp = (typeof window !== 'undefined' && window.CLIENT_IPV4) ? window.CLIENT_IPV4 : null;
             if (clientIp) {
-                const hit = list.find(s => s.ip === clientIp);
+                const hit = list.find(s => getServerHost(s.ip) === clientIp);
                 if (hit) return hit.ip;
             }
 
@@ -872,6 +1012,26 @@
         function _driveRoot(letter) {
             const d = _normalizeDriveLetter(letter);
             return d ? `${d}/` : '';
+        }
+
+        function _getWindowsLocationPath(item) {
+            if (!item || typeof item !== 'object') return '';
+            const explicit = _normalizeWinPath(item.path || '');
+            if (explicit) return explicit;
+            return _driveRoot(item.letter);
+        }
+
+        function _isPathSameOrChild(path0, basePath) {
+            const p = _normalizeWinPath(path0 || '');
+            const base = _normalizeWinPath(basePath || '');
+            if (!p || !base) return false;
+            return p === base || p.startsWith(`${base}/`);
+        }
+
+        function _getWindowsLocationIcon(item) {
+            if (item && (item.kind === 'desktop' || item.type === 'desktop')) return 'bi-house-door-fill';
+            if (item && item.type === 'network') return 'bi-globe2';
+            return 'bi-hdd-fill';
         }
 
         function _normalizeWinPath(p) {
@@ -912,7 +1072,7 @@
                 const opt = document.createElement('option');
                 opt.value = ip;
                 const name = (meta && meta.name) ? meta.name : ip;
-                opt.textContent = `${name} (${ip})`;
+                opt.textContent = `${name} (${getServerHost(ip)})`;
                 selectEl.appendChild(opt);
             });
         }
@@ -937,28 +1097,42 @@
                 if (data.success && Array.isArray(data.drives) && data.drives.length) {
                     downloadWinPicker.drives = data.drives;
                     data.drives.forEach(d => {
-                        const root = _driveRoot(d.letter);
-                        if (!root) return;
+                        const locationPath = _getWindowsLocationPath(d);
+                        if (!locationPath) return;
                         const opt = document.createElement('option');
-                        opt.value = root;
-                        opt.textContent = root;
+                        opt.value = locationPath;
+                        opt.textContent = d.name || locationPath;
+                        if (d && d.kind) {
+                            opt.dataset.kind = String(d.kind);
+                        } else if (d && d.type === 'desktop') {
+                            opt.dataset.kind = 'desktop';
+                        }
                         driveSelect.appendChild(opt);
                     });
                     driveSelect.disabled = false;
 
                     const cur = _normalizeWinPath(downloadWinPicker.path || '');
                     const curDrive = _normalizeDriveLetter((cur.split('/')[0] || ''));
-                    const prefer = data.drives.find(dd => _normalizeDriveLetter(dd.letter) === curDrive)
-                        || data.drives.find(dd => _normalizeDriveLetter(dd.letter) === 'C:')
+                    const desktopEntry = data.drives.find(dd =>
+                        (dd && (dd.kind === 'desktop' || dd.type === 'desktop')) &&
+                        _isPathSameOrChild(cur, _getWindowsLocationPath(dd))
+                    );
+                    const diskEntries = data.drives.filter(dd => _normalizeDriveLetter(dd && dd.letter));
+                    const prefer = desktopEntry
+                        || diskEntries.find(dd => _normalizeDriveLetter(dd.letter) === curDrive)
+                        || diskEntries.find(dd => _normalizeDriveLetter(dd.letter) === 'C:')
+                        || diskEntries[0]
                         || data.drives[0];
                     if (prefer) {
-                        driveSelect.value = _driveRoot(prefer.letter);
+                        driveSelect.value = _getWindowsLocationPath(prefer);
                     }
                 } else {
                     driveSelect.innerHTML = '<option value="">(无磁盘信息)</option>';
+                    showActionFailureToast('加载磁盘失败', data, '无磁盘信息');
                 }
-            } catch (_) {
+            } catch (error) {
                 driveSelect.innerHTML = '<option value="">(加载失败)</option>';
+                showActionFailureToast('加载磁盘异常', error.message);
             }
         }
 
@@ -1012,6 +1186,7 @@
                 const data = await resp.json();
                 if (!data.success) {
                     listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${data.error || '未知错误'}</div>`;
+                    showActionFailureToast('浏览目录失败', data);
                     return;
                 }
 
@@ -1074,6 +1249,7 @@
                 positionDownloadWindowsModal();
             } catch (e) {
                 listEl.innerHTML = `<div class="list-group-item text-danger">浏览失败: ${String(e)}</div>`;
+                showActionFailureToast('浏览目录异常', e.message || e);
             }
         }
 
@@ -1092,9 +1268,19 @@
 
             const driveSelect = document.getElementById('downloadWindowsDriveSelect');
             if (driveSelect && !driveSelect.disabled) {
+                const options = Array.from(driveSelect.options || []);
+                const desktopOpt = options.find(opt =>
+                    String(opt.dataset.kind || '') === 'desktop' &&
+                    _isPathSameOrChild(path0, opt.value || '')
+                );
+                const exactOpt = options.find(opt => _normalizeWinPath(opt.value || '') === path0);
                 const drive = _normalizeDriveLetter((path0.split('/')[0] || ''));
-                const want = drive ? `${drive}/` : '';
-                if (want) driveSelect.value = want;
+                const driveRoot = drive ? `${drive}/` : '';
+                const driveOpt = options.find(opt => _normalizeWinPath(opt.value || '') === _normalizeWinPath(driveRoot));
+                const preferOpt = desktopOpt || exactOpt || driveOpt;
+                if (preferOpt) {
+                    driveSelect.value = preferOpt.value;
+                }
             }
 
             await downloadWinPickerLoadDirs();
@@ -1122,20 +1308,25 @@
             downloadWinPicker.server = serverIP;
 
             const isDestSource = downloadWindowsContext ? (downloadWindowsContext.destPanel === 'source') : false;
-            const remembered = getDefaultPathWithRemember(serverIP, isDestSource);
+            const remembered = getRememberedPath(serverIP, isDestSource);
             const fallback = (SERVERS_DATA && SERVERS_DATA[serverIP] && SERVERS_DATA[serverIP].default_path) ? SERVERS_DATA[serverIP].default_path : 'C:/';
 
-            const p = _normalizeWinPath(remembered || fallback);
+            await downloadWinPickerLoadDrives(serverIP);
+
+            const desktopEntry = (downloadWinPicker.drives || []).find(d =>
+                d && (d.kind === 'desktop' || d.type === 'desktop')
+            );
+            const desktopPath = _getWindowsLocationPath(desktopEntry);
+            const preferredPath = desktopPath || remembered || fallback;
+
+            const p = _normalizeWinPath(preferredPath || fallback);
             downloadWinPicker.path = p;
             downloadWinPicker.selectedPath = p;
 
             const input = document.getElementById('downloadWindowsPathInput');
             if (input) input.value = p;
 
-            await Promise.all([
-                downloadWinPickerLoadDrives(serverIP),
-                downloadWinPickerLoadDirs()
-            ]);
+            await downloadWinPickerEnterPath(p);
         }
 
         async function openDownloadToWindowsModal() {
@@ -1282,6 +1473,506 @@
         let imageZoom = 1;
         let imageOffsetX = 0;
         let imageOffsetY = 0;
+        const terminalPanelState = {
+            source: {
+                panel: 'source',
+                term: null,
+                fitAddon: null,
+                webglAddon: null,
+                searchAddon: null,
+                searchDisposable: null,
+                resizeObserver: null,
+                dataDisposable: null,
+                terminalId: '',
+                server: '',
+                cwd: '',
+                profile: '',
+                open: false,
+                ready: false,
+                fitTimers: [],
+                needsInitialStabilize: false,
+                drawerHeight: 280,
+                maximized: false,
+                browserFullscreen: false,
+                fontSignature: '',
+                searchVisible: false,
+                searchQuery: '',
+                searchCaseSensitive: false,
+                searchRegex: false,
+                searchResultIndex: -1,
+                searchResultCount: 0,
+                localInputBuffer: '',
+                commandRunning: false,
+                lastExitCode: null,
+                recovering: false,
+                recoverTimer: null
+            },
+            target: {
+                panel: 'target',
+                term: null,
+                fitAddon: null,
+                webglAddon: null,
+                searchAddon: null,
+                searchDisposable: null,
+                resizeObserver: null,
+                dataDisposable: null,
+                terminalId: '',
+                server: '',
+                cwd: '',
+                profile: '',
+                open: false,
+                ready: false,
+                fitTimers: [],
+                needsInitialStabilize: false,
+                drawerHeight: 280,
+                maximized: false,
+                browserFullscreen: false,
+                fontSignature: '',
+                searchVisible: false,
+                searchQuery: '',
+                searchCaseSensitive: false,
+                searchRegex: false,
+                searchResultIndex: -1,
+                searchResultCount: 0,
+                localInputBuffer: '',
+                commandRunning: false,
+                lastExitCode: null,
+                recovering: false,
+                recoverTimer: null
+            }
+        };
+        const TERMINAL_THEME = {
+            background: '#1e1e1e',
+            foreground: '#d4d4d4',
+            cursor: '#aeafad',
+            cursorAccent: '#1e1e1e',
+            selectionBackground: 'rgba(38, 79, 120, 0.45)',
+            selectionInactiveBackground: 'rgba(60, 60, 60, 0.32)',
+            black: '#000000',
+            red: '#cd3131',
+            green: '#0dbc79',
+            yellow: '#e5e510',
+            blue: '#2472c8',
+            magenta: '#bc3fbc',
+            cyan: '#11a8cd',
+            white: '#e5e5e5',
+            brightBlack: '#666666',
+            brightRed: '#f14c4c',
+            brightGreen: '#23d18b',
+            brightYellow: '#f5f543',
+            brightBlue: '#3b8eea',
+            brightMagenta: '#d670d6',
+            brightCyan: '#29b8db',
+            brightWhite: '#e5e5e5'
+        };
+        const TERMINAL_FONT_FAMILY_FALLBACK = "'TurboFile Terminal Ubuntu', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Noto Sans Mono', monospace";
+        const TERMINAL_CLIENT_TOKEN_STORAGE_KEY = 'turbofile-terminal-client-token';
+        const TERMINAL_BROWSER_TOKEN_STORAGE_KEY = 'turbofile-terminal-browser-token';
+        const TERMINAL_CLIENT_TOKEN_LOCK_PREFIX = 'turbofile-terminal-page-lock:';
+        const TERMINAL_RENDERER_STORAGE_KEY = 'turbofile-terminal-renderer';
+        const TERMINAL_FONT_STORAGE_KEY = 'turbofile-terminal-font';
+        const TERMINAL_FONT_SIZE_STORAGE_KEY = 'turbofile-terminal-font-size';
+        const TERMINAL_RENDERER_STANDARD = 'standard';
+        const TERMINAL_RENDERER_WEBGL = 'webgl';
+        const TERMINAL_FONT_SIZE_CHOICES = [12, 13, 14, 15, 16, 18];
+        const TERMINAL_FONT_PRESETS = {
+            consolas: {
+                id: 'consolas',
+                label: 'Consolas',
+                family: "Consolas, 'Courier New', monospace"
+            },
+            'cascadia-mono': {
+                id: 'cascadia-mono',
+                label: 'Cascadia Mono',
+                family: "'Cascadia Mono', Consolas, 'Courier New', monospace"
+            },
+            'cascadia-code': {
+                id: 'cascadia-code',
+                label: 'Cascadia Code',
+                family: "'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
+            },
+            ubuntu: {
+                id: 'ubuntu',
+                label: 'Ubuntu Mono',
+                family: TERMINAL_FONT_FAMILY_FALLBACK,
+                requiresWebFont: true
+            },
+            menlo: {
+                id: 'menlo',
+                label: 'Menlo',
+                family: "Menlo, Monaco, 'Courier New', monospace"
+            }
+        };
+        const DEFAULT_TERMINAL_DRAWER_HEIGHT = 280;
+        const MIN_TERMINAL_DRAWER_HEIGHT = 180;
+        const MIN_TERMINAL_BROWSER_HEIGHT = 0;
+        const TERMINAL_DRAWER_GAP = 8;
+        const TERMINAL_RESIZE_MAXIMIZE_THRESHOLD = 24;
+        let terminalFontReadyPromise = null;
+        let terminalFontReadyKey = '';
+        let terminalWebglSupport = null;
+        let activeTerminalResize = null;
+        let terminalRestorePromise = null;
+        let terminalClientTokenPromise = null;
+        let terminalClientTokenValue = '';
+        let releaseTerminalClientTokenLock = null;
+
+        function readTerminalPreference(key) {
+            try {
+                return window.localStorage ? window.localStorage.getItem(key) : null;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function writeTerminalPreference(key, value) {
+            try {
+                if (window.localStorage) {
+                    window.localStorage.setItem(key, value);
+                }
+            } catch (_) {}
+        }
+
+        function generateTerminalClientToken() {
+            try {
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return `terminal-client-${window.crypto.randomUUID()}`;
+                }
+            } catch (_) {}
+            return `terminal-client-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+        }
+
+        function generateTerminalBrowserToken() {
+            try {
+                if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                    return `terminal-browser-${window.crypto.randomUUID()}`;
+                }
+            } catch (_) {}
+            return `terminal-browser-${Date.now()}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+        }
+
+        function getTerminalBrowserToken() {
+            let token = '';
+            try {
+                token = window.localStorage
+                    ? String(window.localStorage.getItem(TERMINAL_BROWSER_TOKEN_STORAGE_KEY) || '').trim()
+                    : '';
+            } catch (_) {
+                token = '';
+            }
+            if (token) {
+                return token;
+            }
+            token = generateTerminalBrowserToken();
+            try {
+                if (window.localStorage) {
+                    window.localStorage.setItem(TERMINAL_BROWSER_TOKEN_STORAGE_KEY, token);
+                }
+            } catch (_) {}
+            return token;
+        }
+
+        function sleep(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        async function tryAcquireTerminalClientTokenLock(token) {
+            if (!token) return false;
+            if (!navigator.locks || typeof navigator.locks.request !== 'function') {
+                return true;
+            }
+            return new Promise((resolve) => {
+                let settled = false;
+                navigator.locks.request(
+                    `${TERMINAL_CLIENT_TOKEN_LOCK_PREFIX}${token}`,
+                    { mode: 'exclusive', ifAvailable: true },
+                    async (lock) => {
+                        if (!lock) {
+                            if (!settled) {
+                                settled = true;
+                                resolve(false);
+                            }
+                            return;
+                        }
+                        if (!settled) {
+                            settled = true;
+                            resolve(true);
+                        }
+                        await new Promise((unlock) => {
+                            releaseTerminalClientTokenLock = () => {
+                                try {
+                                    unlock();
+                                } catch (_) {}
+                            };
+                        });
+                    }
+                ).catch(() => {
+                    if (!settled) {
+                        settled = true;
+                        resolve(false);
+                    }
+                });
+            });
+        }
+
+        async function ensureTerminalClientToken() {
+            if (terminalClientTokenValue) {
+                return terminalClientTokenValue;
+            }
+            if (terminalClientTokenPromise) {
+                return terminalClientTokenPromise;
+            }
+            terminalClientTokenPromise = (async () => {
+                let token = '';
+                try {
+                    token = window.sessionStorage
+                        ? String(window.sessionStorage.getItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY) || '').trim()
+                        : '';
+                } catch (_) {
+                    token = '';
+                }
+                if (!token) {
+                    token = generateTerminalClientToken();
+                }
+
+                let acquired = false;
+                for (let attempt = 0; attempt < 8; attempt += 1) {
+                    acquired = await tryAcquireTerminalClientTokenLock(token);
+                    if (acquired) break;
+                    await sleep(40);
+                }
+
+                if (!acquired) {
+                    token = generateTerminalClientToken();
+                    acquired = await tryAcquireTerminalClientTokenLock(token);
+                }
+
+                terminalClientTokenValue = token;
+                try {
+                    if (window.sessionStorage) {
+                        window.sessionStorage.setItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY, token);
+                    }
+                } catch (_) {}
+                try {
+                    if (window.localStorage) {
+                        window.localStorage.removeItem(TERMINAL_CLIENT_TOKEN_STORAGE_KEY);
+                    }
+                } catch (_) {}
+                return terminalClientTokenValue;
+            })();
+            try {
+                return await terminalClientTokenPromise;
+            } finally {
+                terminalClientTokenPromise = null;
+            }
+        }
+
+        function releaseTerminalPageTokenLock() {
+            if (typeof releaseTerminalClientTokenLock === 'function') {
+                try {
+                    releaseTerminalClientTokenLock();
+                } catch (_) {}
+            }
+            releaseTerminalClientTokenLock = null;
+        }
+
+        window.addEventListener('pagehide', releaseTerminalPageTokenLock);
+        window.addEventListener('beforeunload', releaseTerminalPageTokenLock);
+
+        function getClientPlatformName() {
+            try {
+                const uaPlatform = (navigator.userAgentData && navigator.userAgentData.platform)
+                    ? String(navigator.userAgentData.platform)
+                    : '';
+                const legacyPlatform = navigator.platform ? String(navigator.platform) : '';
+                const source = (uaPlatform || legacyPlatform || '').toLowerCase();
+                if (source.includes('win')) return 'windows';
+                if (source.includes('mac')) return 'mac';
+                return 'linux';
+            } catch (_) {
+                return 'linux';
+            }
+        }
+
+        function getDefaultTerminalFontPresetId() {
+            const platform = getClientPlatformName();
+            if (platform === 'windows') return 'consolas';
+            if (platform === 'mac') return 'menlo';
+            return 'ubuntu';
+        }
+
+        function getTerminalFontPresetId() {
+            return getDefaultTerminalFontPresetId();
+        }
+
+        function getTerminalFontPreset() {
+            return TERMINAL_FONT_PRESETS[getTerminalFontPresetId()] || TERMINAL_FONT_PRESETS[getDefaultTerminalFontPresetId()];
+        }
+
+        function getDefaultTerminalFontSize() {
+            return getClientPlatformName() === 'windows' ? 14 : 13;
+        }
+
+        function getTerminalFontSize() {
+            return getDefaultTerminalFontSize();
+        }
+
+        function supportsTerminalWebgl() {
+            if (terminalWebglSupport !== null) return terminalWebglSupport;
+            if (!window.WebglAddon || typeof window.WebglAddon.WebglAddon !== 'function') {
+                terminalWebglSupport = false;
+                return terminalWebglSupport;
+            }
+            try {
+                const canvas = document.createElement('canvas');
+                terminalWebglSupport = Boolean(
+                    canvas.getContext('webgl2', { antialias: true }) ||
+                    canvas.getContext('webgl', { antialias: true })
+                );
+            } catch (_) {
+                terminalWebglSupport = false;
+            }
+            return terminalWebglSupport;
+        }
+
+        function getDefaultTerminalRendererMode() {
+            return getClientPlatformName() === 'windows' && supportsTerminalWebgl()
+                ? TERMINAL_RENDERER_WEBGL
+                : TERMINAL_RENDERER_STANDARD;
+        }
+
+        function getTerminalRendererMode() {
+            return getDefaultTerminalRendererMode();
+        }
+
+        function getVSCodeLikeTerminalFontFamily() {
+            return getTerminalFontPreset().family;
+        }
+
+        function getVSCodeLikeTerminalOptions() {
+            return {
+                fontFamily: getVSCodeLikeTerminalFontFamily(),
+                fontSize: getTerminalFontSize(),
+                lineHeight: 1.12,
+                letterSpacing: 0,
+                fontWeight: 'normal',
+                fontWeightBold: 'bold',
+                rescaleOverlappingGlyphs: true,
+                cursorBlink: true,
+                cursorStyle: 'line',
+                cursorWidth: 2,
+                cursorInactiveStyle: 'outline',
+                scrollback: 8000,
+                smoothScrollDuration: 110,
+                fastScrollModifier: 'alt',
+                fastScrollSensitivity: 5,
+                scrollSensitivity: 1,
+                rightClickSelectsWord: false,
+                drawBoldTextInBrightColors: true,
+                minimumContrastRatio: 1
+            };
+        }
+
+        function getTerminalFontSignature(options) {
+            return [
+                getTerminalRendererMode(),
+                options.fontFamily || '',
+                options.fontSize || '',
+                options.fontWeight || '',
+                options.fontWeightBold || '',
+                options.lineHeight || '',
+                options.letterSpacing || ''
+            ].join('|');
+        }
+
+        function waitForNextAnimationFrame() {
+            return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
+
+        function sleep(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        function getActiveSocketId() {
+            if (socket && socket.id) {
+                socketId = socket.id;
+            }
+            return socketId || '';
+        }
+
+        async function ensureTerminalSocketReady(timeoutMs = 5000) {
+            const activeSocketId = getActiveSocketId();
+            if (activeSocketId && socket && socket.connected) {
+                return activeSocketId;
+            }
+            if (!socket) {
+                return '';
+            }
+            return new Promise((resolve) => {
+                let settled = false;
+                let timeoutId = null;
+
+                const cleanup = () => {
+                    if (timeoutId) {
+                        try { clearTimeout(timeoutId); } catch (_) {}
+                        timeoutId = null;
+                    }
+                    try { socket.off('connect', onConnect); } catch (_) {}
+                    try { socket.off('connect_error', onError); } catch (_) {}
+                    try { socket.off('reconnect', onConnect); } catch (_) {}
+                    try { socket.off('reconnect_error', onError); } catch (_) {}
+                };
+
+                const finish = (value) => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    resolve(value || '');
+                };
+
+                const onConnect = () => {
+                    finish(getActiveSocketId());
+                };
+
+                const onError = () => {
+                    finish(getActiveSocketId());
+                };
+
+                timeoutId = window.setTimeout(() => finish(getActiveSocketId()), Math.max(500, timeoutMs));
+                try { socket.on('connect', onConnect); } catch (_) {}
+                try { socket.on('connect_error', onError); } catch (_) {}
+                try { socket.on('reconnect', onConnect); } catch (_) {}
+                try { socket.on('reconnect_error', onError); } catch (_) {}
+                try {
+                    if (!socket.connected && typeof socket.connect === 'function') {
+                        socket.connect();
+                    }
+                } catch (_) {}
+            });
+        }
+
+        async function ensureTerminalFontReady() {
+            const fontPreset = getTerminalFontPreset();
+            const fontKey = fontPreset.id;
+            if (terminalFontReadyPromise && terminalFontReadyKey === fontKey) return terminalFontReadyPromise;
+            terminalFontReadyKey = fontKey;
+            terminalFontReadyPromise = (async () => {
+                if (!fontPreset.requiresWebFont) {
+                    return;
+                }
+                if (!document.fonts || typeof document.fonts.load !== 'function') {
+                    return;
+                }
+                const deadline = sleep(1200);
+                const loadFonts = Promise.all([
+                    document.fonts.load(`${getTerminalFontSize()}px "TurboFile Terminal Ubuntu"`),
+                    document.fonts.load(`700 ${getTerminalFontSize()}px "TurboFile Terminal Ubuntu"`),
+                    document.fonts.ready.catch(() => {})
+                ]).catch(() => {});
+                await Promise.race([loadFonts, deadline]);
+            })();
+            return terminalFontReadyPromise;
+        }
 
 
         function addLog(message, type = 'info') {
@@ -1436,6 +2127,1346 @@
             }, toastConfig.duration);
         }
 
+        function compactToastDetail(detail, maxLength = 140) {
+            const text = String(detail || '')
+                .replace(/\s+/g, ' ')
+                .replace(/^Warning:\s*Permanently added.*?known hosts\.\s*/i, '')
+                .trim();
+            if (!text) return '';
+            return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+        }
+
+        function extractActionErrorMessage(payload, fallback = '未知错误') {
+            if (!payload) return fallback;
+            if (typeof payload === 'string') {
+                return compactToastDetail(payload) || fallback;
+            }
+            const direct = compactToastDetail(payload.error || payload.message || '');
+            if (direct) return direct;
+            if (Array.isArray(payload.failed_items) && payload.failed_items.length > 0) {
+                const first = payload.failed_items[0] || {};
+                return compactToastDetail(first.error || first.path || '') || fallback;
+            }
+            return fallback;
+        }
+
+        function showActionFailureToast(action, payload, fallback = '未知错误') {
+            const detail = extractActionErrorMessage(payload, fallback);
+            showToast(`${action}: ${detail}`, 'error');
+        }
+
+        function getTerminalState(panel) {
+            return terminalPanelState[panel === 'target' ? 'target' : 'source'];
+        }
+
+        function getTerminalElements(panel) {
+            const key = panel === 'target' ? 'target' : 'source';
+            return {
+                panelRoot: document.getElementById(`${key}Panel`),
+                panelHeader: document.getElementById(`${key}PanelHeader`),
+                pathNav: document.getElementById(`${key}PathNav`),
+                workspace: document.getElementById(`${key}Panel`)?.querySelector('.panel-workspace') || null,
+                browser: document.getElementById(`${key}FileBrowser`),
+                drawer: document.getElementById(`${key}TerminalDrawer`),
+                resizeHandle: document.querySelector(`#${key}TerminalDrawer .terminal-drawer-resizer`),
+                host: document.getElementById(`${key}TerminalHost`),
+                label: document.getElementById(`${key}TerminalLabel`),
+                status: document.getElementById(`${key}TerminalStatus`),
+                maximizeButton: document.getElementById(`${key}TerminalMaximizeBtn`),
+                profileSelect: document.getElementById(`${key}TerminalProfileSelect`),
+                searchBar: document.getElementById(`${key}TerminalSearchBar`),
+                searchInput: document.getElementById(`${key}TerminalSearchInput`),
+                searchResults: document.getElementById(`${key}TerminalSearchResults`),
+                searchCaseButton: document.getElementById(`${key}TerminalSearchCaseBtn`),
+                searchRegexButton: document.getElementById(`${key}TerminalSearchRegexBtn`),
+                rendererSelect: document.getElementById(`${key}TerminalRendererSelect`),
+                fontSelect: document.getElementById(`${key}TerminalFontSelect`),
+                fontSizeSelect: document.getElementById(`${key}TerminalFontSizeSelect`)
+            };
+        }
+
+        function isTerminalUiVisible(panel) {
+            const els = getTerminalElements(panel);
+            if (!els.drawer) return false;
+            try {
+                return window.getComputedStyle(els.drawer).display !== 'none';
+            } catch (_) {
+                return els.drawer.style.display !== 'none';
+            }
+        }
+
+        function hasAnyOpenTerminal() {
+            return terminalPanelState.source.open || terminalPanelState.target.open;
+        }
+
+        function hasAnyBrowserFullscreenTerminal() {
+            return Boolean(terminalPanelState.source.browserFullscreen || terminalPanelState.target.browserFullscreen);
+        }
+
+        function updateGlobalTerminalLayoutState() {
+            const hasOpenTerminal = hasAnyOpenTerminal();
+            document.body.classList.toggle('terminal-open', hasOpenTerminal);
+            document.body.classList.toggle('terminal-page-fullscreen', hasAnyBrowserFullscreenTerminal());
+            window.requestAnimationFrame(() => refreshTerminalLayoutOnViewportChange());
+        }
+
+        function syncTerminalPreferenceControls() {
+            const rendererMode = getTerminalRendererMode();
+            const fontPresetId = getTerminalFontPresetId();
+            const fontSize = String(getTerminalFontSize());
+            const webglSupported = supportsTerminalWebgl();
+            ['source', 'target'].forEach((panel) => {
+                const els = getTerminalElements(panel);
+                if (els.rendererSelect) {
+                    const webglOption = els.rendererSelect.querySelector(`option[value="${TERMINAL_RENDERER_WEBGL}"]`);
+                    if (webglOption) {
+                        webglOption.disabled = !webglSupported;
+                    }
+                    els.rendererSelect.value = rendererMode;
+                    els.rendererSelect.title = webglSupported ? '切换终端渲染模式' : '当前浏览器不支持 WebGL 终端渲染';
+                }
+                if (els.fontSelect) {
+                    els.fontSelect.value = fontPresetId;
+                    els.fontSelect.title = '切换终端字体';
+                }
+                if (els.fontSizeSelect) {
+                    els.fontSizeSelect.value = fontSize;
+                    els.fontSizeSelect.title = '切换终端字号';
+                }
+                updateTerminalProfileControl(panel);
+                updateTerminalSearchUi(panel);
+            });
+        }
+
+        async function refreshOpenTerminalsForAppearanceChange(reason) {
+            let reopened = 0;
+            for (const panel of ['source', 'target']) {
+                const state = getTerminalState(panel);
+                if (state.open) {
+                    reopened += 1;
+                    await reopenTerminalForPanel(panel);
+                } else if (state.term) {
+                    disposeTerminalInstance(panel);
+                }
+            }
+            if (reopened > 0 && reason) {
+                addLogInfo(`🖥️ 终端已重连以应用${reason}`);
+                showToast(`终端已应用${reason}`, 'info');
+            }
+        }
+
+        async function handleTerminalRendererChange(value) {
+            const nextValue = value === TERMINAL_RENDERER_WEBGL ? TERMINAL_RENDERER_WEBGL : TERMINAL_RENDERER_STANDARD;
+            if (nextValue === TERMINAL_RENDERER_WEBGL && !supportsTerminalWebgl()) {
+                syncTerminalPreferenceControls();
+                showToast('⚠️ 当前浏览器不支持 WebGL 终端渲染', 'warning');
+                return;
+            }
+            writeTerminalPreference(TERMINAL_RENDERER_STORAGE_KEY, nextValue);
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`渲染模式: ${nextValue === TERMINAL_RENDERER_WEBGL ? 'WebGL' : '标准'}`);
+        }
+
+        async function handleTerminalFontChange(value) {
+            const nextValue = Object.prototype.hasOwnProperty.call(TERMINAL_FONT_PRESETS, value)
+                ? value
+                : getDefaultTerminalFontPresetId();
+            writeTerminalPreference(TERMINAL_FONT_STORAGE_KEY, nextValue);
+            terminalFontReadyPromise = null;
+            terminalFontReadyKey = '';
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`字体: ${TERMINAL_FONT_PRESETS[nextValue].label}`);
+        }
+
+        async function handleTerminalFontSizeChange(value) {
+            const nextValue = parseInt(value, 10);
+            const fontSize = TERMINAL_FONT_SIZE_CHOICES.includes(nextValue) ? nextValue : getDefaultTerminalFontSize();
+            writeTerminalPreference(TERMINAL_FONT_SIZE_STORAGE_KEY, String(fontSize));
+            terminalFontReadyPromise = null;
+            terminalFontReadyKey = '';
+            syncTerminalPreferenceControls();
+            await refreshOpenTerminalsForAppearanceChange(`字号: ${fontSize}`);
+        }
+
+        function getPanelCurrentServer(panel) {
+            return panel === 'target'
+                ? ((document.getElementById('targetServer') || {}).value || '')
+                : ((document.getElementById('sourceServer') || {}).value || '');
+        }
+
+        function getPanelCurrentPath(panel) {
+            return panel === 'target' ? (currentTargetPath || '') : (currentSourcePath || '');
+        }
+
+        function getTerminalProfileOptionsForServer(server) {
+            if (!server) return [];
+            if (isWindowsServer(server)) {
+                return [
+                    { id: 'powershell', label: 'PowerShell' },
+                    { id: 'cmd', label: 'CMD' }
+                ];
+            }
+            return [
+                { id: 'bash', label: 'Bash' },
+                { id: 'login', label: '登录 Shell' },
+                { id: 'sh', label: 'Sh' }
+            ];
+        }
+
+        function getDefaultTerminalProfile(server) {
+            return isWindowsServer(server) ? 'powershell' : 'bash';
+        }
+
+        function getTerminalProfileForPanel(panel, server) {
+            const state = getTerminalState(panel);
+            const options = getTerminalProfileOptionsForServer(server);
+            const allowed = new Set(options.map((item) => item.id));
+            const candidate = String(state.profile || '').trim().toLowerCase();
+            if (candidate && allowed.has(candidate)) return candidate;
+            return getDefaultTerminalProfile(server);
+        }
+
+        function getTerminalProfileLabel(profileId, server) {
+            const options = getTerminalProfileOptionsForServer(server);
+            const match = options.find((item) => item && item.id === profileId);
+            return match && match.label ? String(match.label) : String(profileId || '').trim() || 'Terminal';
+        }
+
+        function formatTerminalInstanceTitle(profileId, server) {
+            const label = getTerminalProfileLabel(profileId, server);
+            const normalized = String(profileId || '').trim().toLowerCase();
+            if (normalized === 'bash' || normalized === 'cmd' || normalized === 'sh') {
+                return `${normalized} - TurboFile`;
+            }
+            if (normalized === 'powershell') {
+                return 'pwsh - TurboFile';
+            }
+            return `${label} - TurboFile`;
+        }
+
+        function updateTerminalProfileControl(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.profileSelect) return;
+            const server = state.server || getPanelCurrentServer(panel);
+            const options = getTerminalProfileOptionsForServer(server);
+            els.profileSelect.innerHTML = options
+                .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`)
+                .join('');
+            const value = getTerminalProfileForPanel(panel, server);
+            state.profile = value;
+            els.profileSelect.value = value;
+            els.profileSelect.disabled = !server;
+        }
+
+        function updateTerminalLiveStatus(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.status) return;
+            if (!state.open && !state.terminalId) {
+                setTerminalStatus(panel, '未连接');
+                els.status.removeAttribute('title');
+                return;
+            }
+            if (!state.ready && !state.terminalId) {
+                setTerminalStatus(panel, '已断开', 'closed');
+                els.status.removeAttribute('title');
+                return;
+            }
+            if (state.commandRunning) {
+                setTerminalStatus(panel, '运行中', 'connected');
+            } else {
+                setTerminalStatus(panel, '已连接', 'connected');
+            }
+            if (typeof state.lastExitCode === 'number') {
+                els.status.title = state.lastExitCode === 0
+                    ? '上一条命令执行成功'
+                    : `上一条命令退出码: ${state.lastExitCode}`;
+            } else {
+                els.status.removeAttribute('title');
+            }
+        }
+
+        function updateTerminalSearchUi(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (els.searchBar) {
+                els.searchBar.style.display = state.searchVisible ? 'flex' : 'none';
+            }
+            if (els.searchResults) {
+                const total = Math.max(0, Number(state.searchResultCount) || 0);
+                const index = total > 0 ? Math.max(1, (Number(state.searchResultIndex) || 0) + 1) : 0;
+                els.searchResults.textContent = `${index}/${total}`;
+            }
+            if (els.searchCaseButton) {
+                els.searchCaseButton.classList.toggle('active', Boolean(state.searchCaseSensitive));
+            }
+            if (els.searchRegexButton) {
+                els.searchRegexButton.classList.toggle('active', Boolean(state.searchRegex));
+            }
+            if (els.searchInput && els.searchInput.value !== state.searchQuery) {
+                els.searchInput.value = state.searchQuery || '';
+            }
+        }
+
+        function getTerminalSearchOptions(panel) {
+            const state = getTerminalState(panel);
+            return {
+                caseSensitive: Boolean(state.searchCaseSensitive),
+                regex: Boolean(state.searchRegex),
+                decorations: {
+                    matchBackground: 'rgba(96, 165, 250, 0.22)',
+                    activeMatchBackground: 'rgba(37, 99, 235, 0.52)',
+                    matchBorder: '#60a5fa',
+                    activeMatchBorder: '#93c5fd',
+                    matchOverviewRuler: '#60a5fa',
+                    activeMatchColorOverviewRuler: '#93c5fd'
+                }
+            };
+        }
+
+        function resetTerminalSearchState(panel, clearDecorations = true) {
+            const state = getTerminalState(panel);
+            state.searchResultIndex = -1;
+            state.searchResultCount = 0;
+            if (clearDecorations && state.searchAddon && typeof state.searchAddon.clearDecorations === 'function') {
+                try { state.searchAddon.clearDecorations(); } catch (_) {}
+            }
+            updateTerminalSearchUi(panel);
+        }
+
+        function executeTerminalSearch(panel, direction = 'next', preserveFocus = true) {
+            const state = getTerminalState(panel);
+            if (!state.searchAddon || !state.searchQuery) {
+                resetTerminalSearchState(panel, true);
+                return false;
+            }
+            const query = state.searchQuery;
+            const options = getTerminalSearchOptions(panel);
+            try {
+                const found = direction === 'previous'
+                    ? state.searchAddon.findPrevious(query, options)
+                    : state.searchAddon.findNext(query, options);
+                if (!found) {
+                    state.searchResultIndex = -1;
+                    updateTerminalSearchUi(panel);
+                }
+                if (preserveFocus && state.term) {
+                    state.term.focus();
+                }
+                return found;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function handleTerminalSearchInput(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            state.searchQuery = (els.searchInput && els.searchInput.value) ? String(els.searchInput.value) : '';
+            if (!state.searchQuery) {
+                resetTerminalSearchState(panel, true);
+                return;
+            }
+            executeTerminalSearch(panel, 'next', false);
+        }
+
+        function openTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            state.searchVisible = true;
+            updateTerminalSearchUi(panel);
+            window.requestAnimationFrame(() => {
+                const els = getTerminalElements(panel);
+                if (els.searchInput) {
+                    els.searchInput.focus();
+                    els.searchInput.select();
+                }
+            });
+        }
+
+        function closeTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            state.searchVisible = false;
+            updateTerminalSearchUi(panel);
+            resetTerminalSearchState(panel, true);
+            if (state.term) {
+                state.term.focus();
+            }
+        }
+
+        function toggleTerminalSearch(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            if (state.searchVisible) {
+                closeTerminalSearch(panel);
+            } else {
+                openTerminalSearch(panel);
+            }
+        }
+
+        function findNextTerminalSearch(panel) {
+            executeTerminalSearch(panel, 'next', false);
+        }
+
+        function findPreviousTerminalSearch(panel) {
+            executeTerminalSearch(panel, 'previous', false);
+        }
+
+        function toggleTerminalSearchCase(panel) {
+            const state = getTerminalState(panel);
+            state.searchCaseSensitive = !state.searchCaseSensitive;
+            updateTerminalSearchUi(panel);
+            if (state.searchQuery) {
+                executeTerminalSearch(panel, 'next', false);
+            }
+        }
+
+        function toggleTerminalSearchRegex(panel) {
+            const state = getTerminalState(panel);
+            state.searchRegex = !state.searchRegex;
+            updateTerminalSearchUi(panel);
+            if (state.searchQuery) {
+                executeTerminalSearch(panel, 'next', false);
+            }
+        }
+
+        function handleTerminalSearchInputKeydown(event, panel) {
+            if (!event) return;
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                executeTerminalSearch(panel, event.shiftKey ? 'previous' : 'next', false);
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeTerminalSearch(panel);
+            }
+        }
+
+        function handleTerminalProfileChange(panel, value) {
+            const state = getTerminalState(panel);
+            const server = state.server || getPanelCurrentServer(panel);
+            state.profile = value || getDefaultTerminalProfile(server);
+            updateTerminalProfileControl(panel);
+            if (state.open || state.terminalId) {
+                reopenTerminalForPanel(panel);
+            }
+        }
+
+        function trackTerminalLocalInput(panel, data) {
+            const state = getTerminalState(panel);
+            const chunk = typeof data === 'string' ? data : '';
+            if (!chunk) return;
+            for (const ch of chunk) {
+                if (ch === '\r') {
+                    const submitted = (state.localInputBuffer || '').trim();
+                    if (submitted) {
+                        state.commandRunning = true;
+                        updateTerminalLiveStatus(panel);
+                    }
+                    state.localInputBuffer = '';
+                    continue;
+                }
+                if (ch === '\u0003') {
+                    state.localInputBuffer = '';
+                    state.commandRunning = false;
+                    updateTerminalLiveStatus(panel);
+                    continue;
+                }
+                if (ch === '\u007f') {
+                    state.localInputBuffer = state.localInputBuffer.slice(0, -1);
+                    continue;
+                }
+                if (ch === '\u0015') {
+                    state.localInputBuffer = '';
+                    continue;
+                }
+                if (ch === '\t') {
+                    state.localInputBuffer += '\t';
+                    continue;
+                }
+                if (ch >= ' ' && ch !== '\u001b') {
+                    state.localInputBuffer += ch;
+                }
+            }
+        }
+
+        function stripTerminalControlMarkers(chunk) {
+            const text = typeof chunk === 'string' ? chunk : '';
+            const pattern = /\x1b]777;([a-z_]+)(?:=([\s\S]*?))?(?:\x07|\x1b\\)/gi;
+            const markers = [];
+            let clean = '';
+            let lastIndex = 0;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                clean += text.slice(lastIndex, match.index);
+                markers.push({
+                    key: String(match[1] || '').toLowerCase(),
+                    value: typeof match[2] === 'string' ? match[2] : ''
+                });
+                lastIndex = match.index + match[0].length;
+            }
+            clean += text.slice(lastIndex);
+            return { text: clean, markers };
+        }
+
+        function applyTerminalShellMarker(panel, marker) {
+            const state = getTerminalState(panel);
+            if (!marker || !marker.key) return;
+            if (marker.key === 'cwd') {
+                const nextCwd = String(marker.value || '').trim();
+                if (nextCwd) {
+                    state.cwd = nextCwd;
+                    updateTerminalHeader(panel);
+                }
+                state.commandRunning = false;
+                updateTerminalLiveStatus(panel);
+                return;
+            }
+            if (marker.key === 'status') {
+                const exitCode = Number.parseInt(String(marker.value || '').trim(), 10);
+                state.lastExitCode = Number.isFinite(exitCode) ? exitCode : null;
+                state.commandRunning = false;
+                updateTerminalLiveStatus(panel);
+                return;
+            }
+            if (marker.key === 'command_start') {
+                state.commandRunning = true;
+                updateTerminalLiveStatus(panel);
+            }
+        }
+
+        function getServerDisplayLabel(server) {
+            if (!server) return '';
+            const meta = SERVERS_DATA && SERVERS_DATA[server];
+            const name = (meta && meta.name) ? String(meta.name) : String(server);
+            const host = getServerHost(server);
+            return `${name} (${host})`;
+        }
+
+        function setTerminalStatus(panel, text, statusClass = '') {
+            const els = getTerminalElements(panel);
+            if (!els.status) return;
+            els.status.textContent = text || '未连接';
+            els.status.className = `terminal-status-pill${statusClass ? ` ${statusClass}` : ''}`;
+        }
+
+        function updateTerminalHeader(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.label) return;
+            const profileId = getTerminalProfileForPanel(panel, state.server || getPanelCurrentServer(panel));
+            const title = formatTerminalInstanceTitle(profileId, state.server || getPanelCurrentServer(panel));
+            const serverLabel = state.server ? getServerDisplayLabel(state.server) : '';
+            els.label.textContent = title;
+            els.label.title = serverLabel ? `${title} · ${serverLabel}` : title;
+        }
+
+        function getTerminalDrawerMaxHeight(panel) {
+            const els = getTerminalElements(panel);
+            if (!els.workspace) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            const availableHeight = Math.max(0, els.workspace.clientHeight || 0);
+            if (!availableHeight) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            return Math.max(
+                MIN_TERMINAL_DRAWER_HEIGHT,
+                availableHeight - MIN_TERMINAL_BROWSER_HEIGHT - 2
+            );
+        }
+
+        function clampTerminalDrawerHeight(panel, height) {
+            const numericHeight = Number(height);
+            if (!Number.isFinite(numericHeight)) return DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            const boundedMin = Math.max(MIN_TERMINAL_DRAWER_HEIGHT, numericHeight);
+            const boundedMax = getTerminalDrawerMaxHeight(panel);
+            return Math.min(boundedMin, boundedMax);
+        }
+
+        function updateTerminalMaximizeButton(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.maximizeButton) return;
+            els.maximizeButton.title = state.browserFullscreen ? '切回半屏终端' : '切到全屏终端';
+            els.maximizeButton.innerHTML = state.browserFullscreen
+                ? '<i class="bi bi-fullscreen-exit"></i><span>半屏</span>'
+                : '<i class="bi bi-arrows-fullscreen"></i><span>全屏</span>';
+        }
+
+        function applyTerminalDrawerLayout(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.drawer) return;
+
+            state.drawerHeight = clampTerminalDrawerHeight(panel, state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT);
+
+            if (els.panelRoot) {
+                els.panelRoot.classList.toggle('terminal-immersive', Boolean(state.maximized));
+                els.panelRoot.classList.toggle('terminal-browser-fullscreen', Boolean(state.browserFullscreen));
+            }
+            if (els.workspace) {
+                els.workspace.classList.toggle('terminal-maximized', Boolean(state.maximized));
+            }
+            if (els.resizeHandle) {
+                els.resizeHandle.classList.toggle('active', Boolean(activeTerminalResize && activeTerminalResize.panel === panel));
+            }
+
+            if (state.maximized) {
+                els.drawer.style.flex = '1 1 auto';
+                els.drawer.style.height = 'auto';
+            } else {
+                els.drawer.style.flex = `0 0 ${state.drawerHeight}px`;
+                els.drawer.style.height = `${state.drawerHeight}px`;
+            }
+
+            updateTerminalMaximizeButton(panel);
+
+            if (options.fit === 'direct') {
+                fitTerminalToContainer(panel, options.notifyServer !== false);
+            } else if (options.fit === 'schedule') {
+                scheduleTerminalStabilize(panel, options.notifyServer !== false);
+            }
+        }
+
+        function setTerminalDrawerHeight(panel, height, options = {}) {
+            const state = getTerminalState(panel);
+            state.drawerHeight = clampTerminalDrawerHeight(panel, height);
+            applyTerminalDrawerLayout(panel, options);
+        }
+
+        function ensureTerminalLibraries() {
+            if (
+                typeof window.Terminal !== 'function' ||
+                !window.FitAddon || typeof window.FitAddon.FitAddon !== 'function' ||
+                !window.SearchAddon || typeof window.SearchAddon.SearchAddon !== 'function'
+            ) {
+                addLogError('❌ 终端资源未加载成功');
+                showToast('❌ 终端资源未加载', 'error');
+                return false;
+            }
+            return true;
+        }
+
+        function attachTerminalShortcutHandlers(panel, term) {
+            if (!term || typeof term.attachCustomKeyEventHandler !== 'function') return;
+            term.attachCustomKeyEventHandler((event) => {
+                const key = String(event.key || '').toLowerCase();
+                const hasCtrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
+                if (hasCtrlOrMeta && event.shiftKey && key === 'c') {
+                    const selection = typeof term.getSelection === 'function' ? term.getSelection() : '';
+                    if (selection) {
+                        copyTextToClipboard(selection).catch(() => {});
+                    }
+                    return false;
+                }
+                if (hasCtrlOrMeta && event.shiftKey && key === 'v') {
+                    if (navigator.clipboard && navigator.clipboard.readText) {
+                        navigator.clipboard.readText()
+                            .then((text) => {
+                                if (!text) return;
+                                const state = getTerminalState(panel);
+                                if (state.terminalId) {
+                                    socket.emit('terminal_input', { terminal_id: state.terminalId, data: text });
+                                }
+                            })
+                            .catch(() => {});
+                    }
+                    return false;
+                }
+                if (hasCtrlOrMeta && !event.shiftKey && key === 'f') {
+                    openTerminalSearch(panel);
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        function clearTerminalFitTimers(panel) {
+            const state = getTerminalState(panel);
+            const timers = Array.isArray(state.fitTimers) ? state.fitTimers : [];
+            while (timers.length) {
+                const timer = timers.pop();
+                try { clearTimeout(timer); } catch (_) {}
+            }
+        }
+
+        function clearTerminalRecoverTimer(panel) {
+            const state = getTerminalState(panel);
+            if (state.recoverTimer) {
+                try { clearTimeout(state.recoverTimer); } catch (_) {}
+                state.recoverTimer = null;
+            }
+        }
+
+        async function attemptTerminalAutoRecover(panel, reason = '') {
+            const state = getTerminalState(panel);
+            if (!state.open) return false;
+            clearTerminalRecoverTimer(panel);
+            if (state.recovering) return false;
+            state.recovering = true;
+            state.ready = false;
+            state.commandRunning = false;
+            updateTerminalLiveStatus(panel);
+            setTerminalStatus(panel, '重连中');
+            try {
+                if (!socket || !socket.connected) {
+                    return false;
+                }
+                if (!socketId && socket.id) {
+                    socketId = socket.id;
+                }
+                await restoreTerminalSessionsForCurrentSocket();
+                if (state.terminalId && state.ready) {
+                    return true;
+                }
+                state.terminalId = '';
+                const reopened = await openTerminalForPanel(panel, { forceReconnect: true });
+                if (!reopened && reason) {
+                    console.warn(`Terminal auto recover failed [${panel}]: ${reason}`);
+                }
+                return reopened;
+            } catch (error) {
+                console.warn(`Terminal auto recover error [${panel}]:`, error);
+                return false;
+            } finally {
+                state.recovering = false;
+                updateTerminalLiveStatus(panel);
+            }
+        }
+
+        function scheduleTerminalAutoRecover(panel, reason = '', delay = 400) {
+            const state = getTerminalState(panel);
+            if (!state.open) return false;
+            clearTerminalRecoverTimer(panel);
+            if (state.recovering) return false;
+            setTerminalStatus(panel, '重连中');
+            state.recoverTimer = window.setTimeout(() => {
+                state.recoverTimer = null;
+                attemptTerminalAutoRecover(panel, reason);
+            }, Math.max(0, delay));
+            return true;
+        }
+
+        function stopTerminalResize() {
+            if (!activeTerminalResize) return;
+            const resizeState = activeTerminalResize;
+            activeTerminalResize = null;
+            if (resizeState.rafId) {
+                try { window.cancelAnimationFrame(resizeState.rafId); } catch (_) {}
+            }
+            window.removeEventListener('pointermove', handleTerminalResizePointerMove, true);
+            window.removeEventListener('pointerup', stopTerminalResize, true);
+            window.removeEventListener('pointercancel', stopTerminalResize, true);
+            document.body.classList.remove('terminal-resizing');
+            const els = getTerminalElements(resizeState.panel);
+            if (els.resizeHandle) {
+                els.resizeHandle.classList.remove('active');
+                if (typeof els.resizeHandle.releasePointerCapture === 'function' && resizeState.pointerId != null) {
+                    try { els.resizeHandle.releasePointerCapture(resizeState.pointerId); } catch (_) {}
+                }
+            }
+            if (resizeState.panel) {
+                const state = getTerminalState(resizeState.panel);
+                const maxHeight = getTerminalDrawerMaxHeight(resizeState.panel);
+                const shouldRestoreMaximized = Number.isFinite(resizeState.pendingHeight)
+                    && resizeState.pendingHeight >= (maxHeight - TERMINAL_RESIZE_MAXIMIZE_THRESHOLD);
+                if (shouldRestoreMaximized) {
+                    state.maximized = true;
+                }
+                applyTerminalDrawerLayout(resizeState.panel, { fit: 'schedule', notifyServer: true });
+                if (state.term) state.term.focus();
+            }
+        }
+
+        function handleTerminalResizePointerMove(event) {
+            if (!activeTerminalResize) return;
+            if (activeTerminalResize.pointerId != null && event.pointerId !== activeTerminalResize.pointerId) return;
+            event.preventDefault();
+            const nextHeight = clampTerminalDrawerHeight(
+                activeTerminalResize.panel,
+                activeTerminalResize.startHeight + (activeTerminalResize.startY - event.clientY)
+            );
+            activeTerminalResize.pendingHeight = nextHeight;
+            if (activeTerminalResize.rafId) return;
+            activeTerminalResize.rafId = window.requestAnimationFrame(() => {
+                if (!activeTerminalResize) return;
+                const pendingHeight = activeTerminalResize.pendingHeight;
+                activeTerminalResize.rafId = 0;
+                setTerminalDrawerHeight(activeTerminalResize.panel, pendingHeight, { fit: 'none', notifyServer: false });
+            });
+        }
+
+        function startTerminalResize(event, panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!state.open || !els.drawer || els.drawer.style.display === 'none') return;
+            if (event.button !== undefined && event.button !== 0 && event.button !== 2) return;
+            stopTerminalResize();
+            event.preventDefault();
+
+            const resizeHandle = els.resizeHandle;
+            const currentHeight = els.drawer.getBoundingClientRect().height || state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            if (state.browserFullscreen) {
+                state.browserFullscreen = false;
+                updateGlobalTerminalLayoutState();
+                applyTerminalDrawerLayout(panel, { fit: 'direct', notifyServer: false });
+            }
+            if (state.maximized) {
+                state.maximized = false;
+                state.drawerHeight = currentHeight;
+                applyTerminalDrawerLayout(panel, { fit: 'direct', notifyServer: false });
+            }
+            activeTerminalResize = {
+                panel: panel,
+                pointerId: typeof event.pointerId === 'number' ? event.pointerId : null,
+                startY: event.clientY,
+                startHeight: currentHeight,
+                pendingHeight: currentHeight,
+                rafId: 0
+            };
+
+            document.body.classList.add('terminal-resizing');
+            if (resizeHandle) {
+                resizeHandle.classList.add('active');
+                if (typeof resizeHandle.setPointerCapture === 'function' && activeTerminalResize.pointerId != null) {
+                    try { resizeHandle.setPointerCapture(activeTerminalResize.pointerId); } catch (_) {}
+                }
+            }
+            window.addEventListener('pointermove', handleTerminalResizePointerMove, true);
+            window.addEventListener('pointerup', stopTerminalResize, true);
+            window.addEventListener('pointercancel', stopTerminalResize, true);
+        }
+
+        function resetTerminalDrawerHeight(panel) {
+            const state = getTerminalState(panel);
+            if (state.maximized) {
+                state.maximized = false;
+            }
+            state.drawerHeight = DEFAULT_TERMINAL_DRAWER_HEIGHT;
+            applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+            if (state.term) state.term.focus();
+        }
+
+        function toggleTerminalMaximize(panel) {
+            const state = getTerminalState(panel);
+            if (!state.open) return;
+            const nextFullscreen = !state.browserFullscreen;
+            if (nextFullscreen) {
+                ['source', 'target'].forEach((otherPanel) => {
+                    if (otherPanel !== panel) {
+                        getTerminalState(otherPanel).browserFullscreen = false;
+                    }
+                });
+            }
+            state.browserFullscreen = nextFullscreen;
+            applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+            ['source', 'target'].forEach((otherPanel) => {
+                if (otherPanel !== panel) {
+                    applyTerminalDrawerLayout(otherPanel, { fit: 'schedule', notifyServer: true });
+                }
+            });
+            updateGlobalTerminalLayoutState();
+            if (state.term) {
+                window.requestAnimationFrame(() => state.term.focus());
+            }
+        }
+
+        function fitTerminalToContainer(panel, notifyServer = true) {
+            const state = getTerminalState(panel);
+            if (!state.term || !state.fitAddon || !state.open) return;
+            const els = getTerminalElements(panel);
+            if (!els.drawer || els.drawer.style.display === 'none') return;
+            try {
+                state.fitAddon.fit();
+                state.term.refresh(0, Math.max(0, state.term.rows - 1));
+                if (notifyServer && state.terminalId && state.term.cols > 0 && state.term.rows > 0) {
+                    socket.emit('terminal_resize', {
+                        terminal_id: state.terminalId,
+                        cols: state.term.cols,
+                        rows: state.term.rows
+                    });
+                }
+            } catch (_) {}
+        }
+
+        function scheduleTerminalStabilize(panel, notifyServer = true) {
+            const state = getTerminalState(panel);
+            if (!state.term || !state.fitAddon || !state.open) return;
+            clearTerminalFitTimers(panel);
+            [0, 80, 180, 360, 700].forEach((delay) => {
+                const timer = window.setTimeout(() => {
+                    fitTerminalToContainer(panel, notifyServer);
+                }, delay);
+                state.fitTimers.push(timer);
+            });
+        }
+
+        function disposeTerminalInstance(panel) {
+            const state = getTerminalState(panel);
+            clearTerminalFitTimers(panel);
+            clearTerminalRecoverTimer(panel);
+            if (state.resizeObserver) {
+                try { state.resizeObserver.disconnect(); } catch (_) {}
+                state.resizeObserver = null;
+            }
+            if (state.dataDisposable) {
+                try { state.dataDisposable.dispose(); } catch (_) {}
+                state.dataDisposable = null;
+            }
+            if (state.searchDisposable) {
+                try { state.searchDisposable.dispose(); } catch (_) {}
+                state.searchDisposable = null;
+            }
+            if (state.term) {
+                try { state.term.dispose(); } catch (_) {}
+                state.term = null;
+            }
+            state.fitAddon = null;
+            state.webglAddon = null;
+            state.searchAddon = null;
+            state.fontSignature = '';
+            state.searchVisible = false;
+            state.searchQuery = '';
+            state.searchResultIndex = -1;
+            state.searchResultCount = 0;
+            state.localInputBuffer = '';
+            state.commandRunning = false;
+            state.recovering = false;
+            const els = getTerminalElements(panel);
+            if (els.host) {
+                els.host.innerHTML = '';
+            }
+            updateTerminalSearchUi(panel);
+        }
+
+        function ensureTerminalInstance(panel) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            if (!els.host) return null;
+            const terminalOptions = getVSCodeLikeTerminalOptions();
+            const fontSignature = getTerminalFontSignature(terminalOptions);
+            els.host.style.setProperty('--terminal-font-family', terminalOptions.fontFamily);
+            if (state.term && state.fontSignature === fontSignature) {
+                state.term.options = {
+                    ...state.term.options,
+                    ...terminalOptions,
+                    theme: TERMINAL_THEME,
+                    allowTransparency: false
+                };
+                if (typeof state.term.clearTextureAtlas === 'function') {
+                    try { state.term.clearTextureAtlas(); } catch (_) {}
+                }
+                return state;
+            }
+            if (state.term) {
+                disposeTerminalInstance(panel);
+            }
+            if (!ensureTerminalLibraries()) return null;
+
+            const term = new window.Terminal({
+                cursorBlink: true,
+                convertEol: false,
+                scrollback: 5000,
+                theme: TERMINAL_THEME,
+                allowTransparency: false,
+                ...terminalOptions
+            });
+            const fitAddon = new window.FitAddon.FitAddon();
+            const searchAddon = new window.SearchAddon.SearchAddon({ highlightLimit: 1500 });
+            term.loadAddon(fitAddon);
+            term.loadAddon(searchAddon);
+            let webglAddon = null;
+            if (getTerminalRendererMode() === TERMINAL_RENDERER_WEBGL && supportsTerminalWebgl()) {
+                try {
+                    webglAddon = new window.WebglAddon.WebglAddon();
+                    term.loadAddon(webglAddon);
+                } catch (error) {
+                    console.warn('WebGL terminal renderer unavailable:', error);
+                }
+            }
+            term.open(els.host);
+            if (typeof term.clearTextureAtlas === 'function') {
+                try { term.clearTextureAtlas(); } catch (_) {}
+            }
+            attachTerminalShortcutHandlers(panel, term);
+            state.dataDisposable = term.onData((data) => {
+                if (!state.terminalId) return;
+                trackTerminalLocalInput(panel, data);
+                socket.emit('terminal_input', { terminal_id: state.terminalId, data: data || '' });
+            });
+            state.searchDisposable = searchAddon.onDidChangeResults((event) => {
+                state.searchResultIndex = typeof event?.resultIndex === 'number' ? event.resultIndex : -1;
+                state.searchResultCount = typeof event?.resultCount === 'number' ? event.resultCount : 0;
+                updateTerminalSearchUi(panel);
+            });
+
+            if (typeof ResizeObserver === 'function') {
+                state.resizeObserver = new ResizeObserver(() => {
+                    if (activeTerminalResize && activeTerminalResize.panel === panel) return;
+                    window.requestAnimationFrame(() => fitTerminalToContainer(panel, true));
+                });
+                state.resizeObserver.observe(els.host);
+            }
+
+            state.term = term;
+            state.fitAddon = fitAddon;
+            state.webglAddon = webglAddon;
+            state.searchAddon = searchAddon;
+            state.needsInitialStabilize = true;
+            state.fontSignature = fontSignature;
+            updateTerminalHeader(panel);
+            updateTerminalProfileControl(panel);
+            updateTerminalLiveStatus(panel);
+            updateTerminalSearchUi(panel);
+            return state;
+        }
+
+        async function openTerminalForPanel(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const server = String(options.server || getPanelCurrentServer(panel) || '').trim();
+            if (!server) {
+                addLogWarning('⚠️ 请先选择服务器后再打开终端');
+                showToast('⚠️ 请先选择服务器', 'warning');
+                return false;
+            }
+            const activeSocketId = await ensureTerminalSocketReady();
+            if (!activeSocketId) {
+                addLogWarning('⚠️ 终端连接尚未就绪，请稍后重试');
+                showToast('⚠️ 终端连接尚未就绪', 'warning');
+                return false;
+            }
+            const clientToken = await ensureTerminalClientToken();
+
+            const currentPath = String(options.cwd || getPanelCurrentPath(panel) || getDefaultPath(server) || '').trim();
+            const desiredProfile = String(options.profile || getTerminalProfileForPanel(panel, server) || '').trim();
+            const els = getTerminalElements(panel);
+            if (els.drawer) {
+                els.drawer.style.display = 'flex';
+            }
+            applyTerminalDrawerLayout(panel, { fit: 'none' });
+            await waitForNextAnimationFrame();
+            await ensureTerminalFontReady();
+            await waitForNextAnimationFrame();
+
+            const instance = ensureTerminalInstance(panel);
+            if (!instance) {
+                if (els.drawer && !state.terminalId) {
+                    els.drawer.style.display = 'none';
+                }
+                return false;
+            }
+
+            if (state.terminalId && !options.forceReconnect && state.server === server) {
+                state.open = true;
+                updateGlobalTerminalLayoutState();
+                updateTerminalHeader(panel);
+                setTerminalStatus(panel, '已连接', 'connected');
+                applyTerminalDrawerLayout(panel, { fit: 'schedule', notifyServer: true });
+                window.requestAnimationFrame(() => {
+                    fitTerminalToContainer(panel, true);
+                    state.term.focus();
+                });
+                return true;
+            }
+
+            if (state.terminalId) {
+                await closeTerminalForPanel(panel, { preserveDrawer: true, silent: true });
+            }
+
+            state.server = server;
+            state.cwd = currentPath;
+            state.profile = desiredProfile;
+            state.open = true;
+            state.ready = false;
+            state.recovering = false;
+            state.needsInitialStabilize = true;
+            state.maximized = true;
+            state.browserFullscreen = false;
+            state.localInputBuffer = '';
+            state.commandRunning = false;
+            state.searchVisible = false;
+            updateGlobalTerminalLayoutState();
+            updateTerminalHeader(panel);
+            updateTerminalProfileControl(panel);
+            setTerminalStatus(panel, '连接中');
+            applyTerminalDrawerLayout(panel, { fit: 'none' });
+            updateTerminalSearchUi(panel);
+            state.term.reset();
+            state.term.write(`\x1b[1;34m正在连接 ${getServerDisplayLabel(server)}...\x1b[0m\r\n`);
+
+            window.requestAnimationFrame(() => {
+                scheduleTerminalStabilize(panel, false);
+                state.term.focus();
+            });
+
+            try {
+                const resp = await fetch('/api/terminal/open', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        server: server,
+                        cwd: currentPath,
+                        sid: activeSocketId,
+                        client_token: clientToken,
+                        browser_token: getTerminalBrowserToken(),
+                        panel: panel,
+                        profile: desiredProfile,
+                        cols: state.term.cols || 120,
+                        rows: state.term.rows || 30
+                    })
+                });
+                const result = await resp.json();
+                if (!result.success) {
+                    state.ready = false;
+                    setTerminalStatus(panel, '连接失败', 'error');
+                    state.term.write(`\x1b[1;31m终端创建失败: ${result.error || '未知错误'}\x1b[0m\r\n`);
+                    addLogError(`❌ 终端创建失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('终端创建失败', result);
+                    return false;
+                }
+                state.terminalId = result.terminal_id || '';
+                state.server = server;
+                state.cwd = result.cwd || currentPath;
+                state.profile = result.profile || desiredProfile;
+                state.ready = true;
+                updateTerminalHeader(panel);
+                updateTerminalProfileControl(panel);
+                updateTerminalLiveStatus(panel);
+                window.requestAnimationFrame(() => {
+                    scheduleTerminalStabilize(panel, true);
+                    state.term.focus();
+                });
+                addLogSuccess(`🖥️ 已打开${panel === 'target' ? '右侧' : '左侧'}终端: ${getServerDisplayLabel(server)}`);
+                return true;
+            } catch (error) {
+                state.ready = false;
+                setTerminalStatus(panel, '连接失败', 'error');
+                state.term.write(`\x1b[1;31m终端创建异常: ${error.message}\x1b[0m\r\n`);
+                addLogError(`❌ 终端创建异常: ${error.message}`);
+                showActionFailureToast('终端创建异常', error.message);
+                return false;
+            }
+        }
+
+        async function closeTerminalForPanel(panel, options = {}) {
+            const state = getTerminalState(panel);
+            const els = getTerminalElements(panel);
+            const terminalId = state.terminalId;
+
+            state.ready = false;
+            state.terminalId = '';
+            state.commandRunning = false;
+            state.localInputBuffer = '';
+            state.recovering = false;
+            clearTerminalRecoverTimer(panel);
+            if (terminalId) {
+                socket.emit('terminal_close', { terminal_id: terminalId });
+            }
+            clearTerminalFitTimers(panel);
+            stopTerminalResize();
+            closeTerminalSearch(panel);
+            disposeTerminalInstance(panel);
+
+            if (!options.preserveDrawer) {
+                state.open = false;
+                state.maximized = false;
+                state.browserFullscreen = false;
+                applyTerminalDrawerLayout(panel, { fit: 'none' });
+                if (els.drawer) els.drawer.style.display = 'none';
+            } else {
+                state.open = true;
+                if (els.drawer) els.drawer.style.display = 'flex';
+            }
+            updateGlobalTerminalLayoutState();
+            updateTerminalLiveStatus(panel);
+            updateTerminalHeader(panel);
+            return true;
+        }
+
+        async function reopenTerminalForPanel(panel) {
+            const state = getTerminalState(panel);
+            const server = getPanelCurrentServer(panel) || state.server || '';
+            const cwd = getPanelCurrentPath(panel) || state.cwd || getDefaultPath(server) || '';
+            const profile = getTerminalProfileForPanel(panel, server) || state.profile || '';
+            state.server = server;
+            state.cwd = cwd;
+            state.profile = profile;
+            updateTerminalHeader(panel);
+            return openTerminalForPanel(panel, {
+                forceReconnect: true,
+                server,
+                cwd,
+                profile
+            });
+        }
+
+        function toggleTerminalForPanel(panel) {
+            const state = getTerminalState(panel);
+            if (state.open || state.terminalId || isTerminalUiVisible(panel)) {
+                closeTerminalForPanel(panel);
+            } else {
+                openTerminalForPanel(panel, { forceReconnect: true });
+            }
+        }
+
+        function clearTerminalForPanel(panel) {
+            const state = getTerminalState(panel);
+            if (!state.term) return;
+            state.term.clear();
+            state.term.focus();
+        }
+
+        function applyRestoredPanelServerState(panel, server, cwd) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const selectEl = document.getElementById(`${normalizedPanel}Server`);
+            if (selectEl && server && !selectEl.value) {
+                selectEl.value = server;
+            }
+            if (normalizedPanel === 'source') {
+                currentSourcePath = cwd || getDefaultPath(server) || '';
+                if (server && currentSourcePath) {
+                    browseSourceInstant(currentSourcePath, { skipRemember: true });
+                }
+                if (server && isWindowsServer(server)) {
+                    loadWindowsDrives(server, true, { preferDesktop: false });
+                } else {
+                    hideWindowsDriveSelector(true);
+                }
+            } else {
+                currentTargetPath = cwd || getDefaultPath(server) || '';
+                if (server && currentTargetPath) {
+                    browseTargetInstant(currentTargetPath, { skipRemember: true });
+                }
+                if (server && isWindowsServer(server)) {
+                    loadWindowsDrives(server, false, { preferDesktop: false });
+                } else {
+                    hideWindowsDriveSelector(false);
+                }
+            }
+        }
+
+        function shouldRestoreTerminalSessionForPanel(panel, server) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const selectEl = document.getElementById(`${normalizedPanel}Server`);
+            const selectedServer = String(selectEl && selectEl.value ? selectEl.value : '').trim();
+            if (selectedServer && server && selectedServer !== server) {
+                return false;
+            }
+            const state = getTerminalState(normalizedPanel);
+            const intendedServer = String(state.server || '').trim();
+            if (intendedServer && server && intendedServer !== server) {
+                return false;
+            }
+            return true;
+        }
+
+        async function attachRestoredTerminalSession(panel, session) {
+            const normalizedPanel = panel === 'target' ? 'target' : 'source';
+            const state = getTerminalState(normalizedPanel);
+            const server = String(session?.server || '').trim();
+            if (!server) return false;
+            if (!shouldRestoreTerminalSessionForPanel(normalizedPanel, server)) {
+                return false;
+            }
+            const cwd = String(session?.cwd || getDefaultPath(server) || '').trim();
+            const restoredTerminalId = String(session?.terminal_id || '').trim();
+            const isRebindingExistingView = Boolean(state.term && state.open && state.terminalId && state.terminalId === restoredTerminalId);
+            state.server = server;
+            state.cwd = cwd;
+            state.profile = String(session?.profile || getDefaultTerminalProfile(server)).trim().toLowerCase();
+            state.open = true;
+            state.ready = true;
+            state.maximized = true;
+            state.browserFullscreen = false;
+            state.commandRunning = false;
+            state.localInputBuffer = '';
+            applyRestoredPanelServerState(normalizedPanel, server, cwd);
+
+            const els = getTerminalElements(normalizedPanel);
+            if (els.drawer) {
+                els.drawer.style.display = 'flex';
+            }
+            applyTerminalDrawerLayout(normalizedPanel, { fit: 'none' });
+            await waitForNextAnimationFrame();
+            await ensureTerminalFontReady();
+            await waitForNextAnimationFrame();
+            const instance = ensureTerminalInstance(normalizedPanel);
+            if (!instance || !state.term) {
+                return false;
+            }
+            state.terminalId = restoredTerminalId;
+            updateGlobalTerminalLayoutState();
+            updateTerminalHeader(normalizedPanel);
+            updateTerminalProfileControl(normalizedPanel);
+            updateTerminalLiveStatus(normalizedPanel);
+            if (!isRebindingExistingView) {
+                state.term.reset();
+                state.term.write(`\x1b[1;34m已恢复终端会话: ${getServerDisplayLabel(server)}\x1b[0m\r\n`);
+            }
+            window.requestAnimationFrame(() => {
+                scheduleTerminalStabilize(normalizedPanel, true);
+            });
+            return true;
+        }
+
+        async function restoreTerminalSessionsForCurrentSocket() {
+            const activeSocketId = await ensureTerminalSocketReady();
+            if (!activeSocketId) return false;
+            if (terminalRestorePromise) return terminalRestorePromise;
+            terminalRestorePromise = (async () => {
+                try {
+                    const clientToken = await ensureTerminalClientToken();
+                    const resp = await fetch('/api/terminal/restore', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            sid: activeSocketId,
+                            client_token: clientToken,
+                            browser_token: getTerminalBrowserToken()
+                        })
+                    });
+                    const result = await resp.json();
+                    if (!result.success || !Array.isArray(result.sessions) || result.sessions.length === 0) {
+                        return false;
+                    }
+                    for (const session of result.sessions) {
+                        const panel = String(session?.panel || '').trim();
+                        if (panel !== 'source' && panel !== 'target') continue;
+                        if (!shouldRestoreTerminalSessionForPanel(panel, String(session?.server || '').trim())) {
+                            if (socket && socket.connected && session?.terminal_id) {
+                                socket.emit('terminal_close', { terminal_id: String(session.terminal_id) });
+                            }
+                            continue;
+                        }
+                        await attachRestoredTerminalSession(panel, session);
+                    }
+                    addLogInfo('🖥️ 已恢复终端会话');
+                    return true;
+                } catch (_) {
+                    return false;
+                } finally {
+                    terminalRestorePromise = null;
+                }
+            })();
+            return terminalRestorePromise;
+        }
+
+        function refreshTerminalLayoutOnViewportChange() {
+            ['source', 'target'].forEach((panel) => {
+                const state = getTerminalState(panel);
+                state.drawerHeight = clampTerminalDrawerHeight(panel, state.drawerHeight || DEFAULT_TERMINAL_DRAWER_HEIGHT);
+                applyTerminalDrawerLayout(panel, {
+                    fit: state.open ? 'schedule' : 'none',
+                    notifyServer: state.open
+                });
+            });
+        }
+
+        async function handleTerminalServerChanged(panel) {
+            const state = getTerminalState(panel);
+            const wasOpen = Boolean(state.open || state.terminalId);
+            if (!wasOpen) return false;
+            await closeTerminalForPanel(panel, { silent: true });
+            return true;
+        }
+
 
         function copyTextToClipboard(text) {
             if (navigator.clipboard && window.isSecureContext) {
@@ -1472,32 +3503,94 @@
         }
 
 
-        async function deleteSelected(type, event) {
-            const blurBtn = () => {
-                if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
-                    event.currentTarget.blur();
-                }
-            };
-            blurBtn();
-            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
-            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+	        async function deleteSelected(type, event) {
+	            const blurBtn = () => {
+	                if (event && event.currentTarget && typeof event.currentTarget.blur === 'function') {
+	                    event.currentTarget.blur();
+	                }
+	            };
+	            blurBtn();
+	            const selectedFiles = type === 'source' ? selectedSourceFiles : selectedTargetFiles;
+	            const server = type === 'source' ? document.getElementById('sourceServer').value : document.getElementById('targetServer').value;
+	            const isSource = type === 'source';
 
-            if (!server) {
-                addLogWarning('⚠️ 请先选择服务器');
-                return;
-            }
+	            if (!server) {
+	                addLogWarning('⚠️ 请先选择服务器');
+	                return;
+	            }
 
-            if (selectedFiles.length === 0) {
-                addLogWarning('⚠️ 请先选择要删除的文件或文件夹');
-                return;
-            }
+	            const deleteSelectAll = async () => {
+	                const baseDir = isSource ? currentSourcePath : currentTargetPath;
+	                if (!baseDir) {
+	                    addLogWarning('⚠️ 当前目录为空，无法删除');
+	                    return;
+	                }
+	                const state = isSource ? browseState.source : browseState.target;
+	                const total = state.total || state.loadedCount || 0;
+	                const excluded = isSource ? selectAllState.source.excluded : selectAllState.target.excluded;
+	                const excludePaths = Array.from(excluded || []);
+	                const { showHiddenCheckbox } = getPanelConfig(isSource);
+	                const showHidden = !!(document.getElementById(showHiddenCheckbox) && document.getElementById(showHiddenCheckbox).checked);
+
+	                const excludedText = excludePaths.length > 0 ? `（已排除 ${excludePaths.length} 项）` : '';
+	                const msg = total > 0
+	                    ? `确定要删除当前目录全部内容吗？（共 ${total} 项）${excludedText}`
+	                    : `确定要删除当前目录全部内容吗？${excludedText}`;
+	                const ok = await showConfirmDialog(msg, {
+	                    title: '删除确认',
+	                    warning: '此操作不可恢复！',
+	                    confirmText: '删除'
+	                });
+	                if (!ok) return;
+
+	                try {
+	                    const response = await fetch('/api/delete', {
+	                        method: 'POST',
+	                        headers: { 'Content-Type': 'application/json' },
+	                        body: JSON.stringify({
+	                            server: server,
+	                            delete_all: true,
+	                            base_dir: baseDir,
+	                            exclude_paths: excludePaths,
+	                            show_hidden: showHidden
+	                        })
+	                    });
+	                    const result = await response.json();
+	                    const ok2 = result && (result.success || result.deleted_all);
+	                    if (ok2) {
+	                        resetSelectAllState(isSource);
+	                        applySelectAllVisual(isSource);
+	                        showToast('🗑️ 删除完成：当前目录全部', 'success');
+	                    } else {
+	                        addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
+	                        showToast('❌ 删除失败', 'error');
+	                    }
+	                } catch (err) {
+	                    addLogError(`❌ 删除异常: ${err.message}`);
+	                    showToast('❌ 删除异常', 'error');
+	                } finally {
+	                    if (isSource) {
+	                        refreshSourceAsync({ silent: true });
+	                    } else {
+	                        refreshTargetAsync({ silent: true });
+	                    }
+	                }
+	            };
+
+	            if (selectedFiles.length === 0) {
+	                if (isPanelSelectAllActive(isSource)) {
+	                    await deleteSelectAll();
+	                    return;
+	                }
+	                addLogWarning('⚠️ 请先选择要删除的文件或文件夹');
+	                return;
+	            }
 
 
             const ok = await showConfirmDialog(`确定要删除以下 ${selectedFiles.length} 项吗？`, {
                 title: '删除确认',
                 items: selectedFiles.map(f => f.name),
                 warning: '此操作不可恢复！',
-                danger: true,
                 confirmText: '删除'
             });
             if (!ok) {
@@ -1549,7 +3642,7 @@
                     }
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 删除失败', 'error');
+                    showActionFailureToast('删除失败', result);
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -1559,7 +3652,7 @@
                 silentRefresh();
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showToast('❌ 删除异常', 'error');
+                showActionFailureToast('删除异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -1611,7 +3704,7 @@
                     }
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 删除失败', 'error');
+                    showActionFailureToast('删除失败', result);
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -1621,7 +3714,7 @@
                 return ok;
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showToast('❌ 删除异常', 'error');
+                showActionFailureToast('删除异常', error.message);
                 return false;
             } finally {
                 imageDeleteInFlight = false;
@@ -1689,12 +3782,14 @@
                     }
                 } else {
                     addLogError(`❌ 创建文件夹失败: ${result.error}`);
+                    showActionFailureToast('新建文件夹失败', result);
                     if (optimisticAdded) {
                         removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
                     }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件夹异常: ${error.message}`);
+                showActionFailureToast('新建文件夹异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -1728,12 +3823,14 @@
                     }
                 } else {
                     addLogError(`❌ 创建文件失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('新建文件失败', result);
                     if (optimisticAdded) {
                         removeOptimisticItemsFromState(type === 'source', parentPath, [optimisticItem]);
                     }
                 }
             } catch (error) {
                 addLogError(`❌ 创建文件异常: ${error.message}`);
+                showActionFailureToast('新建文件异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -1767,7 +3864,8 @@
             const newName = await showPromptDialog(`请输入新名称\n原名称: ${oldName}`, {
                 title: '重命名',
                 defaultValue: oldName,
-                placeholder: oldName
+                placeholder: oldName,
+                promptSelection: _getRenameSelectionRange(oldName, !!file.is_directory)
             });
 
             if (!newName || newName.trim() === '') {
@@ -1818,6 +3916,7 @@
                     }
                 } else {
                     addLogError(`❌ 重命名失败: ${result.error}`);
+                    showActionFailureToast('重命名失败', result);
                     if (optimistic && oldName) {
                         applyRenameOptimistic(type, optimistic.newPath, oldName);
                     } else if (type === 'source') {
@@ -1828,6 +3927,7 @@
                 }
             } catch (error) {
                 addLogError(`❌ 重命名异常: ${error.message}`);
+                showActionFailureToast('重命名异常', error.message);
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -1883,9 +3983,11 @@
                     addLogWarning('⏹️ 已发送中断请求');
                 } else {
                     addLogError(`❌ 中断失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('中断失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 中断异常: ${err.message}`);
+                showActionFailureToast('中断异常', err.message);
             }
         }
 
@@ -1907,9 +4009,11 @@
                 const result = await resp.json();
                 if (!result.success) {
                     addLogError(`❌ 发送输入失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('发送输入失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 发送输入异常: ${err.message}`);
+                showActionFailureToast('发送输入异常', err.message);
             } finally {
                 inputEl.value = '';
             }
@@ -2022,9 +4126,11 @@
                     updateRunControls();
                 } else {
                     addLogError(`❌ 运行失败: ${result.error || '未知错误'}`);
+                    showActionFailureToast('运行失败', result);
                 }
             } catch (error) {
                 addLogError(`❌ 运行异常: ${error.message}`);
+                showActionFailureToast('运行异常', error.message);
             }
         }
 
@@ -2053,11 +4159,11 @@
                     showToast(`📏 大小: ${sizeText}`, 'success');
                 } else {
                     addLogError(`❌ 计算失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 计算失败', 'error');
+                    showActionFailureToast('计算失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 计算异常: ${err.message}`);
-                showToast('❌ 计算异常', 'error');
+                showActionFailureToast('计算异常', err.message);
             }
         }
 
@@ -2076,11 +4182,11 @@
                     showToast(`🗜️ 压缩完成: ${zipName}`, 'success');
                 } else {
                     addLogError(`❌ 压缩失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 压缩失败', 'error');
+                    showActionFailureToast('压缩失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 压缩异常: ${err.message}`);
-                showToast('❌ 压缩异常', 'error');
+                showActionFailureToast('压缩异常', err.message);
             }
         }
 
@@ -2098,11 +4204,11 @@
                     showToast(`📂 解压完成: ${fileName}`, 'success');
                 } else {
                     addLogError(`❌ 解压失败: ${result.error || '未知错误'}`);
-                    showToast('❌ 解压失败', 'error');
+                    showActionFailureToast('解压失败', result);
                 }
             } catch (err) {
                 addLogError(`❌ 解压异常: ${err.message}`);
-                showToast('❌ 解压异常', 'error');
+                showActionFailureToast('解压异常', err.message);
             }
         }
 
@@ -2110,8 +4216,108 @@
             return {
                 serverSelect: isSource ? 'sourceServer' : 'targetServer',
                 showHiddenCheckbox: isSource ? 'sourceShowHidden' : 'targetShowHidden',
-                containerId: isSource ? 'sourceFileBrowser' : 'targetFileBrowser'
+                containerId: isSource ? 'sourceFileBrowser' : 'targetFileBrowser',
+                sortSelect: isSource ? 'sourceSortBy' : 'targetSortBy',
+                sortOrderBtn: isSource ? 'sourceSortOrderBtn' : 'targetSortOrderBtn'
             };
+        }
+
+        function normalizeBrowseSortBy(value) {
+            const sortBy = String(value || 'name').trim().toLowerCase();
+            return BROWSE_SORT_BY_CHOICES.includes(sortBy) ? sortBy : 'name';
+        }
+
+        function normalizeBrowseSortOrder(value) {
+            const sortOrder = String(value || 'asc').trim().toLowerCase();
+            return BROWSE_SORT_ORDER_CHOICES.includes(sortOrder) ? sortOrder : 'asc';
+        }
+
+        function getPanelSortState(isSource) {
+            return isSource ? browseState.source : browseState.target;
+        }
+
+        function loadBrowseSortPreferences() {
+            try {
+                const raw = localStorage.getItem(BROWSE_SORT_STORAGE_KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                ['source', 'target'].forEach((panel) => {
+                    const next = parsed && typeof parsed === 'object' ? parsed[panel] : null;
+                    if (!next || typeof next !== 'object') return;
+                    browseState[panel].sortBy = normalizeBrowseSortBy(next.sortBy);
+                    browseState[panel].sortOrder = normalizeBrowseSortOrder(next.sortOrder);
+                });
+            } catch (_) {}
+        }
+
+        function saveBrowseSortPreferences() {
+            try {
+                localStorage.setItem(BROWSE_SORT_STORAGE_KEY, JSON.stringify({
+                    source: {
+                        sortBy: browseState.source.sortBy,
+                        sortOrder: browseState.source.sortOrder
+                    },
+                    target: {
+                        sortBy: browseState.target.sortBy,
+                        sortOrder: browseState.target.sortOrder
+                    }
+                }));
+            } catch (_) {}
+        }
+
+        function syncBrowseSortControls(panel) {
+            const isSource = panel === 'source';
+            const state = getPanelSortState(isSource);
+            const { sortSelect, sortOrderBtn } = getPanelConfig(isSource);
+            const select = document.getElementById(sortSelect);
+            const orderBtn = document.getElementById(sortOrderBtn);
+            if (select) {
+                select.value = normalizeBrowseSortBy(state.sortBy);
+            }
+            if (orderBtn) {
+                const sortOrder = normalizeBrowseSortOrder(state.sortOrder);
+                orderBtn.textContent = sortOrder === 'asc' ? '升' : '降';
+                orderBtn.title = sortOrder === 'asc' ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序';
+                orderBtn.setAttribute('aria-label', orderBtn.title);
+            }
+        }
+
+        function appendBrowseSortParams(params, isSource) {
+            const state = getPanelSortState(isSource);
+            params.set('sort_by', normalizeBrowseSortBy(state.sortBy));
+            params.set('sort_order', normalizeBrowseSortOrder(state.sortOrder));
+            return params;
+        }
+
+        function handleBrowseSortChange(panel) {
+            const isSource = panel === 'source';
+            const { sortSelect } = getPanelConfig(isSource);
+            const select = document.getElementById(sortSelect);
+            const nextSortBy = normalizeBrowseSortBy(select ? select.value : 'name');
+            const state = getPanelSortState(isSource);
+            if (state.sortBy === nextSortBy) {
+                syncBrowseSortControls(panel);
+                return;
+            }
+            state.sortBy = nextSortBy;
+            saveBrowseSortPreferences();
+            syncBrowseSortControls(panel);
+            const currentPath = getActivePath(isSource);
+            if (currentPath) {
+                loadDirectory(panel, currentPath, { reset: true });
+            }
+        }
+
+        function toggleBrowseSortOrder(panel) {
+            const isSource = panel === 'source';
+            const state = getPanelSortState(isSource);
+            state.sortOrder = normalizeBrowseSortOrder(state.sortOrder) === 'asc' ? 'desc' : 'asc';
+            saveBrowseSortPreferences();
+            syncBrowseSortControls(panel);
+            const currentPath = getActivePath(isSource);
+            if (currentPath) {
+                loadDirectory(panel, currentPath, { reset: true });
+            }
         }
 
         function buildBrowseMemoryKey(isSource, path) {
@@ -2119,7 +4325,8 @@
             const { serverSelect } = getPanelConfig(isSource);
             const server = document.getElementById(serverSelect).value;
             if (!server) return null;
-            return `${server}::${path}`;
+            const state = getPanelSortState(isSource);
+            return `${server}::${path}::${normalizeBrowseSortBy(state.sortBy)}::${normalizeBrowseSortOrder(state.sortOrder)}`;
         }
 
         function rememberBrowsePosition(isSource) {
@@ -2167,15 +4374,17 @@
             }
         }
 
-        function clearSelectionsForPanel(isSource) {
-            if (isSource) {
-                selectedSourceFiles = [];
-            } else {
-                selectedTargetFiles = [];
-            }
-            const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
-            document.querySelectorAll(`#${containerId} .file-item.selected`).forEach(el => el.classList.remove('selected'));
-        }
+	        function clearSelectionsForPanel(isSource) {
+	            resetSelectAllState(isSource);
+	            if (isSource) {
+	                selectedSourceFiles = [];
+	            } else {
+	                selectedTargetFiles = [];
+	            }
+	            const containerId = isSource ? 'sourceFileBrowser' : 'targetFileBrowser';
+	            document.querySelectorAll(`#${containerId} .file-item.selected`).forEach(el => el.classList.remove('selected'));
+	            document.querySelectorAll(`#${containerId} .file-item.deselected`).forEach(el => el.classList.remove('deselected'));
+	        }
 
         function updateFileCountDisplay(isSource, loaded, total) {
             const el = document.getElementById(isSource ? 'sourceFileCount' : 'targetFileCount');
@@ -2194,13 +4403,54 @@
             }
         }
 
-        function getActivePath(isSource) {
-            return isSource ? currentSourcePath : currentTargetPath;
-        }
+	        function getActivePath(isSource) {
+	            return isSource ? currentSourcePath : currentTargetPath;
+	        }
 
-        async function loadDirectory(type, targetPath, options = {}) {
-            const isSource = type === 'source';
-            const state = isSource ? browseState.source : browseState.target;
+	        function resetSelectAllState(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const st = selectAllState[key];
+	            st.active = false;
+	            st.excluded.clear();
+	            st.path = null;
+	            const container = document.getElementById(isSource ? 'sourceFileBrowser' : 'targetFileBrowser');
+	            if (container) {
+	                container.classList.remove('select-all-mode');
+	            }
+	        }
+
+	        function isPanelSelectAllActive(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const st = selectAllState[key];
+	            const path = getActivePath(isSource);
+	            return !!(st && st.active && st.path && path && st.path === path);
+	        }
+
+	        function applySelectAllVisual(isSource) {
+	            const key = isSource ? 'source' : 'target';
+	            const container = document.getElementById(isSource ? 'sourceFileBrowser' : 'targetFileBrowser');
+	            if (!container) return;
+	            const active = isPanelSelectAllActive(isSource);
+	            container.classList.toggle('select-all-mode', active);
+	            if (!active) {
+	                container.querySelectorAll('.file-item.selectable.deselected').forEach(el => el.classList.remove('deselected'));
+	                return;
+	            }
+	            container.querySelectorAll('.file-item.selectable.selected').forEach(el => el.classList.remove('selected'));
+	            const excluded = selectAllState[key].excluded;
+	            container.querySelectorAll('.file-item.selectable').forEach(el => {
+	                const p = el.dataset.path || '';
+	                if (p && excluded.has(p)) {
+	                    el.classList.add('deselected');
+	                } else {
+	                    el.classList.remove('deselected');
+	                }
+	            });
+	        }
+
+	        async function loadDirectory(type, targetPath, options = {}) {
+	            const isSource = type === 'source';
+	            const state = isSource ? browseState.source : browseState.target;
             const { serverSelect, showHiddenCheckbox, containerId } = getPanelConfig(isSource);
             const server = document.getElementById(serverSelect).value;
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
@@ -2249,13 +4499,13 @@
                 invalidatePreviewCacheUnderDir(server, targetPath);
             }
 
-            const params = new URLSearchParams({
+            const params = appendBrowseSortParams(new URLSearchParams({
                 path: targetPath,
                 show_hidden: showHidden,
                 offset: requestOffset,
                 limit: BROWSE_PAGE_SIZE,
                 force_refresh: forceRefresh
-            });
+            }), isSource);
 
             try {
                 const response = await fetch(`/api/browse/${server}?${params.toString()}`, {
@@ -2321,12 +4571,14 @@
                     state.hasMore = false;
                     showErrorState(containerId, '浏览失败: ' + data.error);
                     addLogError(`❌ 浏览${isSource ? '源' : '目标'}目录失败: ${data.error}`);
+                    showActionFailureToast(`浏览${isSource ? '源' : '目标'}目录失败`, data);
                 }
             } catch (error) {
                 if (error.name !== 'AbortError') {
                     console.error('Error:', error);
                     showErrorState(containerId, '浏览失败: ' + error.message);
                     addLogError(`❌ 浏览${isSource ? '源' : '目标'}目录出错: ${error}`);
+                    showActionFailureToast(`浏览${isSource ? '源' : '目标'}目录异常`, error.message || error);
                 }
                 state.hasMore = false;
             } finally {
@@ -2520,26 +4772,70 @@
         }
 
 
-        function sortFilesWinSCPStyle(files) {
-            return files.sort((a, b) => {
+        const browseNameCollator = new Intl.Collator('zh-CN', {
+            numeric: true,
+            sensitivity: 'base'
+        });
 
-                if (a.is_directory && !b.is_directory) {
-                    return -1;
-                }
-                if (!a.is_directory && b.is_directory) {
-                    return 1;
-                }
+        function getFileNameSortValue(file) {
+            return String((file && file.name) || '');
+        }
 
+        function getFileModifiedSortValue(file) {
+            const ts = Number(file && file.modified_ts);
+            if (Number.isFinite(ts)) return ts;
+            const parsed = Date.parse(String((file && file.modified) || '').replace('上午', 'AM').replace('下午', 'PM'));
+            return Number.isFinite(parsed) ? parsed : 0;
+        }
 
-                const nameA = a.name.toLowerCase();
-                const nameB = b.name.toLowerCase();
+        function getFileSizeSortValue(file) {
+            const size = Number(file && file.size);
+            return Number.isFinite(size) ? size : 0;
+        }
 
+        function getFileTypeSortValue(file) {
+            const name = getFileNameSortValue(file);
+            if (!name || (file && file.is_directory)) return '';
+            const idx = name.lastIndexOf('.');
+            if (idx <= 0 || idx === name.length - 1) return '';
+            return name.slice(idx + 1).toLowerCase();
+        }
 
-                return nameA.localeCompare(nameB, undefined, {
-                    numeric: true,
-                    sensitivity: 'base'
-                });
-            });
+        function compareBrowseFiles(a, b, sortBy = 'name', sortOrder = 'asc') {
+            const dirA = !!(a && a.is_directory);
+            const dirB = !!(b && b.is_directory);
+            if (dirA !== dirB) {
+                return dirA ? -1 : 1;
+            }
+
+            const normalizedSortBy = normalizeBrowseSortBy(sortBy);
+            const normalizedSortOrder = normalizeBrowseSortOrder(sortOrder);
+            const factor = normalizedSortOrder === 'desc' ? -1 : 1;
+            let primary = 0;
+
+            if (normalizedSortBy === 'modified') {
+                primary = getFileModifiedSortValue(a) - getFileModifiedSortValue(b);
+            } else if (normalizedSortBy === 'size') {
+                primary = getFileSizeSortValue(a) - getFileSizeSortValue(b);
+            } else if (normalizedSortBy === 'type') {
+                primary = browseNameCollator.compare(getFileTypeSortValue(a), getFileTypeSortValue(b));
+            } else {
+                primary = browseNameCollator.compare(getFileNameSortValue(a), getFileNameSortValue(b));
+            }
+
+            if (primary !== 0) {
+                return primary * factor;
+            }
+            return browseNameCollator.compare(getFileNameSortValue(a), getFileNameSortValue(b)) * factor;
+        }
+
+        function sortFilesWinSCPStyle(files, sortBy = 'name', sortOrder = 'asc') {
+            return files.sort((a, b) => compareBrowseFiles(a, b, sortBy, sortOrder));
+        }
+
+        function sortFilesForPanel(files, isSource) {
+            const state = getPanelSortState(isSource);
+            return sortFilesWinSCPStyle(files, state.sortBy, state.sortOrder);
         }
 
 
@@ -2601,7 +4897,7 @@
                 }
             }
 
-            const sortedFiles = sortFilesWinSCPStyle([...files]);
+            const sortedFiles = sortFilesForPanel([...files], isSource);
 
             const fragment = document.createDocumentFragment();
             sortedFiles.forEach((file, index) => {
@@ -2664,14 +4960,16 @@
             const total = totalCount !== null ? totalCount : loaded;
             updateFileCountDisplay(isSource, loaded, total);
 
-            if (preserveScrollTop !== null) {
-                const prevBehavior = container.style.scrollBehavior;
-                container.style.scrollBehavior = 'auto';
-                const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-                container.scrollTop = Math.min(preserveScrollTop, maxScroll);
-                container.style.scrollBehavior = prevBehavior || '';
-            }
-        }
+	            if (preserveScrollTop !== null) {
+	                const prevBehavior = container.style.scrollBehavior;
+	                container.style.scrollBehavior = 'auto';
+	                const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+	                container.scrollTop = Math.min(preserveScrollTop, maxScroll);
+	                container.style.scrollBehavior = prevBehavior || '';
+	            }
+	
+	            applySelectAllVisual(isSource);
+	        }
 
 
         function formatFileSize(bytes) {
@@ -2709,48 +5007,46 @@
         };
 
 
-        let clickTimer = null;
-        let clickCount = 0;
+        const panelDoubleClickState = {
+            source: { lastPath: null, lastTs: 0 },
+            target: { lastPath: null, lastTs: 0 }
+        };
 
-        function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
-            if (event.button !== 0) return;
+        function isSameRowDoubleClick(isSource, path) {
+            const state = isSource ? panelDoubleClickState.source : panelDoubleClickState.target;
+            const now = Date.now();
+            const isDouble = state.lastPath === path && (now - state.lastTs) <= DOUBLE_CLICK_CONFIG.timeWindow;
+            state.lastPath = path;
+            state.lastTs = now;
+            return isDouble;
+        }
 
-            lastActivePanel = isSource ? 'source' : 'target';
+	        function handleFileMouseDown(event, path, name, isDirectory, fileId, isSource) {
+	            if (event.button !== 0) return;
+
+	            lastActivePanel = isSource ? 'source' : 'target';
+
+	            const selectAllActive = isPanelSelectAllActive(isSource);
+	            const isToggle = !!(event.ctrlKey || event.metaKey || event.shiftKey);
+	            if (fileId) {
+	                // In virtual select-all mode, keep the selection unless user explicitly toggles (Ctrl/Meta) or range-selects (Shift).
+	                if (!selectAllActive || isToggle) {
+	                    selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
+	                }
+	            }
+
+	            const isDoubleClick = isSameRowDoubleClick(isSource, path);
+	            if (!isDirectory || !isDoubleClick) return;
+
+            console.log(`[双击] 立即进入目录: ${path}`);
 
 
-            if (fileId) {
-
-                selectFileImmediate(event, path, name, isDirectory, fileId, isSource);
-            }
-
-            clickCount++;
-
-            if (clickCount === 1) {
-
-                clickTimer = setTimeout(() => {
-
-                    clickCount = 0;
-                }, DOUBLE_CLICK_CONFIG.timeWindow);
-            } else if (clickCount === 2) {
-
-                clearTimeout(clickTimer);
-                clickCount = 0;
-
-                if (isDirectory) {
-
-                    console.log(`[双击] 立即进入目录: ${path}`);
-
-
-                    if (isSource) {
-                        currentSourcePath = path;
-
-                        browseSourceInstant(path);
-                    } else {
-                        currentTargetPath = path;
-
-                        browseTargetInstant(path);
-                    }
-                }
+            if (isSource) {
+                currentSourcePath = path;
+                browseSourceInstant(path);
+            } else {
+                currentTargetPath = path;
+                browseTargetInstant(path);
             }
         }
 
@@ -2916,26 +5212,32 @@
                     const drive = parts[0];
                     const driveLetter = (drive || '').replace(':', '').toUpperCase();
                     const driveLabel = driveLetter ? `${driveLetter}盘` : drive;
+                    const normalizedCurrentPath = _normalizeWinPath(currentPath || '');
 
 
                     const drives = (isSource ? windowsDrivesSource : windowsDrivesTarget) || [];
                     if (drives.length > 0) {
-                        const currentDriveMeta = drives.find(d => {
+                        const currentDesktopMeta = drives.find(d =>
+                            d && (d.kind === 'desktop' || d.type === 'desktop') &&
+                            _isPathSameOrChild(normalizedCurrentPath, _getWindowsLocationPath(d))
+                        );
+                        const currentDriveMeta = currentDesktopMeta || drives.find(d => {
                             const letterRaw = (d.letter || '').toUpperCase();
                             const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
                             return letter === drive.toUpperCase();
                         });
-                        const driveIcon = currentDriveMeta && currentDriveMeta.type === 'network'
-                            ? 'bi-globe2'
-                            : 'bi-hdd-fill';
+                        const driveIcon = _getWindowsLocationIcon(currentDriveMeta);
                         const driveMenuItems = drives.map(d => {
-                            const letterRaw = (d.letter || '').toUpperCase();
-                            const letter = letterRaw.endsWith(':') ? letterRaw : (letterRaw + ':');
-                            const iconHtml = d.type === 'network'
-                                ? '<i class="bi bi-globe2 me-2 text-secondary"></i>'
-                                : '<i class="bi bi-hdd-fill me-2 text-secondary"></i>';
-                            const active = letter === drive.toUpperCase() ? ' active' : '';
-                            return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive('${letter}', ${isSource}); return false;">${iconHtml}${d.name}</a></li>`;
+                            const locationPath = _getWindowsLocationPath(d);
+                            if (!locationPath) return '';
+                            const iconHtml = `<i class="bi ${_getWindowsLocationIcon(d)} me-2 text-secondary"></i>`;
+                            const isDesktop = Boolean(d && (d.kind === 'desktop' || d.type === 'desktop'));
+                            const active = isDesktop
+                                ? (_isPathSameOrChild(normalizedCurrentPath, locationPath) ? ' active' : '')
+                                : (!currentDesktopMeta && _normalizeDriveLetter(d.letter) === drive.toUpperCase() ? ' active' : '');
+                            const encodedPath = encodeURIComponent(locationPath);
+                            const displayName = d.name || locationPath;
+                            return `<li><a class="dropdown-item${active}" href="#" onclick="switchWindowsDrive(decodeURIComponent('${encodedPath}'), ${isSource}); return false;">${iconHtml}${displayName}</a></li>`;
                         }).join('');
                         segments.push({
                             html: `
@@ -2998,8 +5300,17 @@
         }
 
         function maybeStartPathInlineEdit(event, isSource) {
+            const displayId = isSource ? 'sourcePathDisplay' : 'targetPathDisplay';
+            const display = document.getElementById(displayId);
+            if (!display) return;
 
-            if (event.target.closest('button') || event.target.closest('a') || event.target.closest('.bi')) return;
+            // Only allow entering "address bar" edit mode when clicking the empty area of the path display,
+            // similar to Windows Explorer (avoid accidental edit when clicking segments or the container).
+            if (!display.contains(event.target)) return;
+            if (event.target.closest('button') || event.target.closest('.bi')) return;
+            if (event.target.closest('a') || event.target.closest('.path-segment') || event.target.closest('.path-separator') || event.target.closest('.path-ellipsis')) {
+                return;
+            }
             startPathInlineEdit(isSource);
         }
 
@@ -3102,9 +5413,10 @@
 
 
 
-        function switchWindowsDrive(letter, isSource) {
-            const driveLetter = letter.endsWith(':') ? letter : (letter + ':');
-            const drivePath = driveLetter + '/';
+        function switchWindowsDrive(target, isSource) {
+            const normalizedTarget = _normalizeWinPath(target || '');
+            const drivePath = normalizedTarget || _driveRoot(target);
+            if (!drivePath) return;
             if (isSource) {
                 currentSourcePath = drivePath;
                 browseSourceInstant(currentSourcePath);
@@ -3131,19 +5443,41 @@
         }
 
 
-        function selectFileImmediate(event, path, name, isDirectory, fileId, isSource) {
-            event.stopPropagation();
+	        function selectFileImmediate(event, path, name, isDirectory, fileId, isSource) {
+	            event.stopPropagation();
 
-            const fileElement = document.getElementById(fileId);
-            if (!fileElement) return;
+	            const fileElement = document.getElementById(fileId);
+	            if (!fileElement) return;
 
-            const idx = Number(fileElement.dataset.idx || -1);
+	            const idx = Number(fileElement.dataset.idx || -1);
+	            const panelKey = isSource ? 'source' : 'target';
 
-            if (!event.shiftKey && !event.ctrlKey && !event.metaKey && fileElement.classList.contains('selected')) {
-                lastSelectedIndex[isSource ? 'source' : 'target'] = idx;
-                updateSelectionInfo();
-                return;
-            }
+	            if (isPanelSelectAllActive(isSource)) {
+	                if (event.ctrlKey || event.metaKey) {
+	                    const excluded = selectAllState[panelKey].excluded;
+	                    if (excluded.has(path)) {
+	                        excluded.delete(path);
+	                        fileElement.classList.remove('deselected');
+	                    } else {
+	                        excluded.add(path);
+	                        fileElement.classList.add('deselected');
+	                    }
+	                    lastSelectedIndex[panelKey] = idx;
+	                    lastActivePanel = panelKey;
+	                    updateSelectionInfo();
+	                    return;
+	                }
+
+	                // Any non-toggle selection exits select-all mode first.
+	                resetSelectAllState(isSource);
+	                applySelectAllVisual(isSource);
+	            }
+
+	            if (!event.shiftKey && !event.ctrlKey && !event.metaKey && fileElement.classList.contains('selected')) {
+	                lastSelectedIndex[isSource ? 'source' : 'target'] = idx;
+	                updateSelectionInfo();
+	                return;
+	            }
 
             if (event.shiftKey && (lastSelectedIndex[isSource ? 'source' : 'target'] !== null)) {
                 const anchor = lastSelectedIndex[isSource ? 'source' : 'target'];
@@ -3205,12 +5539,12 @@
             state.loadingAllPromise = (async () => {
                 let localOffset = loadedCount;
                 while (true) {
-                    const params = new URLSearchParams({
+                    const params = appendBrowseSortParams(new URLSearchParams({
                         path: state.path,
                         show_hidden: showHidden,
                         offset: localOffset,
                         limit: BROWSE_PAGE_SIZE_MAX
-                    });
+                    }), isSource);
                     const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
                     const data = await resp.json();
                     if (!data.success) break;
@@ -3264,8 +5598,14 @@
             }
 
             const input = await showPromptDialog('输入要查找的文件/文件夹名称关键字', {
-                title: '快速查找',
-                placeholder: '文件/文件夹关键字'
+                title: '递归查找',
+                placeholder: '输入文件名、目录名或关键字',
+                variant: 'spotlight-search',
+                eyebrow: 'Quick Search',
+                subtitle: '会搜索当前目录以及所有子目录',
+                iconClass: 'bi bi-search',
+                inputHint: 'Enter 搜索',
+                meta: '支持模糊匹配，结果会自动定位到第一个命中的文件或文件夹'
             });
             if (input === null) return;
             const rawKeyword = String(input || '').trim();
@@ -3317,11 +5657,11 @@
 
             addLogInfo('🔎 正在快速查找，请稍候...');
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
-            const params = new URLSearchParams({
+            const params = appendBrowseSortParams(new URLSearchParams({
                 path: state.path,
                 keyword: rawKeyword,
                 show_hidden: showHidden
-            });
+            }), isSource);
 
             let data;
             try {
@@ -3356,12 +5696,12 @@
             }
 
             const pageStart = Math.floor(index / BROWSE_PAGE_SIZE) * BROWSE_PAGE_SIZE;
-            const pageParams = new URLSearchParams({
+            const pageParams = appendBrowseSortParams(new URLSearchParams({
                 path: state.path,
                 show_hidden: showHidden,
                 offset: pageStart,
                 limit: BROWSE_PAGE_SIZE
-            });
+            }), isSource);
 
             try {
                 const resp = await fetch(`/api/browse/${server}?${pageParams.toString()}`, { cache: 'no-cache' });
@@ -3401,26 +5741,28 @@
         }
 
 
-        function clearAllSelections() {
-            selectedSourceFiles = [];
-            selectedTargetFiles = [];
-            document.querySelectorAll('.file-item.selected').forEach(item => {
-                item.classList.remove('selected');
-            });
-            lastSelectedIndex.source = null;
-            lastSelectedIndex.target = null;
-        }
+	        function clearAllSelections() {
+	            selectedSourceFiles = [];
+	            selectedTargetFiles = [];
+	            resetSelectAllState(true);
+	            resetSelectAllState(false);
+	            document.querySelectorAll('#sourceFileBrowser .file-item.selected, #targetFileBrowser .file-item.selected').forEach(item => item.classList.remove('selected'));
+	            document.querySelectorAll('#sourceFileBrowser .file-item.deselected, #targetFileBrowser .file-item.deselected').forEach(item => item.classList.remove('deselected'));
+	            lastSelectedIndex.source = null;
+	            lastSelectedIndex.target = null;
+	        }
 
         function getCurrentTransferMode() {
             const modeRadio = document.querySelector('input[name="transferMode"]:checked');
             return modeRadio ? modeRadio.value : (currentTransferMode || 'copy');
         }
 
-        function ensureDragSelection(row, isSource) {
-            if (!row || row.classList.contains('selected')) return;
-            clearAllSelections();
-            row.classList.add('selected');
-            const item = {
+	        function ensureDragSelection(row, isSource) {
+	            if (!row || row.classList.contains('selected')) return;
+	            resetSelectAllState(isSource);
+	            clearAllSelections();
+	            row.classList.add('selected');
+	            const item = {
                 path: row.dataset.path,
                 name: row.dataset.name,
                 is_directory: String(row.dataset.isDirectory).toLowerCase() === 'true'
@@ -3444,17 +5786,19 @@
             row.addEventListener('dragend', handleRowDragEnd);
         }
 
-        function _getDragPayload(event) {
-            let payload = dragTransferPayload;
-            if (!payload && event && event.dataTransfer) {
-                try {
-                    const raw = event.dataTransfer.getData(DRAG_TRANSFER_TYPE);
-                    if (raw) payload = JSON.parse(raw);
-                } catch (_) {}
-            }
-            if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return null;
-            return payload;
-        }
+	        function _getDragPayload(event) {
+	            let payload = dragTransferPayload;
+	            if (!payload && event && event.dataTransfer) {
+	                try {
+	                    const raw = event.dataTransfer.getData(DRAG_TRANSFER_TYPE);
+	                    if (raw) payload = JSON.parse(raw);
+	                } catch (_) {}
+	            }
+	            if (!payload) return null;
+	            if (payload.select_all) return payload;
+	            if (!Array.isArray(payload.files) || payload.files.length === 0) return null;
+	            return payload;
+	        }
 
         function attachRowDropHandlers(row, isSource) {
             if (!row || row.dataset.dropBound === 'true') return;
@@ -3497,13 +5841,23 @@
                 const targetPath = row.dataset.path || '';
                 if (!targetPath) return;
 
-                const hasConflict = payload.files.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
-                    return;
-                }
+	                if (payload.select_all && payload.source_dir) {
+	                    const srcDir = String(payload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const hasConflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (hasConflict) {
+	                        showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
+	                        return;
+	                    }
+	                } else {
+	                    const hasConflict = (payload.files || []).some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        showToast('⚠️ 目标目录不能与源相同或为其子目录', 'warning');
+	                        return;
+	                    }
+	                }
 
                 const samePanel = fromPanel === toPanel;
                 const mode = samePanel ? 'move' : getCurrentTransferMode();
@@ -3526,47 +5880,73 @@
                     };
                 }
 
-                await startTransferWithParams(
-                    sourceServer,
-                    targetServer,
-                    targetPath,
-                    payload.files,
-                    mode,
-                    direction,
-                    refreshOverride,
-                    samePanel
-                );
-            });
-        }
+	                await startTransferWithParams(
+	                    sourceServer,
+	                    targetServer,
+	                    targetPath,
+	                    payload.select_all
+	                        ? {
+	                            select_all: true,
+	                            source_dir: payload.source_dir || '',
+	                            exclude_paths: payload.exclude_paths || []
+	                        }
+	                        : payload.files,
+	                    mode,
+	                    direction,
+	                    refreshOverride,
+	                    samePanel
+	                );
+	            });
+	        }
 
-        function buildDragPayload(isSource) {
-            const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
-            return { panel: isSource ? 'source' : 'target', files, mode: getCurrentTransferMode() };
-        }
+	        function buildDragPayload(isSource) {
+	            const panel = isSource ? 'source' : 'target';
+	            if (isPanelSelectAllActive(isSource)) {
+	                const excluded = isSource ? selectAllState.source.excluded : selectAllState.target.excluded;
+	                return {
+	                    panel,
+	                    select_all: true,
+	                    source_dir: getActivePath(isSource),
+	                    exclude_paths: Array.from(excluded || []),
+	                    mode: getCurrentTransferMode()
+	                };
+	            }
+	            const files = _cloneTransferFiles(isSource ? selectedSourceFiles : selectedTargetFiles);
+	            return { panel, files, mode: getCurrentTransferMode() };
+	        }
 
-        function handleRowDragStart(event, isSource) {
-            const row = event.currentTarget;
-            if (!row || row.dataset.editing === 'true') {
-                event.preventDefault();
-                return;
-            }
-            ensureDragSelection(row, isSource);
-            const payload = buildDragPayload(isSource);
-            if (!payload.files || payload.files.length === 0) {
-                event.preventDefault();
-                return;
-            }
+	        function handleRowDragStart(event, isSource) {
+	            const row = event.currentTarget;
+	            if (!row || row.dataset.editing === 'true') {
+	                event.preventDefault();
+	                return;
+	            }
+	            if (!isPanelSelectAllActive(isSource)) {
+	                ensureDragSelection(row, isSource);
+	            } else {
+	                // Keep virtual select-all state during drag.
+	                applySelectAllVisual(isSource);
+	            }
+	            const payload = buildDragPayload(isSource);
+	            if (!payload.select_all && (!payload.files || payload.files.length === 0)) {
+	                event.preventDefault();
+	                return;
+	            }
 
-            event.dataTransfer.effectAllowed = 'copyMove';
-            event.dataTransfer.setData(DRAG_TRANSFER_TYPE, JSON.stringify(payload));
-            const mode = payload.mode === 'move' ? 'move' : 'copy';
-            event.dataTransfer.setData('text/plain', `${payload.files.length}项${mode === 'move' ? '剪切' : '复制'}`);
-            dragTransferPayload = payload;
-            const ghost = getDragGhostImage();
-            if (ghost && event.dataTransfer.setDragImage) {
-                event.dataTransfer.setDragImage(ghost, 0, 0);
-            }
-        }
+	            event.dataTransfer.effectAllowed = 'copyMove';
+	            event.dataTransfer.setData(DRAG_TRANSFER_TYPE, JSON.stringify(payload));
+	            const mode = payload.mode === 'move' ? 'move' : 'copy';
+	            if (payload.select_all) {
+	                event.dataTransfer.setData('text/plain', `当前目录全部${mode === 'move' ? '剪切' : '复制'}`);
+	            } else {
+	                event.dataTransfer.setData('text/plain', `${payload.files.length}项${mode === 'move' ? '剪切' : '复制'}`);
+	            }
+	            dragTransferPayload = payload;
+	            const ghost = getDragGhostImage();
+	            if (ghost && event.dataTransfer.setDragImage) {
+	                event.dataTransfer.setDragImage(ghost, 0, 0);
+	            }
+	        }
 
         function handleRowDragEnd() {
             dragTransferPayload = null;
@@ -3595,18 +5975,19 @@
                 container.addEventListener('dragleave', (e) => {
                     if (e.relatedTarget && container.contains(e.relatedTarget)) return;
                 });
-                container.addEventListener('drop', async (e) => {
-                    if (!canHandle(e)) return;
-                    e.preventDefault();
-                    let payload = dragTransferPayload;
-                    if (!payload) {
-                        try { payload = JSON.parse(e.dataTransfer.getData(DRAG_TRANSFER_TYPE)); } catch (_) {}
-                    }
-                    if (!payload || !Array.isArray(payload.files) || payload.files.length === 0) return;
+	                container.addEventListener('drop', async (e) => {
+	                    if (!canHandle(e)) return;
+	                    e.preventDefault();
+	                    let payload = dragTransferPayload;
+	                    if (!payload) {
+	                        try { payload = JSON.parse(e.dataTransfer.getData(DRAG_TRANSFER_TYPE)); } catch (_) {}
+	                    }
+	                    if (!payload) return;
+	                    if (!payload.select_all && (!Array.isArray(payload.files) || payload.files.length === 0)) return;
 
-                    const fromPanel = payload.panel;
-                    const toPanel = isSourcePanel ? 'source' : 'target';
-                    if (fromPanel === toPanel) return;
+	                    const fromPanel = payload.panel;
+	                    const toPanel = isSourcePanel ? 'source' : 'target';
+	                    if (fromPanel === toPanel) return;
 
                     const mode = getCurrentTransferMode();
                     const sourceServer = fromPanel === 'source'
@@ -3615,59 +5996,74 @@
                     const targetServer = fromPanel === 'source'
                         ? document.getElementById('targetServer').value
                         : document.getElementById('sourceServer').value;
-                    const targetPath = isSourcePanel ? currentSourcePath : currentTargetPath;
-                    const direction = fromPanel === 'source' ? 'ltr' : 'rtl';
+	                    const targetPath = isSourcePanel ? currentSourcePath : currentTargetPath;
+	                    const direction = fromPanel === 'source' ? 'ltr' : 'rtl';
 
-                    await startTransferWithParams(sourceServer, targetServer, targetPath, payload.files, mode, direction);
-                });
-            };
+	                    await startTransferWithParams(
+	                        sourceServer,
+	                        targetServer,
+	                        targetPath,
+	                        payload.select_all
+	                            ? {
+	                                select_all: true,
+	                                source_dir: payload.source_dir || '',
+	                                exclude_paths: payload.exclude_paths || []
+	                            }
+	                            : payload.files,
+	                        mode,
+	                        direction
+	                    );
+	                });
+	            };
             bind(source, true);
             bind(target, false);
         }
 
-        function selectAll(isSource) {
-            ensureAllItemsLoaded(isSource).then(allItems => {
-                renderAllItems(isSource, allItems || []);
-                const nodes = getFileNodes(isSource);
-                nodes.forEach(node => node.classList.add('selected'));
-                const selected = (allItems || []).map((f) => ({
-                    path: f.path,
-                    name: f.name,
-                    is_directory: f.is_directory
-                }));
-                if (isSource) {
-                    selectedSourceFiles = selected;
-                    lastSelectedIndex.source = selected.length ? selected.length - 1 : null;
-                } else {
-                    selectedTargetFiles = selected;
-                    lastSelectedIndex.target = selected.length ? selected.length - 1 : null;
-                }
-                updateSelectionInfo();
-            });
-        }
+	        function selectAll(isSource) {
+	            // Virtual select-all: do not fetch/render all items or toggle thousands of nodes.
+	            clearAllSelections();
+	            const key = isSource ? 'source' : 'target';
+	            selectAllState[key].active = true;
+	            selectAllState[key].excluded.clear();
+	            selectAllState[key].path = getActivePath(isSource);
+	            applySelectAllVisual(isSource);
+	            updateSelectionInfo();
+	        }
 
 
-        function updateSelectionInfo() {
-            if (selectedSourceFiles.length > 0 && selectedTargetFiles.length > 0) {
-                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
-            }
+	        function updateSelectionInfo() {
+	            const leftSelected = selectedSourceFiles.length > 0 || isPanelSelectAllActive(true);
+	            const rightSelected = selectedTargetFiles.length > 0 || isPanelSelectAllActive(false);
+	            if (leftSelected && rightSelected) {
+	                addLogWarning('⚠️ 左右两侧同时选择了项目，请只在一侧选择以确定方向');
+	            }
 
-            function renderSelectedInfo(isSource, selectedArr) {
-                const el = document.getElementById(isSource ? 'sourceSelectedInfo' : 'targetSelectedInfo');
-                if (!el) return;
-                if (!selectedArr || selectedArr.length === 0) {
-                    el.style.display = 'none';
-                    el.textContent = '';
-                    return;
-                }
-                const fileCount = selectedArr.filter(it => !it.is_directory).length;
-                const dirCount = selectedArr.filter(it => it.is_directory).length;
-                const parts = [];
-                if (fileCount > 0) parts.push(`${fileCount} 文件`);
-                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
-                el.textContent = `已选中：${parts.join('，')}`;
-                el.style.display = 'inline';
-            }
+	            function renderSelectedInfo(isSource, selectedArr) {
+	                const el = document.getElementById(isSource ? 'sourceSelectedInfo' : 'targetSelectedInfo');
+	                if (!el) return;
+	                if (isPanelSelectAllActive(isSource)) {
+	                    const state = isSource ? browseState.source : browseState.target;
+	                    const total = state.total || state.loadedCount || 0;
+	                    const key = isSource ? 'source' : 'target';
+	                    const excluded = selectAllState[key].excluded.size || 0;
+	                    const base = total > 0 ? `已全选：当前目录全部（共 ${total} 项）` : '已全选：当前目录全部';
+	                    el.textContent = excluded > 0 ? `${base}，已排除 ${excluded} 项` : base;
+	                    el.style.display = 'inline-flex';
+	                    return;
+	                }
+	                if (!selectedArr || selectedArr.length === 0) {
+	                    el.style.display = 'none';
+	                    el.textContent = '';
+	                    return;
+	                }
+	                const fileCount = selectedArr.filter(it => !it.is_directory).length;
+	                const dirCount = selectedArr.filter(it => it.is_directory).length;
+	                const parts = [];
+	                if (fileCount > 0) parts.push(`${fileCount} 文件`);
+	                if (dirCount > 0) parts.push(`${dirCount} 文件夹`);
+	                el.textContent = `已选中：${parts.join('，')}`;
+	                el.style.display = 'inline-flex';
+	            }
 
             renderSelectedInfo(true, selectedSourceFiles);
             renderSelectedInfo(false, selectedTargetFiles);
@@ -3676,10 +6072,11 @@
 
 
 
-        function selectRange(isSource, startIdx, endIdx) {
-            const nodes = getFileNodes(isSource);
-            const min = Math.min(startIdx, endIdx);
-            const max = Math.max(startIdx, endIdx);
+	        function selectRange(isSource, startIdx, endIdx) {
+	            resetSelectAllState(isSource);
+	            const nodes = getFileNodes(isSource);
+	            const min = Math.min(startIdx, endIdx);
+	            const max = Math.max(startIdx, endIdx);
             const selected = [];
             nodes.forEach(node => {
                 const idx = Number(node.dataset.idx || -1);
@@ -3702,11 +6099,13 @@
         }
 
 
-        async function startTransfer() {
-            const sourceServerLeft = document.getElementById('sourceServer').value;
-            const targetServerRight = document.getElementById('targetServer').value;
-            const leftSelected = selectedSourceFiles.length > 0;
-            const rightSelected = selectedTargetFiles.length > 0;
+	        async function startTransfer() {
+	            const sourceServerLeft = document.getElementById('sourceServer').value;
+	            const targetServerRight = document.getElementById('targetServer').value;
+	            const leftSelectAll = isPanelSelectAllActive(true);
+	            const rightSelectAll = isPanelSelectAllActive(false);
+	            const leftSelected = leftSelectAll || selectedSourceFiles.length > 0;
+	            const rightSelected = rightSelectAll || selectedTargetFiles.length > 0;
 
 
             const modeRadio = document.querySelector('input[name="transferMode"]:checked');
@@ -3719,8 +6118,7 @@
 
             if (currentTransferMode === 'move') {
                 const ok = await showConfirmDialog('当前选择的是「剪切」模式，源文件将被删除。是否继续？', {
-                    title: '剪切确认',
-                    danger: true
+                    title: '剪切确认'
                 });
                 if (!ok) {
                     return;
@@ -3740,22 +6138,37 @@
             }
 
 
-            let sourceServer, targetServer, targetPath, sourceFiles;
-            if (leftSelected) {
+	            let sourceServer, targetServer, targetPath, sourceFiles;
+	            let selectAllPayload = null; // { source_dir, exclude_paths }
+	            if (leftSelected) {
 
                 sourceServer = sourceServerLeft;
-                targetServer = targetServerRight;
-                targetPath = currentTargetPath;
-                sourceFiles = selectedSourceFiles;
-                currentTransferDirection = 'ltr';
-            } else {
+	                targetServer = targetServerRight;
+	                targetPath = currentTargetPath;
+	                sourceFiles = selectedSourceFiles;
+	                if (leftSelectAll) {
+	                    selectAllPayload = {
+	                        source_dir: currentSourcePath,
+	                        exclude_paths: Array.from(selectAllState.source.excluded || [])
+	                    };
+	                    sourceFiles = [];
+	                }
+	                currentTransferDirection = 'ltr';
+	            } else {
 
-                sourceServer = targetServerRight;
-                targetServer = sourceServerLeft;
-                targetPath = currentSourcePath;
-                sourceFiles = selectedTargetFiles;
-                currentTransferDirection = 'rtl';
-            }
+	                sourceServer = targetServerRight;
+	                targetServer = sourceServerLeft;
+	                targetPath = currentSourcePath;
+	                sourceFiles = selectedTargetFiles;
+	                if (rightSelectAll) {
+	                    selectAllPayload = {
+	                        source_dir: currentTargetPath,
+	                        exclude_paths: Array.from(selectAllState.target.excluded || [])
+	                    };
+	                    sourceFiles = [];
+	                }
+	                currentTransferDirection = 'rtl';
+	            }
 
 
             if (!sourceServer || !targetServer || !targetPath) {
@@ -3765,19 +6178,30 @@
             }
 
 
-            if (sourceServer === targetServer) {
-                const hasConflict = sourceFiles.some(file =>
-                    file.path === targetPath || targetPath.startsWith(file.path + '/')
-                );
-                if (hasConflict) {
-                    addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
-                    await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
-                    return;
-                }
-            }
+	            if (sourceServer === targetServer) {
+	                if (selectAllPayload && selectAllPayload.source_dir) {
+	                    const srcDir = String(selectAllPayload.source_dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const dstDir = String(targetPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+	                    const conflict = (srcDir && dstDir) && (srcDir === dstDir || dstDir.startsWith(srcDir + '/'));
+	                    if (conflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return;
+	                    }
+	                } else {
+	                    const hasConflict = (sourceFiles || []).some(file =>
+	                        file.path === targetPath || targetPath.startsWith(file.path + '/')
+	                    );
+	                    if (hasConflict) {
+	                        addLogWarning('⚠️ 源路径和目标路径不能相同或存在包含关系');
+	                        await showAlertDialog('源路径和目标路径不能相同或存在包含关系');
+	                        return;
+	                    }
+	                }
+	            }
 
-            const sourcePath = leftSelected ? currentSourcePath : currentTargetPath;
-            cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, sourceFiles, mode);
+	            const sourcePath = leftSelected ? currentSourcePath : currentTargetPath;
+	            cacheTransferContext(sourceServer, targetServer, sourcePath, targetPath, sourceFiles || [], mode);
 
 
             isTransferring = true;
@@ -3788,28 +6212,44 @@
             if (startBtn) startBtn.style.display = 'none';
             document.getElementById('cancelTransferBtn').style.display = 'inline-block';
 
-            const fileNames = sourceFiles.map(f => f.name).join(', ');
-            const modeText = mode === 'copy' ? '复制' : '移动';
-            const sshText = fastSSH ? '(SSH加速)' : '';
-            const parallelText = parallelTransfer ? '(立即并行传输)' : '';
+	            const fileNames = (sourceFiles || []).map(f => f.name).join(', ');
+	            const modeText = mode === 'copy' ? '复制' : '移动';
+	            const sshText = fastSSH ? '(SSH加速)' : '';
+	            const parallelText = parallelTransfer ? '(立即并行传输)' : '';
 
 
 
-            addLogInfo(`📤 源: ${sourceServer} (${sourceFiles.length}项)`);
-            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
-            addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            if (selectAllPayload) {
+	                const excludedCount = (selectAllPayload.exclude_paths || []).length;
+	                const excludedText = excludedCount > 0 ? `，排除 ${excludedCount} 项` : '';
+	                addLogInfo(`📤 源: ${sourceServer} (当前目录全部${excludedText})`);
+	            } else {
+	                addLogInfo(`📤 源: ${sourceServer} (${(sourceFiles || []).length}项)`);
+	            }
+	            addLogInfo(`📥 目标: ${targetServer}:${targetPath}`);
+	            if (selectAllPayload) {
+	                addLogInfo(`📋 目录: ${selectAllPayload.source_dir}`);
+	            } else {
+	                addLogInfo(`📋 文件: ${fileNames.length > 50 ? fileNames.substring(0, 50) + '...' : fileNames}`);
+	            }
 
 
-            socket.emit('start_transfer', {
-                source_server: sourceServer,
-                source_files: sourceFiles,
-                target_server: targetServer,
-                target_path: targetPath,
-                mode: mode,
-                fast_ssh: fastSSH,
-                parallel_transfer: parallelTransfer
-            });
-        }
+	            const payload = {
+	                source_server: sourceServer,
+	                source_files: sourceFiles || [],
+	                target_server: targetServer,
+	                target_path: targetPath,
+	                mode: mode,
+	                fast_ssh: fastSSH,
+	                parallel_transfer: parallelTransfer
+	            };
+	            if (selectAllPayload && selectAllPayload.source_dir) {
+	                payload.select_all = true;
+	                payload.source_dir = selectAllPayload.source_dir;
+	                payload.exclude_paths = selectAllPayload.exclude_paths || [];
+	            }
+	            socket.emit('start_transfer', payload);
+	        }
 
 
 
@@ -3990,6 +6430,78 @@
             }
         });
 
+        socket.on('terminal_output', function(data) {
+            const terminalId = data && data.terminal_id ? String(data.terminal_id) : '';
+            if (!terminalId) return;
+            const states = [terminalPanelState.source, terminalPanelState.target];
+            const state = states.find((item) => item && item.term && item.terminalId === terminalId);
+            if (!state || !state.term) return;
+            const chunk = data && typeof data.data === 'string' ? data.data : '';
+            const parsed = stripTerminalControlMarkers(chunk);
+            if (Array.isArray(parsed.markers)) {
+                parsed.markers.forEach((marker) => applyTerminalShellMarker(state.panel, marker));
+            }
+            if (parsed.text) {
+                state.term.write(parsed.text);
+                if (state.needsInitialStabilize) {
+                    state.needsInitialStabilize = false;
+                    window.requestAnimationFrame(() => scheduleTerminalStabilize(state.panel, true));
+                }
+            }
+            if (data && data.final === true) {
+                state.ready = false;
+                state.terminalId = '';
+                state.commandRunning = false;
+                state.recovering = false;
+                updateTerminalLiveStatus(state.panel);
+            }
+        });
+
+        socket.on('terminal_status', function(data) {
+            const terminalId = data && data.terminal_id ? String(data.terminal_id) : '';
+            const status = data && data.status ? String(data.status) : '';
+            let state = null;
+            if (status === 'opened' && data && data.panel) {
+                state = getTerminalState(data.panel);
+                if (state && state.term && (!state.terminalId || state.terminalId === terminalId)) {
+                    if (terminalId) state.terminalId = terminalId;
+                    if (data.server) state.server = data.server;
+                    if (data.cwd) state.cwd = data.cwd;
+                    if (data.profile) state.profile = data.profile;
+                    updateTerminalHeader(state.panel);
+                    updateTerminalProfileControl(state.panel);
+                    updateTerminalLiveStatus(state.panel);
+                }
+                return;
+            }
+            if (!terminalId) return;
+            state = [terminalPanelState.source, terminalPanelState.target]
+                .find((item) => item && item.term && item.terminalId === terminalId);
+            if (!state) return;
+            if (status === 'error') {
+                const message = data && data.message ? String(data.message) : '';
+                const isRecoverableSessionError = /终端会话不存在或已结束|无权访问该终端会话/.test(message);
+                if (isRecoverableSessionError) {
+                    state.ready = false;
+                    state.terminalId = '';
+                    state.commandRunning = false;
+                    updateTerminalLiveStatus(state.panel);
+                    scheduleTerminalAutoRecover(state.panel, message, 250);
+                    return;
+                }
+                setTerminalStatus(state.panel, '异常', 'error');
+                if (message) {
+                    state.term.write(`\r\n\x1b[1;31m${message}\x1b[0m\r\n`);
+                }
+            } else if (status === 'closed') {
+                state.ready = false;
+                state.terminalId = '';
+                state.commandRunning = false;
+                state.recovering = false;
+                updateTerminalLiveStatus(state.panel);
+            }
+        });
+
         socket.on('transfer_complete', function(data) {
             if (data.transfer_id === currentTransferId) {
 
@@ -4154,7 +6666,7 @@
                     { const el = document.getElementById('transferStatus'); if (el) el.textContent = '传输失败'; }
                     { const pb = document.getElementById('progressBar'); if (pb) pb.classList.add('bg-danger'); }
                     addLogError(`❌ 传输失败: ${data.message}`);
-                    showToast('❌ 传输失败', 'error');
+                    showActionFailureToast('传输失败', data && data.message ? data.message : '未知错误');
                 }
 
 
@@ -4176,6 +6688,7 @@
                     addLogWarning('⚠️ 传输已取消');
                 } else {
                     addLogError(`❌ 取消传输失败: ${data.message}`);
+                    showActionFailureToast('取消传输失败', data && data.message ? data.message : '未知错误');
                 }
 
                 setTimeout(resetTransferUI, 2000);
@@ -4264,10 +6777,11 @@
         }
 
 
-        async function loadWindowsDrives(serverIP, isSource) {
+        async function loadWindowsDrives(serverIP, isSource, options = {}) {
             try {
                 const response = await fetch(`/api/windows_drives/${serverIP}`);
                 const data = await response.json();
+                const preferDesktop = Boolean(options && options.preferDesktop);
 
                 const normalizeDrive = (letter) => {
                     if (!letter) return null;
@@ -4283,17 +6797,26 @@
                     }
 
                     const desiredPath = isSource ? currentSourcePath : currentTargetPath;
-                    const desiredDrive = normalizeDrive((desiredPath || '').split(/[\\/]/)[0]);
+                    const desiredPathNorm = _normalizeWinPath(desiredPath || '');
+                    const desiredDrive = normalizeDrive((desiredPathNorm || '').split('/')[0]);
+                    const diskEntries = data.drives.filter(d => normalizeDrive(d && d.letter));
 
-                    const preferred = data.drives.find(d => normalizeDrive(d.letter) === desiredDrive) ||
-                        data.drives.find(d => normalizeDrive(d.letter) === 'C:') ||
-                        data.drives[0];
+                    const desktopEntry = data.drives.find(d =>
+                        d && (d.kind === 'desktop' || d.type === 'desktop') && _getWindowsLocationPath(d)
+                    );
+                    const preferred = (preferDesktop ? desktopEntry : null) ||
+                        diskEntries.find(d => normalizeDrive(d.letter) === desiredDrive) ||
+                        diskEntries.find(d => normalizeDrive(d.letter) === 'C:') ||
+                        diskEntries[0] ||
+                        desktopEntry ||
+                        data.drives.find(d => _getWindowsLocationPath(d));
 
                     if (preferred) {
                         const driveLabel = normalizeDrive(preferred.letter);
-                        const driveRoot = driveLabel ? `${driveLabel}/` : '/';
+                        const preferredPath = _getWindowsLocationPath(preferred);
+                        const driveRoot = preferredPath || (driveLabel ? `${driveLabel}/` : '/');
                         const useDesiredPath = Boolean(desiredDrive && driveLabel === desiredDrive && desiredPath);
-                        const targetPath = useDesiredPath ? desiredPath : driveRoot;
+                        const targetPath = useDesiredPath ? desiredPathNorm : driveRoot;
 
                         if (isSource) {
                             if (currentSourcePath !== targetPath) {
@@ -4309,7 +6832,7 @@
                             updatePathNavigation(currentTargetPath, false);
                         }
                         if (!useDesiredPath) {
-                            addLogInfo(`💾 默认选择磁盘: ${preferred.letter}`);
+                            addLogInfo(`💾 默认选择位置: ${preferred.name || preferred.letter || driveRoot}`);
                         }
                     }
 
@@ -4338,6 +6861,8 @@
 
 
             const PreviewCache = new Map(); // key -> { type: 'blob'|'text', value: string, ts: number }
+            const PREVIEW_CACHE_MAX_TOTAL = 3500;
+            const PREVIEW_CACHE_MAX_BLOB = 2000;
 
             function normalizePreviewPath(path) {
                 return String(path || '').replace(/\\/g, '/');
@@ -4355,11 +6880,41 @@
                 }
             }
 
+            function trimPreviewCache() {
+                if (PreviewCache.size <= PREVIEW_CACHE_MAX_TOTAL) {
+                    let blobCount = 0;
+                    for (const entry of PreviewCache.values()) {
+                        if (entry && entry.type === 'blob') blobCount++;
+                    }
+                    if (blobCount <= PREVIEW_CACHE_MAX_BLOB) return;
+                }
+
+                let blobCount = 0;
+                for (const entry of PreviewCache.values()) {
+                    if (entry && entry.type === 'blob') blobCount++;
+                }
+
+                while (PreviewCache.size > PREVIEW_CACHE_MAX_TOTAL || blobCount > PREVIEW_CACHE_MAX_BLOB) {
+                    const first = PreviewCache.keys().next();
+                    const firstKey = first && first.value;
+                    if (!firstKey) break;
+                    const entry = PreviewCache.get(firstKey);
+                    if (entry && entry.type === 'blob') blobCount--;
+                    revokePreviewEntry(entry);
+                    PreviewCache.delete(firstKey);
+                }
+            }
+
             function previewCacheGet(server, path, type, variant = '') {
                 const key = getPreviewKey(server, path, variant);
                 const entry = PreviewCache.get(key);
                 if (!entry) return null;
                 if (type && entry.type !== type) return null;
+                // LRU: refresh key ordering.
+                try {
+                    PreviewCache.delete(key);
+                    PreviewCache.set(key, entry);
+                } catch (_) {}
                 return entry;
             }
 
@@ -4370,6 +6925,7 @@
                     revokePreviewEntry(prev);
                 }
                 PreviewCache.set(key, { type, value, ts: Date.now() });
+                trimPreviewCache();
             }
 
             function invalidatePreviewCache(server, paths) {
@@ -4407,14 +6963,53 @@
                 isSource: true
             };
             let imageDeleteInFlight = false;
+            let imagePreviewFetchController = null;
+            let imagePreviewRequestSeq = 0;
+            let imageNavQueuedIndex = null;
+            let imageNavTimer = 0;
+            let imageNavLastStartAt = 0;
+            let imagePrefetchTimer = 0;
+            let imagePreviewPrefetchImg = null;
+            let imagePreviewActiveLayerIndex = 0;
+            let imagePreviewNavDirection = 1;
+            let imagePreviewTransitionTimer = 0;
+            let imagePreviewWheelAccumX = 0;
+            const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS = 80;
+            const IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS_WIN = 140;
+            const IMAGE_PREVIEW_MIN_ZOOM = 1;
+            const IMAGE_PREVIEW_MAX_ZOOM = 4;
+            const IMAGE_PREVIEW_SECONDARY_ZOOM = 2.5;
+            const IMAGE_PREVIEW_LOADING_SRC = (() => {
+                const svg =
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">' +
+                    '<rect width="160" height="120" fill="#0b1220"/>' +
+                    '<text x="80" y="62" fill="#94a3b8" font-family="Arial, sans-serif" font-size="14" text-anchor="middle">Loading...</text>' +
+                    '</svg>';
+                return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+            })();
+
+            function _shouldRetryPreviewError(err) {
+                const msg = String((err && (err.message || err)) || '');
+                const m = msg.match(/HTTP\s+(\d+)/i);
+                if (m) {
+                    const code = Number.parseInt(m[1], 10);
+                    if (Number.isFinite(code)) {
+                        return code >= 500 || code === 408 || code === 429;
+                    }
+                }
+                const lower = msg.toLowerCase();
+                return lower.includes('failed to fetch') || lower.includes('network') || lower.includes('timeout');
+            }
 
         const IMAGE_DPR_CAP = 2;
         const IMAGE_PREVIEW_MAX_DIM = 2200;
         const IMAGE_PREVIEW_MIN_DIM = 320;
         const IMAGE_PREVIEW_QUALITY = 82;
-        const IMAGE_GRID_THUMB_MAX = 1024;
-        const IMAGE_GRID_THUMB_MIN = 120;
-        const IMAGE_GRID_THUMB_QUALITY = 82;
+        const IMAGE_PREVIEW_DIM_STEP = 128;
+        const IMAGE_GRID_THUMB_MAX = 640;
+        const IMAGE_GRID_THUMB_MIN = 96;
+        const IMAGE_GRID_THUMB_QUALITY = 72;
+        const IMAGE_GRID_THUMB_STEP = 64;
 
         function clampNumber(value, min, max) {
             if (!Number.isFinite(value)) return min;
@@ -4423,10 +7018,19 @@
             return value;
         }
 
+        function quantizeNumber(value, step) {
+            const n = Number(value);
+            const s = Math.max(1, Number(step) || 1);
+            if (!Number.isFinite(n)) return 0;
+            return Math.round(n / s) * s;
+        }
+
         function getImagePreviewRequestSize() {
             const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
-            const width = clampNumber(Math.round(window.innerWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
-            const height = clampNumber(Math.round(window.innerHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const widthRaw = clampNumber(Math.round(window.innerWidth * 0.98 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const heightRaw = clampNumber(Math.round(window.innerHeight * 0.95 * dpr), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const width = clampNumber(quantizeNumber(widthRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
+            const height = clampNumber(quantizeNumber(heightRaw, IMAGE_PREVIEW_DIM_STEP), IMAGE_PREVIEW_MIN_DIM, IMAGE_PREVIEW_MAX_DIM);
             return { width, height, quality: IMAGE_PREVIEW_QUALITY };
         }
 
@@ -4436,6 +7040,7 @@
             const quality = Math.max(0, Number.parseInt(options.quality, 10) || 0);
             const interp = options.interp ? String(options.interp) : '';
             const format = options.format ? String(options.format).toLowerCase() : '';
+            const signal = options.signal;
             const interpKey = interp ? `i${interp}` : '';
             const formatKey = format ? `f${format}` : '';
             const variant = (width || height || quality || interpKey || formatKey)
@@ -4452,7 +7057,11 @@
             if (quality > 0) params.set('quality', String(quality));
             if (interp) params.set('interp', interp);
             if (format) params.set('format', format);
-            const resp = await fetch(`/api/image/stream?${params.toString()}`, { cache: 'no-store' });
+            const fetchOptions = { cache: 'no-store' };
+            if (signal) {
+                fetchOptions.signal = signal;
+            }
+            const resp = await fetch(`/api/image/stream?${params.toString()}`, fetchOptions);
             if (!resp.ok) {
                 let msg = '';
                 try { msg = await resp.text(); } catch (_) {}
@@ -4467,11 +7076,47 @@
         function isImageFile(name) {
             return /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(name);
         }
-        function isTextEditable(name) {
-            return /\.(txt|xml|py|js|css|html?|json|md|log|conf|ini|yml|yaml|sh|c|cpp|h|hpp)$/i.test(name);
+        function isOnnxFile(name) {
+            return /\.onnx$/i.test(name || '');
         }
         function isArchiveFile(name) {
             return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tar\.xz)$/i.test(name);
+        }
+
+        function openOnnxInNetron(server, path, name) {
+            let popup = null;
+            try {
+                popup = window.open('', '_blank');
+                if (!popup) {
+                    addLogWarning(`⚠️ Netron 页面被浏览器拦截，请允许弹出新页面: ${name || path}`);
+                    return;
+                }
+
+                try { popup.opener = null; } catch (_) {}
+                try {
+                    popup.document.title = '正在打开 Netron...';
+                    popup.document.body.innerHTML = '<div style="font-family: Inter, sans-serif; padding: 24px; color: #1f2937;">正在打开 Netron...</div>';
+                } catch (_) {}
+
+                const modelUrl = new URL('/api/netron/model', window.location.origin);
+                modelUrl.searchParams.set('server', server);
+                modelUrl.searchParams.set('path', path);
+
+                const viewerUrl = new URL('/netron/', window.location.origin);
+                viewerUrl.searchParams.set('url', modelUrl.toString());
+                if (name) {
+                    viewerUrl.searchParams.set('identifier', name);
+                }
+
+                popup.location.replace(viewerUrl.toString());
+                try { popup.focus(); } catch (_) {}
+            } catch (e) {
+                if (popup && !popup.closed) {
+                    try { popup.close(); } catch (_) {}
+                }
+                addLogError('打开 Netron 失败: ' + (e.message || e));
+                console.error('openOnnxInNetron error:', e);
+            }
         }
 
             function buildImageViewer(server, path, name, isSource) {
@@ -4493,11 +7138,6 @@
                 ImageViewer.isSource = isSource;
             }
 
-            function applyImageTransform(img) {
-                if (!img) return;
-                img.style.transform = `translate(${imageOffsetX}px, ${imageOffsetY}px) scale(${imageZoom})`;
-            }
-
             function _getImageSizeText(img) {
                 if (!img) return '';
                 const w = img.naturalWidth || 0;
@@ -4513,60 +7153,548 @@
                 caption.textContent = sizeText ? `${base} | ${sizeText}` : base;
             }
 
+            function getImagePreviewElements() {
+                const modal = document.getElementById('imagePreviewModal');
+                if (!modal) return null;
+                const viewport = modal.querySelector('.image-preview-viewport');
+                const layers = Array.from(modal.querySelectorAll('.image-preview-layer'));
+                return { modal, viewport, layers };
+            }
+
+            function clampImagePreviewZoom(value) {
+                return clampNumber(Number(value) || IMAGE_PREVIEW_MIN_ZOOM, IMAGE_PREVIEW_MIN_ZOOM, IMAGE_PREVIEW_MAX_ZOOM);
+            }
+
+            function getImagePreviewViewportRect() {
+                const preview = getImagePreviewElements();
+                return preview && preview.viewport ? preview.viewport.getBoundingClientRect() : null;
+            }
+
+            function getImagePreviewMetrics(img, zoom = imageZoom) {
+                const viewportRect = getImagePreviewViewportRect();
+                if (!viewportRect) return null;
+                const viewportWidth = Math.max(1, viewportRect.width || 0);
+                const viewportHeight = Math.max(1, viewportRect.height || 0);
+                const naturalWidth = Math.max(1, img && img.naturalWidth ? img.naturalWidth : viewportWidth);
+                const naturalHeight = Math.max(1, img && img.naturalHeight ? img.naturalHeight : viewportHeight);
+                const containScale = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight);
+                const fitWidth = naturalWidth * containScale;
+                const fitHeight = naturalHeight * containScale;
+                const normalizedZoom = clampImagePreviewZoom(zoom);
+                return {
+                    viewportRect,
+                    viewportWidth,
+                    viewportHeight,
+                    fitWidth,
+                    fitHeight,
+                    displayWidth: fitWidth * normalizedZoom,
+                    displayHeight: fitHeight * normalizedZoom,
+                    zoom: normalizedZoom
+                };
+            }
+
+            function clampImagePreviewOffset(img, offsetX = imageOffsetX, offsetY = imageOffsetY, zoom = imageZoom) {
+                const metrics = getImagePreviewMetrics(img, zoom);
+                if (!metrics || metrics.zoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.001) {
+                    return { x: 0, y: 0 };
+                }
+                const maxX = Math.max(0, (metrics.displayWidth - metrics.viewportWidth) / 2);
+                const maxY = Math.max(0, (metrics.displayHeight - metrics.viewportHeight) / 2);
+                return {
+                    x: clampNumber(offsetX, -maxX, maxX),
+                    y: clampNumber(offsetY, -maxY, maxY)
+                };
+            }
+
+            function getPreviewContentPointAtClient(clientX, clientY, img, zoom = imageZoom, offsetX = imageOffsetX, offsetY = imageOffsetY) {
+                const metrics = getImagePreviewMetrics(img, zoom);
+                if (!metrics) return null;
+                const centerX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                const centerY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                return {
+                    x: (clientX - centerX - offsetX) / metrics.zoom,
+                    y: (clientY - centerY - offsetY) / metrics.zoom
+                };
+            }
+
+            function setImagePreviewZoom(nextZoom, clientX = null, clientY = null, img = getActivePreviewImage()) {
+                if (!img) return;
+                const normalizedZoom = clampImagePreviewZoom(nextZoom);
+                const currentZoom = clampImagePreviewZoom(imageZoom);
+                if (Math.abs(normalizedZoom - currentZoom) < 0.0001) {
+                    applyImageTransform(img);
+                    return;
+                }
+
+                const metrics = getImagePreviewMetrics(img, currentZoom);
+                if (metrics && Number.isFinite(clientX) && Number.isFinite(clientY)) {
+                    const anchorPoint = getPreviewContentPointAtClient(clientX, clientY, img, currentZoom, imageOffsetX, imageOffsetY);
+                    if (anchorPoint) {
+                        const centerX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                        const centerY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                        imageOffsetX = clientX - centerX - anchorPoint.x * normalizedZoom;
+                        imageOffsetY = clientY - centerY - anchorPoint.y * normalizedZoom;
+                    }
+                }
+
+                imageZoom = normalizedZoom;
+                if (imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.001) {
+                    imageOffsetX = 0;
+                    imageOffsetY = 0;
+                }
+                applyImageTransform(img);
+            }
+
+            function getImagePreviewSecondaryZoom(img = getActivePreviewImage()) {
+                if (!img) return IMAGE_PREVIEW_SECONDARY_ZOOM;
+                const metrics = getImagePreviewMetrics(img, IMAGE_PREVIEW_MIN_ZOOM);
+                if (!metrics) return IMAGE_PREVIEW_SECONDARY_ZOOM;
+                const naturalWidth = Math.max(1, img.naturalWidth || metrics.viewportWidth);
+                const naturalHeight = Math.max(1, img.naturalHeight || metrics.viewportHeight);
+                const widthRatio = naturalWidth / Math.max(1, metrics.fitWidth);
+                const heightRatio = naturalHeight / Math.max(1, metrics.fitHeight);
+                return clampImagePreviewZoom(Math.min(IMAGE_PREVIEW_SECONDARY_ZOOM, Math.max(1.5, Math.min(widthRatio, heightRatio))));
+            }
+
+            function applyImageTransform(img) {
+                if (!img) return;
+                imageZoom = clampImagePreviewZoom(imageZoom);
+                const clampedOffset = clampImagePreviewOffset(img, imageOffsetX, imageOffsetY, imageZoom);
+                imageOffsetX = clampedOffset.x;
+                imageOffsetY = clampedOffset.y;
+                img.style.setProperty('--preview-pan-x', `${imageOffsetX}px`);
+                img.style.setProperty('--preview-pan-y', `${imageOffsetY}px`);
+                img.style.setProperty('--preview-zoom', String(imageZoom));
+            }
+
+            function getActivePreviewImage() {
+                const preview = getImagePreviewElements();
+                if (!preview || !preview.layers.length) return null;
+                return preview.layers[imagePreviewActiveLayerIndex] || preview.layers[0] || null;
+            }
+
+            function getInactivePreviewImage() {
+                const preview = getImagePreviewElements();
+                if (!preview || preview.layers.length < 2) return getActivePreviewImage();
+                return preview.layers[imagePreviewActiveLayerIndex === 0 ? 1 : 0];
+            }
+
+            function resetPreviewLayerTransform(img) {
+                if (!img) return;
+                img.style.setProperty('--preview-shift-x', '0px');
+                img.style.setProperty('--preview-pan-x', '0px');
+                img.style.setProperty('--preview-pan-y', '0px');
+                img.style.setProperty('--preview-zoom', '1');
+            }
+
+            function resetPreviewLayer(img, preserveSrc = false) {
+                if (!img) return;
+                img.classList.remove('is-active');
+                img.classList.remove('is-interacting');
+                img.style.opacity = '0';
+                resetPreviewLayerTransform(img);
+                img.dataset.loaded = '0';
+                img.dataset.previewRetry = '0';
+                img.dataset.imagePath = '';
+                if (!preserveSrc) {
+                    img.removeAttribute('src');
+                }
+            }
+
+            function finishPreviewTransition(nextIndex) {
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
+                const preview = getImagePreviewElements();
+                if (!preview) return;
+                preview.layers.forEach((layer, idx) => {
+                    layer.classList.remove('is-interacting');
+                    if (idx === nextIndex) {
+                        layer.classList.add('is-active');
+                        layer.style.opacity = '1';
+                        layer.style.setProperty('--preview-shift-x', '0px');
+                    } else {
+                        layer.classList.remove('is-active');
+                        layer.style.opacity = '0';
+                        resetPreviewLayerTransform(layer);
+                    }
+                });
+                imagePreviewActiveLayerIndex = nextIndex;
+            }
+
+            function activatePreviewImage(targetImg, navDirection, animate) {
+                if (!targetImg) return;
+                const preview = getImagePreviewElements();
+                if (!preview || !preview.layers.length) return;
+                const targetIndex = preview.layers.indexOf(targetImg);
+                if (targetIndex < 0) return;
+                const currentIndex = imagePreviewActiveLayerIndex;
+                const currentImg = preview.layers[currentIndex] || null;
+
+                if (!animate || !currentImg || currentImg === targetImg || currentImg.dataset.loaded !== '1') {
+                    finishPreviewTransition(targetIndex);
+                    applyImageTransform(targetImg);
+                    return;
+                }
+
+                const incomingShift = navDirection >= 0 ? 72 : -72;
+                const outgoingShift = navDirection >= 0 ? -36 : 36;
+
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
+
+                resetPreviewLayerTransform(currentImg);
+                resetPreviewLayerTransform(targetImg);
+                targetImg.classList.add('is-active');
+                targetImg.style.opacity = '0.01';
+                targetImg.style.setProperty('--preview-shift-x', `${incomingShift}px`);
+                currentImg.classList.add('is-active');
+                currentImg.style.opacity = '1';
+                currentImg.style.setProperty('--preview-shift-x', '0px');
+
+                requestAnimationFrame(() => {
+                    targetImg.style.opacity = '1';
+                    targetImg.style.setProperty('--preview-shift-x', '0px');
+                    currentImg.style.opacity = '0';
+                    currentImg.style.setProperty('--preview-shift-x', `${outgoingShift}px`);
+                });
+
+                imagePreviewTransitionTimer = setTimeout(() => {
+                    finishPreviewTransition(targetIndex);
+                    applyImageTransform(targetImg);
+                }, 240);
+            }
+
+            function prefetchAdjacentPreviewImages(currentIndex) {
+                try {
+                    const items = ImageViewer.items || [];
+                    const len = items.length || 0;
+                    if (len <= 1) return;
+                    const server = ImageViewer.server;
+                    if (!server) return;
+
+                    const prevIndex = (currentIndex - 1 + len) % len;
+                    const nextIndex = (currentIndex + 1) % len;
+                    if (isWindowsServer(server)) {
+                        const req = getImagePreviewRequestSize();
+                        const options = { width: req.width, height: req.height, quality: req.quality, interp: 'lanczos', format: 'webp' };
+                        [prevIndex, nextIndex].forEach((idx) => {
+                            const it = items[idx];
+                            if (!it || !it.path) return;
+                            getImageBlobUrl(server, it.path, options).catch(() => {});
+                        });
+                        return;
+                    }
+
+                    // Linux: preload original image URL into browser cache.
+                    if (!imagePreviewPrefetchImg) {
+                        imagePreviewPrefetchImg = new Image();
+                    }
+                    try { imagePreviewPrefetchImg.decoding = 'async'; } catch (_) {}
+                    const nextItem = items[nextIndex];
+                    if (nextItem && nextItem.path) {
+                        imagePreviewPrefetchImg.src = getImageStreamUrl(server, nextItem.path);
+                    }
+                    const prevItem = items[prevIndex];
+                    if (prevItem && prevItem.path) {
+                        const img = new Image();
+                        try { img.decoding = 'async'; } catch (_) {}
+                        img.src = getImageStreamUrl(server, prevItem.path);
+                    }
+                } catch (_) {}
+            }
+
+            function schedulePrefetchAdjacentPreviewImages(currentIndex) {
+                try {
+                    if (imagePrefetchTimer) {
+                        clearTimeout(imagePrefetchTimer);
+                        imagePrefetchTimer = 0;
+                    }
+                    imagePrefetchTimer = setTimeout(() => {
+                        imagePrefetchTimer = 0;
+                        prefetchAdjacentPreviewImages(currentIndex);
+                    }, 180);
+                } catch (_) {}
+            }
+
+            function getImageStreamUrl(server, path, params = null) {
+                const search = new URLSearchParams();
+                search.set('server', server);
+                search.set('path', path);
+                if (params && typeof params === 'object') {
+                    Object.entries(params).forEach(([k, v]) => {
+                        if (v === undefined || v === null) return;
+                        if (v === '') return;
+                        search.set(k, String(v));
+                    });
+                }
+                return `/api/image/stream?${search.toString()}`;
+            }
+
+            function _getPreviewNavIntervalMs() {
+                try {
+                    const s = ImageViewer && ImageViewer.server;
+                    if (s && isWindowsServer(s)) return IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS_WIN;
+                } catch (_) {}
+                return IMAGE_PREVIEW_NAV_MIN_INTERVAL_MS;
+            }
+
+            function _scheduleImageNavRun() {
+                if (imageNavTimer) return;
+                const now = Date.now();
+                const elapsed = now - (imageNavLastStartAt || 0);
+                const wait = Math.max(0, _getPreviewNavIntervalMs() - elapsed);
+                imageNavTimer = setTimeout(() => {
+                    imageNavTimer = 0;
+                    if (imageNavQueuedIndex === null) return;
+                    const nextIndex = imageNavQueuedIndex;
+                    imageNavQueuedIndex = null;
+                    imageNavLastStartAt = Date.now();
+                    showImageAt(nextIndex);
+                    // If another keypress arrived during this run, schedule again.
+                    if (imageNavQueuedIndex !== null) {
+                        _scheduleImageNavRun();
+                    }
+                }, wait);
+            }
+
+            function requestShowImageAt(index) {
+                const n = Number.parseInt(index, 10);
+                if (!Number.isFinite(n)) return;
+                if (!ImageViewer.items || !ImageViewer.items.length) return;
+                const len = ImageViewer.items.length;
+                let normalized = n;
+                if (normalized < 0) normalized = len - 1;
+                if (normalized >= len) normalized = 0;
+                if (len > 1) {
+                    const currentIndex = Number.isFinite(ImageViewer.index) ? ImageViewer.index : 0;
+                    const forwardSteps = (normalized - currentIndex + len) % len;
+                    const backwardSteps = (currentIndex - normalized + len) % len;
+                    if (forwardSteps !== 0) {
+                        imagePreviewNavDirection = forwardSteps <= backwardSteps ? 1 : -1;
+                    }
+                }
+                imageNavQueuedIndex = normalized;
+
+                // Update UI immediately so the index number keeps up with key repeat.
+                try {
+                    ImageViewer.index = normalized;
+                    const item = ImageViewer.items[normalized];
+                    if (item) _updateImageCaption(item, normalized, len, '');
+                } catch (_) {}
+
+                // When user is holding the key, throttle requests so we don't overwhelm the server.
+                // Also cancel the current load (client-side) so the UI stays responsive.
+                imagePreviewRequestSeq++;
+                if (imagePreviewFetchController) {
+                    try { imagePreviewFetchController.abort(); } catch (_) {}
+                }
+
+                _scheduleImageNavRun();
+            }
+
             async function showImageAt(index) {
                 if (!ImageViewer.items || ImageViewer.items.length === 0) return;
                 const len = ImageViewer.items.length;
                 if (len === 0) return;
+                index = Number.parseInt(index, 10);
+                if (!Number.isFinite(index)) index = 0;
                 if (index < 0) index = len - 1;
                 if (index >= len) index = 0;
                 ImageViewer.index = index;
                 const item = ImageViewer.items[index];
                 const server = ImageViewer.server;
-
-
-                const modal = document.getElementById('imagePreviewModal');
-                const img = modal.querySelector('img');
-                if (modal && img) {
+                if (!item || !item.path || !server) return;
+                const reqId = ++imagePreviewRequestSeq;
+                const preview = getImagePreviewElements();
+                const modal = preview ? preview.modal : null;
+                const activeImg = getActivePreviewImage();
+                const inactiveImg = getInactivePreviewImage();
+                if (modal) {
+                    try {
+                        const gridModal = document.getElementById('imageGridModal');
+                        if (gridModal && gridModal.style.display !== 'none') {
+                            pauseImageGridLoading();
+                        }
+                    } catch (_) {}
                     modal.style.display = 'block';
-                    img.style.opacity = '0.3';
-                    img.decoding = 'async';
-                    img.dataset.imagePath = item.path || '';
-                    img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2Y1ZjVmNSIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjE0IiBmaWxsPSIjOTk5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5Loading...</dGV4dD48L3N2Zz4=';
+                }
+                const isWin = isWindowsServer(server);
+                _updateImageCaption(item, index, len, isWin ? '' : '原图加载中');
+
+                try {
+                    if (imagePreviewFetchController) {
+                        try { imagePreviewFetchController.abort(); } catch (_) {}
+                    }
+                    const expectedPath = item.path || '';
+                    if (activeImg && activeImg.dataset.loaded === '1' && activeImg.dataset.imagePath === expectedPath) {
+                        const sizeText = _getImageSizeText(activeImg);
+                        _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
+                        schedulePrefetchAdjacentPreviewImages(index);
+                        return;
+                    }
+                    imagePreviewFetchController = new AbortController();
+                    if (reqId !== imagePreviewRequestSeq) return;
+                    const currentReady = activeImg && activeImg.dataset.loaded === '1' && activeImg.dataset.imagePath;
+                    const shouldAnimate = Boolean(currentReady && activeImg.dataset.imagePath !== expectedPath);
+                    const targetImg = shouldAnimate ? inactiveImg : activeImg;
+                    if (!targetImg) return;
+
                     imageZoom = 1;
                     imageOffsetX = 0;
                     imageOffsetY = 0;
-                    applyImageTransform(img);
-                }
 
-                try {
-                    const blobUrl = await getImageBlobUrl(server, item.path);
+                    resetPreviewLayerTransform(targetImg);
+                    targetImg.decoding = 'async';
+                    targetImg.dataset.imagePath = expectedPath;
+                    targetImg.dataset.previewRetry = '0';
+                    targetImg.dataset.loaded = '0';
 
-
-                    if (img) {
-                        const expectedPath = item.path || '';
-                        img.onload = () => {
-                            if (img.dataset.imagePath !== expectedPath) return;
-                            img.style.opacity = '1';
-                            _updateImageCaption(item, index, len, _getImageSizeText(img));
-                        };
-                        img.src = blobUrl;
+                    if (!currentReady) {
+                        targetImg.classList.add('is-active');
+                        targetImg.style.opacity = '0.24';
+                        targetImg.src = IMAGE_PREVIEW_LOADING_SRC;
                     }
-                    _updateImageCaption(item, index, len, '');
+
+                    const url = getImageStreamUrl(server, expectedPath);
+                    const req = getImagePreviewRequestSize();
+                    const previewOptions = {
+                        width: req.width,
+                        height: req.height,
+                        quality: req.quality,
+                        interp: 'lanczos',
+                        format: 'webp',
+                        signal: imagePreviewFetchController.signal
+                    };
+
+                    const commitLoadedImage = () => {
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        targetImg.dataset.loaded = '1';
+                        activatePreviewImage(targetImg, imagePreviewNavDirection, shouldAnimate);
+                        const sizeText = _getImageSizeText(targetImg);
+                        _updateImageCaption(item, index, len, isWin ? sizeText : `原图 ${sizeText}`);
+                    };
+                    const maybeCommitCachedImage = () => {
+                        if (!targetImg.complete) return false;
+                        if (!(targetImg.naturalWidth || targetImg.naturalHeight)) return false;
+                        requestAnimationFrame(() => {
+                            commitLoadedImage();
+                        });
+                        return true;
+                    };
+
+                    targetImg.onerror = () => {
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        const retry = Number.parseInt(targetImg.dataset.previewRetry || '0', 10) || 0;
+                        if (retry < 1) {
+                            targetImg.dataset.previewRetry = String(retry + 1);
+                            setTimeout(() => {
+                                if (reqId !== imagePreviewRequestSeq) return;
+                                if (targetImg.dataset.imagePath !== expectedPath) return;
+                                if (isWin) {
+                                    getImageBlobUrl(server, expectedPath, previewOptions)
+                                        .then((u) => {
+                                            if (reqId !== imagePreviewRequestSeq) return;
+                                            if (targetImg.dataset.imagePath !== expectedPath) return;
+                                            targetImg.src = u;
+                                        })
+                                        .catch(() => {});
+                                } else {
+                                    targetImg.src = getImageStreamUrl(server, expectedPath, { t: Date.now() });
+                                }
+                            }, 180 + Math.floor(Math.random() * 160));
+                            return;
+                        }
+                        targetImg.style.opacity = currentReady ? '0' : '1';
+                        _updateImageCaption(item, index, len, '加载失败');
+                    };
+
+                    targetImg.onload = () => {
+                        commitLoadedImage();
+                    };
+
+                    if (isWin) {
+                        const u = await getImageBlobUrl(server, expectedPath, previewOptions);
+                        if (reqId !== imagePreviewRequestSeq) return;
+                        if (targetImg.dataset.imagePath !== expectedPath) return;
+                        targetImg.src = u;
+                        maybeCommitCachedImage();
+                    } else {
+                        targetImg.src = url;
+                        maybeCommitCachedImage();
+                    }
+
+                    // Prefetch neighbors (debounced) to make switching feel instant without flooding.
+                    schedulePrefetchAdjacentPreviewImages(index);
                 } catch (e) {
+                    if (e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort'))) {
+                        return;
+                    }
+                    if (reqId !== imagePreviewRequestSeq) return;
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
-                    closeImageModal();
+                    const currentImg = getActivePreviewImage();
+                    if (currentImg && currentImg.dataset.imagePath === (item.path || '')) {
+                        currentImg.style.opacity = '1';
+                    }
+                    _updateImageCaption(item, index, len, '加载失败');
                 }
             }
 
             async function previewImage(server, path, name, isSource) {
                 try {
                     const state = isSource ? browseState.source : browseState.target;
-                    if (!state.fullItems || state.fullHasMore) {
-                        await ensureAllItemsLoaded(isSource);
+
+                    // If opened from the image grid, use its in-memory list for instant preview.
+                    try {
+                        const gridModal = document.getElementById('imageGridModal');
+                        const gridVisible = gridModal && gridModal.style.display !== 'none';
+                        if (gridVisible &&
+                            imageGridActiveServer === server &&
+                            imageGridActiveIsSource === isSource &&
+                            Array.isArray(imageGridItems) &&
+                            imageGridItems.length) {
+                            const imgs = imageGridItems.map(it => ({ path: it.path, name: it.name }));
+                            let idx = imgs.findIndex(it => it.path === path && it.name === name);
+                            if (idx < 0) {
+                                idx = imgs.findIndex(it => it.path === path);
+                                if (idx < 0) idx = 0;
+                            }
+                            ImageViewer.items = imgs;
+                            ImageViewer.index = idx >= 0 ? idx : 0;
+                            ImageViewer.server = server;
+                            ImageViewer.isSource = isSource;
+                            await showImageAt(ImageViewer.index);
+                            return;
+                        }
+                    } catch (_) {}
+
+                    // Fast path: show immediately using already-loaded entries, then load the rest in background.
+                    if (state.fullItems && state.fullItems.length) {
+                        buildImageViewer(server, path, name, isSource);
+                        await showImageAt(ImageViewer.index);
+                        if (state.fullHasMore) {
+                            ensureAllItemsLoaded(isSource)
+                                .then(() => buildImageViewer(server, path, name, isSource))
+                                .catch(() => {});
+                        }
+                        return;
                     }
-                    buildImageViewer(server, path, name, isSource);
-                    await showImageAt(ImageViewer.index);
+
+                    // Minimal fallback: show the current image first, then build the full list asynchronously.
+                    ImageViewer.items = [{ path, name }];
+                    ImageViewer.index = 0;
+                    ImageViewer.server = server;
+                    ImageViewer.isSource = isSource;
+                    await showImageAt(0);
+                    ensureAllItemsLoaded(isSource)
+                        .then(() => buildImageViewer(server, path, name, isSource))
+                        .catch(() => {});
                 } catch (e) {
                     addLogError('图片预览失败: ' + (e.message || e));
                     console.error('Image preview fetch error:', e);
@@ -4596,36 +7724,34 @@
 
             async function editTextFile(server, path, name) {
                 try {
-
                     const cached = previewCacheGet(server, path, 'text');
-                    openEditorModal(server, path, name, cached ? cached.value : '正在加载...');
-                    if (cached) return;
-
-
-                    const url = `/api/file/read?server=${encodeURIComponent(server)}&path=${encodeURIComponent(path)}`;
-                    const resp = await fetch(url, { cache: 'no-store' });
-                    if (!resp.ok) {
-                        let msg = '';
-                        try { msg = await resp.text(); } catch(_) {}
-                        throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                    if (cached) {
+                        const content = cached.value || '';
+                        openEditorModal(server, path, name, content, {
+                            fileSize: content.length,
+                            readOffset: 0,
+                            readEnd: content.length,
+                            chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+                            mode: 'full',
+                            encoding: 'utf-8',
+                            readOnly: false,
+                            truncated: false,
+                            loading: false,
+                            resetSearch: true
+                        });
+                        return;
                     }
-                    const data = await resp.json();
-                    if (!data.success) throw new Error(data.error || '读取失败');
-                    const content = data.content || '';
-                    previewCacheSet(server, path, 'text', content);
 
-
-                    const ta = document.querySelector('#editorModal textarea');
-                    if (ta) {
-                        ta.value = content;
-                        updateEditorLineNumbers();
-                        renderFindHighlights();
-                        syncEditorScroll();
-                        startEditorScrollSync();
-                    }
+                    await loadEditorFileChunk('auto', {
+                        server,
+                        path,
+                        title: name,
+                        chunkSize: EDITOR_LARGE_FILE_CHUNK_BYTES,
+                        resetSearch: true,
+                        placeholder: '正在加载文件内容...'
+                    });
                 } catch (e) {
                     addLogError('打开编辑器失败: ' + (e.message || e));
-
                     closeEditorModal();
                 }
             }
@@ -4643,7 +7769,9 @@
                     if (!server) return;
                     if (isImageFile(name)) {
                         previewImage(server, path, name, isSource);
-                    } else if (isTextEditable(name)) {
+                    } else if (isOnnxFile(name)) {
+                        openOnnxInNetron(server, path, name);
+                    } else {
                         editTextFile(server, path, name);
                     }
                 } catch (e) {
@@ -4654,7 +7782,7 @@
             function openImageModal(src, title) {
                 const modal = document.getElementById('imagePreviewModal');
                 if (!modal) return;
-                const img = modal.querySelector('img');
+                const img = getActivePreviewImage() || modal.querySelector('img');
                 if (img) img.src = src;
                 modal.style.display = 'block';
             }
@@ -4662,15 +7790,50 @@
                 const modal = document.getElementById('imagePreviewModal');
                 if (!modal) return;
                 modal.style.display = 'none';
-                const img = modal.querySelector('img');
-                if (img) img.removeAttribute('src');
+                imagePreviewRequestSeq++;
+                imageNavQueuedIndex = null;
+                if (imageNavTimer) {
+                    clearTimeout(imageNavTimer);
+                    imageNavTimer = 0;
+                }
+                if (imagePrefetchTimer) {
+                    clearTimeout(imagePrefetchTimer);
+                    imagePrefetchTimer = 0;
+                }
+                if (imagePreviewTransitionTimer) {
+                    clearTimeout(imagePreviewTransitionTimer);
+                    imagePreviewTransitionTimer = 0;
+                }
+                if (imagePreviewFetchController) {
+                    try { imagePreviewFetchController.abort(); } catch (_) {}
+                    imagePreviewFetchController = null;
+                }
+                const preview = getImagePreviewElements();
+                if (preview) {
+                    preview.layers.forEach((img, idx) => {
+                        resetPreviewLayer(img);
+                        if (idx === 0) {
+                            img.classList.add('is-active');
+                        }
+                    });
+                }
                 imageZoom = 1;
                 imageOffsetX = 0;
                 imageOffsetY = 0;
+                imagePreviewActiveLayerIndex = 0;
+                imagePreviewNavDirection = 1;
+                imagePreviewWheelAccumX = 0;
                 const caption = document.getElementById('imagePreviewCaption');
                 if (caption) caption.textContent = '';
                 ImageViewer.items = [];
                 ImageViewer.index = -1;
+                imagePreviewPrefetchImg = null;
+                try {
+                    const gridModal = document.getElementById('imageGridModal');
+                    if (gridModal && gridModal.style.display !== 'none') {
+                        resumeImageGridLoading(gridModal);
+                    }
+                } catch (_) {}
 	            }
 
 		            let imageGridObserver = null;
@@ -4679,9 +7842,12 @@
 		            let imageGridCols = IMAGE_GRID_COLS_DEFAULT;
 		            let imageGridColsControlsBound = false;
 		            let imageGridColsRaf = 0;
-            const IMAGE_GRID_MAX_PARALLEL = 16;
-            const IMAGE_GRID_MAX_PARALLEL_EAGER = 24;
-            const IMAGE_GRID_MAX_PARALLEL_BURST = 28;
+            const IMAGE_GRID_MAX_PARALLEL = 24;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER = 32;
+            const IMAGE_GRID_MAX_PARALLEL_BURST = 40;
+            const IMAGE_GRID_MAX_PARALLEL_WIN = 10;
+            const IMAGE_GRID_MAX_PARALLEL_EAGER_WIN = 12;
+            const IMAGE_GRID_MAX_PARALLEL_BURST_WIN = 16;
             const IMAGE_GRID_BURST_DURATION = 1200;
             const IMAGE_GRID_EAGER_SCROLL_RATIO = 0.12;
             const imageGridLoadQueue = [];
@@ -4696,7 +7862,7 @@
             let imageGridEagerQueued = false;
             let imageGridScrollBound = false;
             const IMAGE_GRID_VIRTUAL_THRESHOLD = 320;
-            const IMAGE_GRID_VIRTUAL_OVERSCAN = 6;
+            const IMAGE_GRID_VIRTUAL_OVERSCAN = 3;
             let imageGridItems = [];
             let imageGridVirtualEnabled = false;
             let imageGridRowHeight = 0;
@@ -4726,7 +7892,8 @@
 		                const colWidth = available / cols;
 		                const dpr = Math.min(IMAGE_DPR_CAP, window.devicePixelRatio || 1);
 		                const scaled = Math.round(colWidth * dpr);
-		                return clampNumber(scaled, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
+		                const quantized = quantizeNumber(scaled, IMAGE_GRID_THUMB_STEP);
+		                return clampNumber(quantized, IMAGE_GRID_THUMB_MIN, IMAGE_GRID_THUMB_MAX);
 		            }
 
             function scheduleImageGridThumbUpdate() {
@@ -4738,11 +7905,15 @@
             }
 
 		            function getImageGridParallelLimit() {
-		                if (imageGridBurstUntil && Date.now() < imageGridBurstUntil) {
-		                    return IMAGE_GRID_MAX_PARALLEL_BURST;
-		                }
-		                return imageGridEagerMode ? IMAGE_GRID_MAX_PARALLEL_EAGER : IMAGE_GRID_MAX_PARALLEL;
-		            }
+		                const isWin = imageGridActiveServer && isWindowsServer(imageGridActiveServer);
+		                const maxNormal = isWin ? IMAGE_GRID_MAX_PARALLEL_WIN : IMAGE_GRID_MAX_PARALLEL;
+		                const maxEager = isWin ? IMAGE_GRID_MAX_PARALLEL_EAGER_WIN : IMAGE_GRID_MAX_PARALLEL_EAGER;
+		                const maxBurst = isWin ? IMAGE_GRID_MAX_PARALLEL_BURST_WIN : IMAGE_GRID_MAX_PARALLEL_BURST;
+			                if (imageGridBurstUntil && Date.now() < imageGridBurstUntil) {
+			                    return maxBurst;
+			                }
+			                return imageGridEagerMode ? maxEager : maxNormal;
+			            }
 
 		            function normalizeImageGridCols(value) {
 		                const n = Number.parseInt(value, 10);
@@ -4973,6 +8144,10 @@
                 container.innerHTML = '';
                 container.appendChild(frag);
 
+                if (force) {
+                    activateImageGridBurstLoad();
+                }
+
                 if (!imageGridRowMeasured) {
                     imageGridRowMeasured = true;
                     requestAnimationFrame(() => {
@@ -5095,7 +8270,29 @@
 		                        }
 		                    })
 		                    .finally(() => {
+		                        if (task.imgEl) {
+		                            try { delete task.imgEl.dataset.loading; } catch (_) { task.imgEl.dataset.loading = '0'; }
+		                        }
 		                        imageGridLoadingCount = Math.max(0, imageGridLoadingCount - 1);
+		                        // Best-effort retry once for transient failures (SSH hiccups, temporary overload).
+		                        try {
+		                            if (task.imgEl && task.imgEl.isConnected && task.imgEl.dataset.loaded === 'err') {
+		                                const retryCount = Number.parseInt(task.imgEl.dataset.retry || '0', 10) || 0;
+		                                if (retryCount < 1) {
+		                                    task.imgEl.dataset.retry = String(retryCount + 1);
+		                                    const card = task.imgEl.closest && task.imgEl.closest('.image-grid-card');
+		                                    if (card) {
+		                                        const delay = 600 + Math.floor(Math.random() * 500);
+		                                        setTimeout(() => {
+		                                            if (!task.imgEl || !task.imgEl.isConnected) return;
+		                                            if (task.imgEl.dataset.loaded !== 'err') return;
+		                                            task.imgEl.dataset.loaded = '0';
+		                                            scheduleImageGridLoad(card, true);
+		                                        }, delay);
+		                                    }
+		                                }
+		                            }
+		                        } catch (_) {}
 		                        requestAnimationFrame(processImageGridQueue);
 		                    });
 		            }
@@ -5183,19 +8380,19 @@
 	                    entries.forEach(entry => {
 	                        if (!entry.isIntersecting) return;
 	                        const card = entry.target;
-	                        scheduleImageGridLoad(card);
+	                        scheduleImageGridLoad(card, true);
 	                        imageGridObserver && imageGridObserver.unobserve(card);
 	                    });
 	                }, {
 	                    root: rootEl || null,
-	                    rootMargin: '600px',
+	                    rootMargin: '400px',
 	                    threshold: 0.01
 	                });
 	            }
 
-	            function loadImageCardImmediately(card) {
-	                scheduleImageGridLoad(card);
-	            }
+		            function loadImageCardImmediately(card) {
+		                scheduleImageGridLoad(card, true);
+		            }
 
 	            function ensureImageGridScrollWatcher(modal) {
 	                if (imageGridScrollBound || !modal) return;
@@ -5306,6 +8503,13 @@
 
                 const ensureAndRender = async () => {
                     try {
+                        let burstKicked = false;
+                        const kickBurst = () => {
+                            if (burstKicked) return;
+                            burstKicked = true;
+                            requestAnimationFrame(() => activateImageGridBurstLoad());
+                        };
+
                         const initial = (state.fullItems || []).filter(it => it && !it.is_directory && isImageFile(it.name));
                         imageGridItems = initial.slice();
                         const switchedInitial = setImageGridVirtualEnabled(shouldUseImageGridVirtual(imageGridItems.length));
@@ -5316,6 +8520,7 @@
                             scheduleImageGridVirtualRender(true);
                         } else if (imageGridItems.length) {
                             appendImagesChunked(imageGridItems, server);
+                            kickBurst();
                         } else {
                             container.innerHTML = '<div class="image-grid-empty">加载中...</div>';
                         }
@@ -5324,12 +8529,12 @@
                         if (state.hasMore || state.fullHasMore || !state.fullItems) {
                             let localOffset = state.fullOffset || state.loadedCount || (state.offset || 0);
                             while (true) {
-                                const params = new URLSearchParams({
+                                const params = appendBrowseSortParams(new URLSearchParams({
                                     path: state.path,
                                     show_hidden: document.getElementById(isSource ? 'sourceShowHidden' : 'targetShowHidden').checked,
                                     offset: localOffset,
                                     limit: BROWSE_PAGE_SIZE_MAX
-                                });
+                                }), isSource);
                                 const resp = await fetch(`/api/browse/${server}?${params.toString()}`, { cache: 'no-cache' });
                                 const data = await resp.json();
                                 if (!data.success) break;
@@ -5347,6 +8552,7 @@
                                             container.innerHTML = '';
                                         }
                                         renderBatch(pageFiles, server);
+                                        kickBurst();
                                     }
                                 }
                                 state.fullItems = (state.fullItems || []).concat(data.files || []);
@@ -5440,11 +8646,54 @@
             }
 
             const EDITOR_THEME_KEY = 'turbofile_editor_theme';
+            const MONACO_BASE_PATH = '/static/vendor/monaco/min/vs';
+            const monacoEditorState = {
+                readyPromise: null,
+                monaco: null,
+                editor: null,
+                model: null,
+                suppressModelChange: false
+            };
+            const monacoDiffState = {
+                editor: null,
+                originalModel: null,
+                modifiedModel: null,
+                updateDisposable: null
+            };
+
+            function getEditorTitleElement() {
+                return document.getElementById('editorTitleText');
+            }
+
+            function getMonacoThemeName(mode) {
+                return mode === 'light' ? 'vs' : 'vs-dark';
+            }
+
+            function getEditorFontSize() {
+                return 17;
+            }
+
+            function getEditorLineHeight() {
+                return 20;
+            }
+
+            function getEditorFontFamily() {
+                return "Consolas, 'Courier New', monospace";
+            }
 
             function applyEditorTheme(mode) {
                 const modal = document.getElementById('editorModal');
                 if (!modal) return;
+                modal.style.setProperty('--editor-font', getEditorFontFamily());
+                modal.style.setProperty('--editor-font-size', `${getEditorFontSize()}px`);
+                modal.style.setProperty('--editor-line-height', `${getEditorLineHeight()}px`);
                 modal.classList.toggle('editor-theme-light', mode === 'light');
+                if (window.monaco && window.monaco.editor) {
+                    window.monaco.editor.setTheme(getMonacoThemeName(mode));
+                    if (typeof window.monaco.editor.remeasureFonts === 'function') {
+                        window.monaco.editor.remeasureFonts();
+                    }
+                }
             }
 
             function toggleEditorTheme() {
@@ -5454,30 +8703,645 @@
                 applyEditorTheme(next);
             }
 
-            function openEditorModal(server, path, title, content) {
+            function stopEditorFollowTail() {
+                editorViewState.followTail = false;
+                if (editorViewState.followTimer) {
+                    clearInterval(editorViewState.followTimer);
+                    editorViewState.followTimer = 0;
+                }
+                updateEditorStatusBar();
+            }
+
+            function startEditorFollowTail() {
+                stopEditorFollowTail();
+            }
+
+            function toggleEditorFollowTail() {
+                stopEditorFollowTail();
+            }
+
+            function updateEditorStatusBar() {
+                const bar = document.getElementById('editorStatusBar');
+                const saveBtn = document.getElementById('editorSaveBtn');
+                const replaceToggleBtn = document.getElementById('editorReplaceToggleBtn');
+                const findToggleBtn = document.getElementById('editorFindToggleBtn');
+                const headBtn = document.getElementById('editorHeadBtn');
+                const prevBtn = document.getElementById('editorPrevBtn');
+                const nextBtn = document.getElementById('editorNextBtn');
+                const tailBtn = document.getElementById('editorTailBtn');
+                const followBtn = document.getElementById('editorFollowBtn');
+
+                if (bar) {
+                    bar.style.display = 'none';
+                }
+
+                if (saveBtn) saveBtn.disabled = !!editorViewState.loading;
+                if (replaceToggleBtn) replaceToggleBtn.disabled = !!editorViewState.loading;
+                if (findToggleBtn) findToggleBtn.disabled = !!(editorViewState.loading && !editorViewState.lastContent);
+
+                [headBtn, prevBtn, nextBtn, tailBtn, followBtn].forEach(btn => {
+                    if (!btn) return;
+                    btn.style.display = 'none';
+                });
+
+                if (headBtn) headBtn.disabled = true;
+                if (prevBtn) prevBtn.disabled = true;
+                if (nextBtn) nextBtn.disabled = true;
+                if (tailBtn) tailBtn.disabled = true;
+                if (followBtn) {
+                    followBtn.disabled = true;
+                    followBtn.textContent = '自动追尾';
+                }
+            }
+
+            function detectMonacoLanguage(path = '', title = '') {
+                const target = String(path || title || '').replace(/\\/g, '/');
+                const base = target.split('/').pop() || '';
+                const lower = base.toLowerCase();
+                if (lower === 'dockerfile') return 'dockerfile';
+                if (lower === '.gitignore' || lower === '.dockerignore') return 'plaintext';
+                const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '';
+                const languageMap = {
+                    txt: 'plaintext',
+                    log: 'plaintext',
+                    text: 'plaintext',
+                    sh: 'shell',
+                    bash: 'shell',
+                    zsh: 'shell',
+                    fish: 'shell',
+                    ps1: 'powershell',
+                    bat: 'bat',
+                    cmd: 'bat',
+                    py: 'python',
+                    pyi: 'python',
+                    json: 'json',
+                    jsonl: 'json',
+                    xml: 'xml',
+                    html: 'html',
+                    htm: 'html',
+                    css: 'css',
+                    scss: 'scss',
+                    less: 'less',
+                    js: 'javascript',
+                    cjs: 'javascript',
+                    mjs: 'javascript',
+                    jsx: 'javascript',
+                    ts: 'typescript',
+                    tsx: 'typescript',
+                    md: 'markdown',
+                    markdown: 'markdown',
+                    yaml: 'yaml',
+                    yml: 'yaml',
+                    ini: 'ini',
+                    cfg: 'ini',
+                    conf: 'ini',
+                    toml: 'ini',
+                    sql: 'sql',
+                    php: 'php',
+                    java: 'java',
+                    c: 'c',
+                    cc: 'cpp',
+                    cpp: 'cpp',
+                    cxx: 'cpp',
+                    h: 'cpp',
+                    hpp: 'cpp',
+                    go: 'go',
+                    rs: 'rust',
+                    lua: 'lua'
+                };
+                return languageMap[ext] || 'plaintext';
+            }
+
+            function buildEditorModelUri(server, path) {
+                const monaco = monacoEditorState.monaco || window.monaco;
+                if (!monaco) return null;
+                const normalizedPath = String(path || '').replace(/\\/g, '/');
+                const fullPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+                return monaco.Uri.from({
+                    scheme: 'file',
+                    authority: String(server || 'local'),
+                    path: fullPath
+                });
+            }
+
+            function buildDiffModelUri(server, path, side) {
+                const monaco = monacoEditorState.monaco || window.monaco;
+                if (!monaco) return null;
+                const normalizedPath = String(path || '').replace(/\\/g, '/');
+                const fullPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+                return monaco.Uri.from({
+                    scheme: 'file',
+                    authority: String(server || 'local'),
+                    path: fullPath,
+                    query: `diffSide=${encodeURIComponent(String(side || 'modified'))}`
+                });
+            }
+
+            function disposeEditorModel() {
+                if (monacoEditorState.model) {
+                    try { monacoEditorState.model.dispose(); } catch (_) {}
+                    monacoEditorState.model = null;
+                }
+            }
+
+            function disposeDiffModels() {
+                if (monacoDiffState.originalModel) {
+                    try { monacoDiffState.originalModel.dispose(); } catch (_) {}
+                    monacoDiffState.originalModel = null;
+                }
+                if (monacoDiffState.modifiedModel) {
+                    try { monacoDiffState.modifiedModel.dispose(); } catch (_) {}
+                    monacoDiffState.modifiedModel = null;
+                }
+            }
+
+            function disposeDiffUpdateSubscription() {
+                if (monacoDiffState.updateDisposable) {
+                    try { monacoDiffState.updateDisposable.dispose(); } catch (_) {}
+                    monacoDiffState.updateDisposable = null;
+                }
+            }
+
+            function countDiffSpan(startLine, endLine) {
+                if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return 0;
+                if (startLine <= 0 || endLine <= 0) return 0;
+                return Math.max(0, endLine - startLine + 1);
+            }
+
+            function renderMonacoDiffSummary(meta = {}) {
+                const summary = document.getElementById('diffSummary');
+                if (!summary) return;
+                const leftEncoding = meta.leftEncoding || '';
+                const rightEncoding = meta.rightEncoding || '';
+                const insertCount = Number.isFinite(meta.insertCount) ? meta.insertCount : 0;
+                const deleteCount = Number.isFinite(meta.deleteCount) ? meta.deleteCount : 0;
+                const modifyCount = Number.isFinite(meta.modifyCount) ? meta.modifyCount : 0;
+                const parts = [];
+                if (leftEncoding || rightEncoding) {
+                    parts.push(`左 ${leftEncoding || '-'} / 右 ${rightEncoding || '-'}`);
+                }
+                parts.push(`新增 ${insertCount}`);
+                parts.push(`删除 ${deleteCount}`);
+                parts.push(`修改 ${modifyCount}`);
+                summary.textContent = parts.join('，');
+            }
+
+            function updateMonacoDiffSummary(meta = {}) {
+                const editor = monacoDiffState.editor;
+                if (!editor || typeof editor.getLineChanges !== 'function') {
+                    renderMonacoDiffSummary(meta);
+                    return;
+                }
+                const lineChanges = editor.getLineChanges() || [];
+                let insertCount = 0;
+                let deleteCount = 0;
+                let modifyCount = 0;
+                lineChanges.forEach((change) => {
+                    const originalCount = countDiffSpan(change.originalStartLineNumber, change.originalEndLineNumber);
+                    const modifiedCount = countDiffSpan(change.modifiedStartLineNumber, change.modifiedEndLineNumber);
+                    if (!originalCount && modifiedCount) {
+                        insertCount += modifiedCount;
+                    } else if (originalCount && !modifiedCount) {
+                        deleteCount += originalCount;
+                    } else {
+                        modifyCount += Math.max(originalCount, modifiedCount);
+                    }
+                });
+                renderMonacoDiffSummary({
+                    leftEncoding: meta.leftEncoding,
+                    rightEncoding: meta.rightEncoding,
+                    insertCount,
+                    deleteCount,
+                    modifyCount
+                });
+            }
+
+            function getEditorContent() {
+                if (monacoEditorState.model) return monacoEditorState.model.getValue();
+                return editorViewState.lastContent || '';
+            }
+
+            function revealEditorTail() {
+                if (!monacoEditorState.editor || !monacoEditorState.model) return;
+                const lastLine = Math.max(1, monacoEditorState.model.getLineCount());
+                monacoEditorState.editor.setPosition({
+                    lineNumber: lastLine,
+                    column: monacoEditorState.model.getLineMaxColumn(lastLine)
+                });
+                monacoEditorState.editor.revealLineNearTop(lastLine);
+            }
+
+            function resetEditorViewport() {
+                if (!monacoEditorState.editor) return;
+                monacoEditorState.editor.setScrollTop(0);
+                monacoEditorState.editor.setScrollLeft(0);
+                monacoEditorState.editor.setPosition({ lineNumber: 1, column: 1 });
+            }
+
+            function ensureMonacoEditorReady() {
+                if (monacoEditorState.readyPromise) {
+                    return monacoEditorState.readyPromise;
+                }
+
+                monacoEditorState.readyPromise = new Promise((resolve, reject) => {
+                    if (window.monaco && window.monaco.editor) {
+                        monacoEditorState.monaco = window.monaco;
+                        resolve(window.monaco);
+                        return;
+                    }
+                    if (typeof window.require !== 'function') {
+                        reject(new Error('Monaco loader 未加载'));
+                        return;
+                    }
+
+                    window.MonacoEnvironment = window.MonacoEnvironment || {};
+                    window.MonacoEnvironment.baseUrl = '/static/vendor/monaco/min/';
+                    window.require.config({ paths: { vs: MONACO_BASE_PATH } });
+                    window.require(['vs/editor/editor.main'], () => {
+                        monacoEditorState.monaco = window.monaco;
+                        resolve(window.monaco);
+                    }, (err) => {
+                        monacoEditorState.readyPromise = null;
+                        reject(err);
+                    });
+                });
+
+                return monacoEditorState.readyPromise;
+            }
+
+            async function ensureEditorInstance() {
+                const monaco = await ensureMonacoEditorReady();
+                if (monacoEditorState.editor) return monacoEditorState.editor;
+                const container = document.getElementById('editorMonacoContainer');
+                if (!container) throw new Error('编辑器容器不存在');
+
+                const themeMode = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                monaco.editor.setTheme(getMonacoThemeName(themeMode));
+                monacoEditorState.editor = monaco.editor.create(container, {
+                    value: '',
+                    language: 'plaintext',
+                    theme: getMonacoThemeName(themeMode),
+                    automaticLayout: true,
+                    readOnly: false,
+                    fontFamily: getEditorFontFamily(),
+                    fontSize: getEditorFontSize(),
+                    fontWeight: '400',
+                    lineHeight: getEditorLineHeight(),
+                    fontLigatures: false,
+                    allowVariableFonts: false,
+                    disableLayerHinting: true,
+                    disableMonospaceOptimizations: true,
+                    letterSpacing: 0,
+                    minimap: { enabled: true },
+                    scrollBeyondLastLine: false,
+                    scrollBeyondLastColumn: 6,
+                    smoothScrolling: true,
+                    wordWrap: 'off',
+                    scrollbar: {
+                        horizontal: 'auto',
+                        vertical: 'auto',
+                        alwaysConsumeMouseWheel: false
+                    },
+                    bracketPairColorization: { enabled: true },
+                    guides: {
+                        bracketPairs: true,
+                        indentation: true
+                    },
+                    renderWhitespace: 'selection',
+                    renderLineHighlight: 'line',
+                    selectionHighlight: true,
+                    occurrencesHighlight: 'singleFile',
+                    tabSize: 4,
+                    insertSpaces: true,
+                    padding: {
+                        top: 12,
+                        bottom: 12
+                    },
+                    stickyScroll: {
+                        enabled: true
+                    }
+                });
+                monacoEditorState.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+                    saveEditorContent();
+                });
+                monacoEditorState.editor.onDidChangeModelContent(() => {
+                    if (monacoEditorState.suppressModelChange) return;
+                    editorViewState.lastContent = getEditorContent();
+                });
+                return monacoEditorState.editor;
+            }
+
+            async function ensureDiffEditorInstance() {
+                const monaco = await ensureMonacoEditorReady();
+                if (monacoDiffState.editor) return monacoDiffState.editor;
+                const container = document.getElementById('diffMonacoContainer');
+                if (!container) throw new Error('Diff 编辑器容器不存在');
+
+                const themeMode = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                monaco.editor.setTheme(getMonacoThemeName(themeMode));
+                monacoDiffState.editor = monaco.editor.createDiffEditor(container, {
+                    automaticLayout: true,
+                    readOnly: true,
+                    originalEditable: false,
+                    renderSideBySide: true,
+                    useInlineViewWhenSpaceIsLimited: true,
+                    minimap: { enabled: false },
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    fontFamily: getEditorFontFamily(),
+                    fontSize: getEditorFontSize(),
+                    lineHeight: getEditorLineHeight(),
+                    fontLigatures: false,
+                    renderOverviewRuler: true,
+                    diffWordWrap: 'off',
+                    wordWrap: 'off'
+                });
+                return monacoDiffState.editor;
+            }
+
+            function openEditorModal(server, path, title, content, options = {}) {
                 const modal = document.getElementById('editorModal');
+                if (!modal) return;
+                const titleEl = getEditorTitleElement();
                 const savedTheme = localStorage.getItem(EDITOR_THEME_KEY) || 'dark';
+                const renderToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                editorViewState.renderToken = renderToken;
                 applyEditorTheme(savedTheme);
-                modal.querySelector('.modal-title').textContent = title;
-                const ta = modal.querySelector('#editorTextarea');
-                ta.value = content;
-                ta.dataset.server = server;
-                ta.dataset.path = path;
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                if (findInput) findInput.value = '';
-                if (replaceInput) replaceInput.value = '';
-                const countEl = document.getElementById('findCount');
-                if (countEl) countEl.textContent = '';
-                syncMinimap();
-                updateEditorLineNumbers();
-                renderFindHighlights();
-                syncEditorScroll();
+                if (titleEl) titleEl.textContent = title;
+
+                editorViewState.server = server;
+                editorViewState.path = path;
+                editorViewState.title = title;
+                editorViewState.fileSize = Number.isFinite(Number(options.fileSize)) ? Number(options.fileSize) : editorViewState.fileSize;
+                editorViewState.readOffset = Number.isFinite(Number(options.readOffset)) ? Number(options.readOffset) : 0;
+                editorViewState.readEnd = Number.isFinite(Number(options.readEnd)) ? Number(options.readEnd) : editorViewState.fileSize;
+                editorViewState.chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : editorViewState.chunkSize;
+                editorViewState.mode = options.mode || 'full';
+                editorViewState.encoding = options.encoding || 'utf-8';
+                editorViewState.binary = !!options.binary;
+                editorViewState.readOnly = !!options.readOnly;
+                editorViewState.truncated = !!options.truncated;
+                editorViewState.loading = !!options.loading;
+                editorViewState.lastContent = options.loading ? '' : (typeof content === 'string' ? content : '');
+                stopEditorFollowTail();
+
+                updateEditorStatusBar();
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
-                hideFindReplace();
-                startEditorScrollSync();
-                ta.focus();
+
+                ensureEditorInstance().then((editor) => {
+                    if (editorViewState.renderToken !== renderToken) return;
+                    const monaco = monacoEditorState.monaco || window.monaco;
+                    if (!monaco) throw new Error('Monaco 初始化失败');
+
+                    monacoEditorState.suppressModelChange = true;
+                    disposeEditorModel();
+                    const uri = buildEditorModelUri(server, path);
+                    const language = detectMonacoLanguage(path, title);
+                    monacoEditorState.model = monaco.editor.createModel(
+                        typeof content === 'string' ? content : '',
+                        language,
+                        uri || undefined
+                    );
+                    editor.setModel(monacoEditorState.model);
+                    editor.updateOptions({
+                        readOnly: !!options.readOnly,
+                        fontFamily: getEditorFontFamily(),
+                        fontSize: getEditorFontSize(),
+                        fontWeight: '400',
+                        lineHeight: getEditorLineHeight(),
+                        fontLigatures: false,
+                        allowVariableFonts: false,
+                        disableLayerHinting: true,
+                        disableMonospaceOptimizations: true,
+                        letterSpacing: 0,
+                        wordWrap: 'off',
+                        scrollBeyondLastColumn: 6,
+                        scrollbar: {
+                            horizontal: 'auto',
+                            vertical: 'auto',
+                            alwaysConsumeMouseWheel: false
+                        }
+                    });
+                    if (monaco && monaco.editor && typeof monaco.editor.remeasureFonts === 'function') {
+                        monaco.editor.remeasureFonts();
+                    }
+                    monacoEditorState.suppressModelChange = false;
+                    resetEditorViewport();
+
+                    requestAnimationFrame(() => {
+                        try { editor.layout(); } catch (_) {}
+                        editor.focus();
+                    });
+                }).catch((e) => {
+                    addLogError('Monaco 初始化失败: ' + (e.message || e));
+                });
+            }
+
+            async function loadEditorFileChunk(action = 'auto', options = {}) {
+                const server = options.server || editorViewState.server;
+                const path = options.path || editorViewState.path;
+                const title = options.title || editorViewState.title || '文本编辑器';
+                if (!server || !path) return;
+
+                const isNewFile = server !== editorViewState.server || path !== editorViewState.path;
+                const modal = document.getElementById('editorModal');
+                const silent = typeof options.silent === 'boolean'
+                    ? options.silent
+                    : !!(modal && modal.style.display !== 'none' && !isNewFile);
+                stopEditorFollowTail();
+
+                if (isNewFile) {
+                    editorViewState.fileSize = 0;
+                    editorViewState.readOffset = 0;
+                    editorViewState.readEnd = 0;
+                    editorViewState.mode = 'full';
+                    editorViewState.encoding = 'utf-8';
+                    editorViewState.binary = false;
+                    editorViewState.truncated = false;
+                    editorViewState.lastContent = '';
+                }
+
+                const requestToken = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                editorViewState.requestToken = requestToken;
+                editorViewState.loading = true;
+                updateEditorStatusBar();
+
+                if (!silent) {
+                    openEditorModal(server, path, title, options.placeholder || '正在加载...', {
+                        fileSize: editorViewState.fileSize || 0,
+                        readOffset: editorViewState.readOffset || 0,
+                        readEnd: editorViewState.readEnd || 0,
+                        chunkSize: editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES,
+                        mode: editorViewState.mode || 'full',
+                        encoding: editorViewState.encoding || 'utf-8',
+                        readOnly: false,
+                        truncated: false,
+                        loading: true
+                    });
+                }
+
+                try {
+                    const url = new URL('/api/file/read', window.location.origin);
+                    url.searchParams.set('server', server);
+                    url.searchParams.set('path', path);
+
+                    const resp = await fetch(url.toString(), { cache: 'no-store' });
+                    if (!resp.ok) {
+                        let msg = '';
+                        try { msg = await resp.text(); } catch (_) {}
+                        throw new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
+                    }
+                    const data = await resp.json();
+                    if (!data.success) throw new Error(data.error || '读取失败');
+                    if (editorViewState.requestToken !== requestToken) return;
+
+                    const content = data.content || '';
+                    editorViewState.loading = false;
+
+                    previewCacheSet(server, path, 'text', content);
+
+                    openEditorModal(server, path, title, content, {
+                        fileSize: Number(data.file_size) || 0,
+                        readOffset: Number(data.read_offset) || 0,
+                        readEnd: Number(data.read_end) || 0,
+                        chunkSize: Number(data.chunk_size) || (editorViewState.chunkSize || EDITOR_LARGE_FILE_CHUNK_BYTES),
+                        mode: 'full',
+                        encoding: data.encoding || 'utf-8',
+                        binary: false,
+                        readOnly: false,
+                        truncated: false,
+                        loading: false
+                    });
+                } catch (e) {
+                    if (editorViewState.requestToken === requestToken) {
+                        editorViewState.loading = false;
+                        updateEditorStatusBar();
+                    }
+                    if (!silent) {
+                        addLogError('打开编辑器失败: ' + (e.message || e));
+                        closeEditorModal();
+                    }
+                }
+            }
+
+            function closeEditorModal() {
+                const modal = document.getElementById('editorModal');
+                if (modal) modal.style.display = 'none';
+                document.body.style.overflow = '';
+                stopEditorFollowTail();
+                editorViewState.loading = false;
+                editorViewState.binary = false;
+                editorViewState.requestToken = '';
+                editorViewState.renderToken = '';
+                if (monacoEditorState.editor) {
+                    try { monacoEditorState.editor.setModel(null); } catch (_) {}
+                }
+                disposeEditorModel();
+            }
+
+            async function saveEditorContent() {
+                const server = editorViewState.server;
+                const path = editorViewState.path;
+                const encoding = editorViewState.encoding || 'utf-8';
+                const content = getEditorContent();
+                try {
+                    const resp = await fetch('/api/file/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ server, path, content, encoding })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        addLogInfo('💾 已保存: ' + path);
+                        previewCacheSet(server, path, 'text', content);
+                        editorViewState.lastContent = content;
+                        showToast('✅ 已保存', 'success');
+                    } else {
+                        addLogError('保存失败: ' + (data.error || '未知错误'));
+                        showActionFailureToast('保存失败', data);
+                    }
+                } catch (e) {
+                    addLogError('保存失败: ' + (e.message || e));
+                    showActionFailureToast('保存异常', e.message || e);
+                }
+            }
+
+            function showFindReplace(withReplace) {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                editor.focus();
+                const actionId = withReplace && !editorViewState.readOnly
+                    ? 'editor.action.startFindReplaceAction'
+                    : 'actions.find';
+                const action = editor.getAction(actionId);
+                if (action) action.run();
+            }
+
+            function hideFindReplace() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                try {
+                    editor.trigger('keyboard', 'closeFindWidget', null);
+                } catch (_) {}
+            }
+
+            function findNext() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                const action = editor.getAction('editor.action.nextMatchFindAction');
+                if (action) action.run();
+            }
+
+            function findPrev() {
+                const editor = monacoEditorState.editor;
+                if (!editor) return;
+                const action = editor.getAction('editor.action.previousMatchFindAction');
+                if (action) action.run();
+            }
+
+            function replaceOne() {
+                showFindReplace(true);
+            }
+
+            function replaceAll() {
+                showFindReplace(true);
+            }
+
+            function syncMinimap() {}
+            function syncMinimapHighlight() {}
+            function startEditorScrollSync() {}
+            function stopEditorScrollSync() {}
+            function updateEditorLineNumbers() {}
+            function syncEditorScroll() {}
+            function renderFindHighlights() {}
+
+            let previewEditorBindingsReady = false;
+            function bindPreviewAndEditorEvents() {
+                if (previewEditorBindingsReady) return;
+                previewEditorBindingsReady = true;
+
+                const btn = document.getElementById('imagePreviewCloseBtn');
+                if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
+                const prevBtn = document.getElementById('imagePrevBtn');
+                const nextBtn = document.getElementById('imageNextBtn');
+                if (prevBtn) prevBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index - 1));
+                if (nextBtn) nextBtn.addEventListener('click', () => requestShowImageAt(ImageViewer.index + 1));
+
+                document.addEventListener('keydown', (e) => {
+                    const modalVisible = document.getElementById('editorModal') && document.getElementById('editorModal').style.display !== 'none';
+                    if (!modalVisible) return;
+                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                        e.preventDefault();
+                        saveEditorContent();
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+                        e.preventDefault();
+                        showFindReplace(false);
+                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+                        e.preventDefault();
+                        showFindReplace(true);
+                    }
+                });
             }
 
             function compareFromSelection() {
@@ -5523,415 +9387,369 @@
                     const data = await resp.json();
                     if (!data.success) {
                         addLogError(`❌ 对比失败: ${data.error || '未知错误'}`);
+                        showActionFailureToast('对比失败', data);
                         return;
                     }
-                    showDiffModal(data.lines || [], left, right);
+                    showDiffModal(data, left, right);
                 } catch (e) {
                     addLogError(`❌ 对比异常: ${e.message || e}`);
+                    showActionFailureToast('对比异常', e.message || e);
                 }
             }
 
-            function showDiffModal(lines, leftMeta, rightMeta) {
+            function showDiffModal(diffData, leftMeta, rightMeta) {
                 const modal = document.getElementById('diffModal');
-                const rows = document.getElementById('diffRows');
                 const leftPath = document.getElementById('diffLeftPath');
                 const rightPath = document.getElementById('diffRightPath');
-                const summary = document.getElementById('diffSummary');
-                if (!modal || !rows) return;
+                if (!modal) return;
 
-                rows.innerHTML = '';
                 leftPath.textContent = leftMeta ? `${leftMeta.name} (${leftMeta.server})` : '';
                 rightPath.textContent = rightMeta ? `${rightMeta.name} (${rightMeta.server})` : '';
-
-                let addCount = 0, delCount = 0, repCount = 0;
-                (lines || []).forEach(line => {
-                    const tag = line.tag || 'equal';
-                    if (tag === 'insert') addCount++;
-                    else if (tag === 'delete') delCount++;
-                    else if (tag === 'replace') repCount++;
-
-                    const pair = document.createElement('div');
-                    pair.className = 'diff-line';
-                    pair.classList.add(tag);
-
-                    const leftSide = document.createElement('div');
-                    leftSide.className = 'diff-side left';
-                    const lno = document.createElement('div');
-                    lno.className = 'diff-lineno';
-                    lno.textContent = line.left_no ? line.left_no : '';
-                    const lcode = document.createElement('div');
-                    lcode.className = 'diff-code';
-                    lcode.textContent = (line.left ?? '');
-                    leftSide.appendChild(lno);
-                    leftSide.appendChild(lcode);
-
-                    const rightSide = document.createElement('div');
-                    rightSide.className = 'diff-side right';
-                    const rno = document.createElement('div');
-                    rno.className = 'diff-lineno';
-                    rno.textContent = line.right_no ? line.right_no : '';
-                    const rcode = document.createElement('div');
-                    rcode.className = 'diff-code';
-                    rcode.textContent = (line.right ?? '');
-                    rightSide.appendChild(rno);
-                    rightSide.appendChild(rcode);
-
-                    pair.appendChild(leftSide);
-                    pair.appendChild(rightSide);
-                    rows.appendChild(pair);
+                renderMonacoDiffSummary({
+                    leftEncoding: diffData && diffData.left_encoding,
+                    rightEncoding: diffData && diffData.right_encoding
                 });
-
-                if (summary) {
-                    summary.textContent = `新增 ${addCount}，删除 ${delCount}，修改 ${repCount}`;
-                }
-
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
+
+                ensureDiffEditorInstance().then((editor) => {
+                    const monaco = monacoEditorState.monaco || window.monaco;
+                    if (!monaco) throw new Error('Monaco 初始化失败');
+
+                    disposeDiffUpdateSubscription();
+                    disposeDiffModels();
+
+                    const leftContent = (diffData && typeof diffData.left_content === 'string') ? diffData.left_content : '';
+                    const rightContent = (diffData && typeof diffData.right_content === 'string') ? diffData.right_content : '';
+                    const originalLanguage = detectMonacoLanguage(leftMeta && leftMeta.path, leftMeta && leftMeta.name);
+                    const modifiedLanguage = detectMonacoLanguage(rightMeta && rightMeta.path, rightMeta && rightMeta.name);
+                    monacoDiffState.originalModel = monaco.editor.createModel(
+                        leftContent,
+                        originalLanguage,
+                        buildDiffModelUri(leftMeta && leftMeta.server, leftMeta && leftMeta.path, 'original') || undefined
+                    );
+                    monacoDiffState.modifiedModel = monaco.editor.createModel(
+                        rightContent,
+                        modifiedLanguage,
+                        buildDiffModelUri(rightMeta && rightMeta.server, rightMeta && rightMeta.path, 'modified') || undefined
+                    );
+                    editor.setModel({
+                        original: monacoDiffState.originalModel,
+                        modified: monacoDiffState.modifiedModel
+                    });
+                    editor.updateOptions({
+                        fontFamily: getEditorFontFamily(),
+                        fontSize: getEditorFontSize(),
+                        lineHeight: getEditorLineHeight()
+                    });
+                    monacoDiffState.updateDisposable = editor.onDidUpdateDiff(() => {
+                        updateMonacoDiffSummary({
+                            leftEncoding: diffData && diffData.left_encoding,
+                            rightEncoding: diffData && diffData.right_encoding
+                        });
+                    });
+                    requestAnimationFrame(() => {
+                        try { editor.layout(); } catch (_) {}
+                        updateMonacoDiffSummary({
+                            leftEncoding: diffData && diffData.left_encoding,
+                            rightEncoding: diffData && diffData.right_encoding
+                        });
+                        editor.focus();
+                    });
+                }).catch((e) => {
+                    addLogError(`❌ Diff 编辑器初始化失败: ${e.message || e}`);
+                });
             }
 
             function closeDiffModal() {
                 const modal = document.getElementById('diffModal');
-                const rows = document.getElementById('diffRows');
                 if (modal) modal.style.display = 'none';
-                if (rows) rows.innerHTML = '';
+                disposeDiffUpdateSubscription();
+                if (monacoDiffState.editor) {
+                    try { monacoDiffState.editor.setModel(null); } catch (_) {}
+                }
+                disposeDiffModels();
+                renderMonacoDiffSummary({});
                 document.body.style.overflow = '';
             }
 
             function setupImageWheelZoom() {
                 const modal = document.getElementById('imagePreviewModal');
-                const img = modal ? modal.querySelector('img') : null;
-                if (!modal || !img) return;
-                let dragging = false;
-                let startX = 0;
-                let startY = 0;
-                let lastX = 0;
-                let lastY = 0;
-                let rafPending = false;
+                if (!modal) return;
+                const viewport = modal.querySelector('.image-preview-viewport');
+                if (!viewport) return;
+                const gesture = {
+                    pointers: new Map(),
+                    primaryPointerId: null,
+                    mode: 'idle',
+                    startClientX: 0,
+                    startClientY: 0,
+                    startOffsetX: 0,
+                    startOffsetY: 0,
+                    startZoom: IMAGE_PREVIEW_MIN_ZOOM,
+                    lastSwipeShiftX: 0,
+                    pinchStartDistance: 0,
+                    pinchAnchor: null
+                };
+                let lastTapAt = 0;
+                let lastTapX = 0;
+                let lastTapY = 0;
+
+                const updateActiveImageTransform = () => {
+                    const img = getActivePreviewImage();
+                    if (!img) return;
+                    applyImageTransform(img);
+                };
+
+                const setInteractionState = (isInteracting) => {
+                    const img = getActivePreviewImage();
+                    if (!img) return;
+                    img.classList.toggle('is-interacting', Boolean(isInteracting));
+                };
+
+                const beginSinglePointerGesture = (point) => {
+                    if (!point) return;
+                    const activeImg = getActivePreviewImage();
+                    gesture.primaryPointerId = point.pointerId;
+                    gesture.startClientX = point.clientX;
+                    gesture.startClientY = point.clientY;
+                    gesture.startOffsetX = imageOffsetX;
+                    gesture.startOffsetY = imageOffsetY;
+                    gesture.startZoom = imageZoom;
+                    gesture.lastSwipeShiftX = 0;
+                    gesture.mode = (imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.02 && ImageViewer.items.length > 1) ? 'swipe' : 'pan';
+                    if (activeImg) {
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                    }
+                    setInteractionState(true);
+                };
+
+                const beginPinchGesture = () => {
+                    const points = Array.from(gesture.pointers.values());
+                    if (points.length < 2) return;
+                    const [a, b] = points;
+                    const centerX = (a.clientX + b.clientX) / 2;
+                    const centerY = (a.clientY + b.clientY) / 2;
+                    const activeImg = getActivePreviewImage();
+                    gesture.mode = 'pinch';
+                    gesture.primaryPointerId = null;
+                    gesture.startZoom = imageZoom;
+                    gesture.startOffsetX = imageOffsetX;
+                    gesture.startOffsetY = imageOffsetY;
+                    gesture.pinchStartDistance = Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY));
+                    gesture.pinchAnchor = activeImg
+                        ? getPreviewContentPointAtClient(centerX, centerY, activeImg, imageZoom, imageOffsetX, imageOffsetY)
+                        : null;
+                    if (activeImg) {
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                    }
+                    setInteractionState(true);
+                };
+
+                const updateSwipeGesture = (point) => {
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg) return;
+                    const deltaX = point.clientX - gesture.startClientX;
+                    const deltaY = point.clientY - gesture.startClientY;
+                    if (Math.abs(deltaY) > Math.abs(deltaX) * 1.2) {
+                        gesture.lastSwipeShiftX = 0;
+                        activeImg.style.setProperty('--preview-shift-x', '0px');
+                        return;
+                    }
+                    gesture.lastSwipeShiftX = deltaX;
+                    activeImg.style.setProperty('--preview-shift-x', `${deltaX}px`);
+                };
+
+                const updatePanGesture = (point) => {
+                    imageOffsetX = gesture.startOffsetX + (point.clientX - gesture.startClientX);
+                    imageOffsetY = gesture.startOffsetY + (point.clientY - gesture.startClientY);
+                    updateActiveImageTransform();
+                };
+
+                const updatePinchGesture = () => {
+                    const points = Array.from(gesture.pointers.values());
+                    const activeImg = getActivePreviewImage();
+                    if (points.length < 2 || !activeImg) return;
+                    const [a, b] = points;
+                    const centerX = (a.clientX + b.clientX) / 2;
+                    const centerY = (a.clientY + b.clientY) / 2;
+                    const distance = Math.max(1, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY));
+                    const nextZoom = clampImagePreviewZoom(gesture.startZoom * (distance / Math.max(1, gesture.pinchStartDistance)));
+                    const metrics = getImagePreviewMetrics(activeImg, nextZoom);
+                    imageZoom = nextZoom;
+                    if (gesture.pinchAnchor && metrics) {
+                        const viewportCenterX = metrics.viewportRect.left + metrics.viewportWidth / 2;
+                        const viewportCenterY = metrics.viewportRect.top + metrics.viewportHeight / 2;
+                        imageOffsetX = centerX - viewportCenterX - gesture.pinchAnchor.x * nextZoom;
+                        imageOffsetY = centerY - viewportCenterY - gesture.pinchAnchor.y * nextZoom;
+                    } else {
+                        imageOffsetX = gesture.startOffsetX;
+                        imageOffsetY = gesture.startOffsetY;
+                    }
+                    updateActiveImageTransform();
+                };
+
+                const finishPanOrPinchGesture = () => {
+                    setInteractionState(false);
+                    updateActiveImageTransform();
+                };
+
+                const finishSwipeGesture = () => {
+                    const activeImg = getActivePreviewImage();
+                    setInteractionState(false);
+                    if (!activeImg) return;
+                    const metrics = getImagePreviewMetrics(activeImg, imageZoom);
+                    const threshold = Math.max(80, (metrics ? metrics.viewportWidth : 760) * 0.12);
+                    const shiftX = gesture.lastSwipeShiftX;
+                    activeImg.style.setProperty('--preview-shift-x', '0px');
+                    gesture.lastSwipeShiftX = 0;
+                    if (Math.abs(shiftX) >= threshold) {
+                        requestShowImageAt(ImageViewer.index + (shiftX < 0 ? 1 : -1));
+                    }
+                };
+
+                const startFollowUpGestureFromRemainingPointer = () => {
+                    const remainingPointers = Array.from(gesture.pointers.values());
+                    if (remainingPointers.length !== 1) {
+                        gesture.mode = 'idle';
+                        gesture.primaryPointerId = null;
+                        return;
+                    }
+                    beginSinglePointerGesture(remainingPointers[0]);
+                };
+
+                const maybeHandleTouchDoubleTap = (e) => {
+                    if (e.pointerType !== 'touch') return false;
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg || activeImg.dataset.loaded !== '1') return false;
+                    const movedDistance = Math.hypot(e.clientX - gesture.startClientX, e.clientY - gesture.startClientY);
+                    if (movedDistance > 16) {
+                        lastTapAt = 0;
+                        return false;
+                    }
+                    const now = Date.now();
+                    const isDoubleTap = (now - lastTapAt) < 320
+                        && Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < 24;
+                    lastTapAt = now;
+                    lastTapX = e.clientX;
+                    lastTapY = e.clientY;
+                    if (!isDoubleTap) return false;
+                    const targetZoom = imageZoom > IMAGE_PREVIEW_MIN_ZOOM + 0.02
+                        ? IMAGE_PREVIEW_MIN_ZOOM
+                        : getImagePreviewSecondaryZoom(activeImg);
+                    setImagePreviewZoom(targetZoom, e.clientX, e.clientY, activeImg);
+                    lastTapAt = 0;
+                    return true;
+                };
 
                 modal.addEventListener('wheel', (e) => {
                     if (modal.style.display === 'none') return;
+                    const dominantDeltaX = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg) return;
+                    if (dominantDeltaX && ImageViewer.items.length > 1 && imageZoom <= IMAGE_PREVIEW_MIN_ZOOM + 0.02) {
+                        e.preventDefault();
+                        imagePreviewWheelAccumX += e.deltaX;
+                        if (Math.abs(imagePreviewWheelAccumX) >= 56) {
+                            const direction = imagePreviewWheelAccumX > 0 ? 1 : -1;
+                            imagePreviewWheelAccumX = 0;
+                            requestShowImageAt(ImageViewer.index + direction);
+                        }
+                        return;
+                    }
+                    imagePreviewWheelAccumX = 0;
                     e.preventDefault();
-                    const delta = e.deltaY > 0 ? -0.1 : 0.1;
-                    imageZoom = Math.min(5, Math.max(0.2, imageZoom + delta));
-                    applyImageTransform(img);
+                    const nextZoom = clampImagePreviewZoom(imageZoom * Math.exp(-e.deltaY * 0.0025));
+                    setImagePreviewZoom(nextZoom, e.clientX, e.clientY, activeImg);
                 }, { passive: false });
 
-                modal.addEventListener('mousedown', (e) => {
+                viewport.addEventListener('dblclick', (e) => {
                     if (modal.style.display === 'none') return;
+                    const activeImg = getActivePreviewImage();
+                    if (!activeImg || activeImg.dataset.loaded !== '1') return;
+                    const targetZoom = imageZoom > IMAGE_PREVIEW_MIN_ZOOM + 0.02
+                        ? IMAGE_PREVIEW_MIN_ZOOM
+                        : getImagePreviewSecondaryZoom(activeImg);
+                    setImagePreviewZoom(targetZoom, e.clientX, e.clientY, activeImg);
+                    e.preventDefault();
+                });
+
+                viewport.addEventListener('dragstart', (e) => {
+                    e.preventDefault();
+                });
+
+                viewport.addEventListener('pointerdown', (e) => {
+                    if (modal.style.display === 'none') return;
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     if (e.target.closest('#imagePreviewCloseBtn') ||
                         e.target.closest('#imagePrevBtn') ||
                         e.target.closest('#imageNextBtn')) {
                         return;
                     }
-                    dragging = true;
-                    startX = e.clientX - imageOffsetX;
-                    startY = e.clientY - imageOffsetY;
-                    lastX = imageOffsetX;
-                    lastY = imageOffsetY;
+                    gesture.pointers.set(e.pointerId, {
+                        pointerId: e.pointerId,
+                        clientX: e.clientX,
+                        clientY: e.clientY
+                    });
+                    try { viewport.setPointerCapture(e.pointerId); } catch (_) {}
+                    if (gesture.pointers.size >= 2) {
+                        beginPinchGesture();
+                    } else {
+                        beginSinglePointerGesture({
+                            pointerId: e.pointerId,
+                            clientX: e.clientX,
+                            clientY: e.clientY
+                        });
+                    }
                     e.preventDefault();
                 });
 
-                modal.addEventListener('mousemove', (e) => {
-                    if (!dragging) return;
-                    lastX = e.clientX - startX;
-                    lastY = e.clientY - startY;
-                    if (!rafPending) {
-                        rafPending = true;
-                        requestAnimationFrame(() => {
-                            imageOffsetX = lastX;
-                            imageOffsetY = lastY;
-                            applyImageTransform(img);
-                            rafPending = false;
-                        });
-                    }
-                });
-
-                ['mouseup', 'mouseleave'].forEach(ev => {
-                    modal.addEventListener(ev, () => { dragging = false; });
-                });
-            }
-            function closeEditorModal() {
-                const modal = document.getElementById('editorModal');
-                if (modal) modal.style.display = 'none';
-                document.body.style.overflow = '';
-                stopEditorScrollSync();
-            }
-            async function saveEditorContent() {
-                const ta = document.querySelector('#editorModal textarea');
-                if (!ta) return;
-                const server = ta.dataset.server;
-                const path = ta.dataset.path;
-                const content = ta.value;
-                try {
-                    const resp = await fetch('/api/file/save', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ server, path, content })
+                window.addEventListener('pointermove', (e) => {
+                    if (!gesture.pointers.has(e.pointerId)) return;
+                    gesture.pointers.set(e.pointerId, {
+                        pointerId: e.pointerId,
+                        clientX: e.clientX,
+                        clientY: e.clientY
                     });
-                    const data = await resp.json();
-                    if (data.success) {
-                        addLogInfo('💾 已保存: ' + path);
-                        previewCacheSet(server, path, 'text', content);
-                        closeEditorModal();
-                    } else {
-                        addLogError('保存失败: ' + (data.error || '未知错误'));
-                    }
-                } catch (e) {
-                    addLogError('保存失败: ' + (e.message || e));
-                }
-            }
-
-            let previewEditorBindingsReady = false;
-            function bindPreviewAndEditorEvents() {
-                if (previewEditorBindingsReady) return;
-                previewEditorBindingsReady = true;
-
-                const btn = document.getElementById('imagePreviewCloseBtn');
-                if (btn) btn.addEventListener('click', closeImageModal, { passive: true });
-                const prevBtn = document.getElementById('imagePrevBtn');
-                const nextBtn = document.getElementById('imageNextBtn');
-                if (prevBtn) prevBtn.addEventListener('click', () => showImageAt(ImageViewer.index - 1));
-                if (nextBtn) nextBtn.addEventListener('click', () => showImageAt(ImageViewer.index + 1));
-
-                const ta = document.getElementById('editorTextarea');
-                if (ta) {
-                    ta.addEventListener('input', () => {
-                        updateEditorLineNumbers();
-                        renderFindHighlights();
-                    });
-                    ta.addEventListener('scroll', syncEditorScroll);
-                    ta.addEventListener('wheel', () => {
-                        requestAnimationFrame(syncEditorScroll);
-                    }, { passive: true });
-                    const gutter = document.getElementById('editorGutter');
-                    if (gutter) {
-                        gutter.addEventListener('wheel', (e) => {
-                            ta.scrollTop += e.deltaY;
-                            syncEditorScroll();
-                            e.preventDefault();
-                        }, { passive: false });
-                    }
-                    updateEditorLineNumbers();
-                    renderFindHighlights();
-                    syncEditorScroll();
-                }
-
-                document.addEventListener('keydown', (e) => {
-                    const modalVisible = document.getElementById('editorModal') && document.getElementById('editorModal').style.display !== 'none';
-                    if (!modalVisible) return;
-                    if (document.activeElement && document.activeElement.id === 'editorTextarea' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+                    if (gesture.mode === 'pinch' || gesture.pointers.size >= 2) {
+                        if (gesture.mode !== 'pinch') {
+                            beginPinchGesture();
+                        }
+                        updatePinchGesture();
                         return;
                     }
-                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-                        e.preventDefault();
-                        showFindReplace(false);
-                    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
-                        e.preventDefault();
-                        showFindReplace(true);
+                    if (gesture.primaryPointerId !== e.pointerId) return;
+                    const point = gesture.pointers.get(e.pointerId);
+                    if (!point) return;
+                    if (gesture.mode === 'swipe') {
+                        updateSwipeGesture(point);
+                    } else if (gesture.mode === 'pan') {
+                        updatePanGesture(point);
                     }
                 });
-            }
 
-            function syncMinimap() {
-
-            }
-
-            function syncMinimapHighlight() {
-
-            }
-
-            let editorScrollRaf = null;
-
-            function startEditorScrollSync() {
-                if (editorScrollRaf) return;
-                const tick = () => {
-                    const modal = document.getElementById('editorModal');
-                    if (!modal || modal.style.display === 'none') {
-                        editorScrollRaf = null;
+                const releasePointer = (e) => {
+                    if (!gesture.pointers.has(e.pointerId)) return;
+                    gesture.pointers.delete(e.pointerId);
+                    if (gesture.mode === 'pinch') {
+                        finishPanOrPinchGesture();
+                        startFollowUpGestureFromRemainingPointer();
                         return;
                     }
-                    syncEditorScroll();
-                    editorScrollRaf = requestAnimationFrame(tick);
+                    if (gesture.primaryPointerId !== e.pointerId) return;
+                    if (gesture.mode === 'swipe') {
+                        finishSwipeGesture();
+                    } else if (gesture.mode === 'pan') {
+                        finishPanOrPinchGesture();
+                    }
+                    maybeHandleTouchDoubleTap(e);
+                    gesture.mode = 'idle';
+                    gesture.primaryPointerId = null;
                 };
-                editorScrollRaf = requestAnimationFrame(tick);
+
+                window.addEventListener('pointerup', releasePointer);
+                window.addEventListener('pointercancel', releasePointer);
             }
-
-            function stopEditorScrollSync() {
-                if (!editorScrollRaf) return;
-                cancelAnimationFrame(editorScrollRaf);
-                editorScrollRaf = null;
-            }
-
-            function updateEditorLineNumbers() {
-                const ta = document.getElementById('editorTextarea');
-                const lineBox = document.getElementById('editorLineNumbers');
-                if (!ta || !lineBox) return;
-                const text = ta.value || '';
-                const lines = text.split('\n');
-                const count = Math.max(1, lines.length);
-                let nums = '';
-                for (let i = 1; i <= count; i++) {
-                    nums += i + (i === count ? '' : '\n');
-                }
-                lineBox.textContent = nums;
-            }
-
-            function syncEditorScroll() {
-                const ta = document.getElementById('editorTextarea');
-                const layer = document.getElementById('editorHighlightLayer');
-                const lineBox = document.getElementById('editorLineNumbers');
-                if (!ta) return;
-                if (layer) {
-                    layer.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
-                }
-                if (lineBox) {
-                    lineBox.style.marginTop = `${-ta.scrollTop}px`;
-                }
-            }
-
-            function renderFindHighlights() {
-                const layer = document.getElementById('editorHighlightLayer');
-                const ta = document.getElementById('editorTextarea');
-                const findInput = document.getElementById('findInput');
-                const query = findInput ? findInput.value : '';
-                const countEl = document.getElementById('findCount');
-                if (!layer || !ta) return;
-                const text = ta.value || '';
-                if (!query) {
-                    layer.innerHTML = escapeHtml(text);
-                    if (countEl) countEl.textContent = '';
-                    syncEditorScroll();
-                    return;
-                }
-                const safeQuery = query.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
-                const regex = new RegExp(safeQuery, 'g');
-                let matchCount = 0;
-                text.replace(regex, () => { matchCount++; return ''; });
-                layer.innerHTML = escapeHtml(text);
-                if (countEl) {
-                    countEl.textContent = matchCount > 0 ? `${matchCount} 条` : '0 条';
-                }
-                syncEditorScroll();
-            }
-
-
-            function showFindReplace(withReplace) {
-                const bar = document.getElementById('findReplaceBar');
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                const replaceBtn = document.getElementById('replaceBtn');
-                const replaceAllBtn = document.getElementById('replaceAllBtn');
-                if (!bar) return;
-                bar.style.display = 'flex';
-                if (withReplace) {
-                    replaceInput.style.display = 'inline-block';
-                    replaceBtn.style.display = 'inline-block';
-                    replaceAllBtn.style.display = 'inline-block';
-                } else {
-                    replaceInput.style.display = 'none';
-                    replaceBtn.style.display = 'none';
-                    replaceAllBtn.style.display = 'none';
-                }
-                setTimeout(() => findInput && findInput.focus(), 0);
-            }
-
-            function hideFindReplace() {
-                const bar = document.getElementById('findReplaceBar');
-                const findInput = document.getElementById('findInput');
-                const replaceInput = document.getElementById('replaceInput');
-                const countEl = document.getElementById('findCount');
-                if (findInput) findInput.value = '';
-                if (replaceInput) replaceInput.value = '';
-                if (countEl) countEl.textContent = '';
-                renderFindHighlights();
-                if (bar) bar.style.display = 'none';
-            }
-
-            function findNext() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                renderFindHighlights();
-                if (!ta || !query) return;
-                const start = ta.selectionEnd;
-                const idx = ta.value.indexOf(query, start);
-                if (idx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(idx, idx + query.length);
-                    scrollToSelectionCenter();
-                    return;
-                }
-
-                const wrapIdx = ta.value.indexOf(query, 0);
-                if (wrapIdx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
-                    scrollToSelectionCenter();
-                }
-            }
-
-            function findPrev() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                renderFindHighlights();
-                if (!ta || !query) return;
-                const start = ta.selectionStart - 1;
-                const idx = ta.value.lastIndexOf(query, start);
-                if (idx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(idx, idx + query.length);
-                    scrollToSelectionCenter();
-                    return;
-                }
-                const wrapIdx = ta.value.lastIndexOf(query);
-                if (wrapIdx !== -1) {
-                    ta.focus();
-                    ta.setSelectionRange(wrapIdx, wrapIdx + query.length);
-                    scrollToSelectionCenter();
-                }
-            }
-
-            function scrollToSelectionCenter() {
-                const ta = document.getElementById('editorTextarea');
-                if (!ta) return;
-                const selStart = ta.selectionStart || 0;
-                const beforeText = ta.value.slice(0, selStart);
-                const lines = beforeText.split('\n');
-                const lineHeight = parseFloat(getComputedStyle(ta).lineHeight || '16');
-                const targetTop = (lines.length - 1) * lineHeight;
-                const centerOffset = ta.clientHeight / 2;
-                ta.scrollTop = Math.max(0, targetTop - centerOffset);
-            }
-
-            function replaceOne() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query) return;
-                const selText = ta.value.substring(ta.selectionStart, ta.selectionEnd);
-                if (selText === query) {
-                    const before = ta.value.substring(0, ta.selectionStart);
-                    const after = ta.value.substring(ta.selectionEnd);
-                    const pos = before.length + replacement.length;
-                    ta.value = before + replacement + after;
-                    ta.setSelectionRange(pos - replacement.length, pos);
-                    updateEditorLineNumbers();
-                    syncMinimap();
-                }
-                findNext();
-                renderFindHighlights();
-            }
-
-            function replaceAll() {
-                const ta = document.getElementById('editorTextarea');
-                const query = document.getElementById('findInput').value;
-                const replacement = document.getElementById('replaceInput').value;
-                if (!ta || !query) return;
-                ta.value = ta.value.split(query).join(replacement);
-                updateEditorLineNumbers();
-                syncMinimap();
-                renderFindHighlights();
-            }
-
         document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     closeImageModal();
@@ -5945,10 +9763,10 @@
                 if (visible && ImageViewer.items.length > 0) {
                     if (e.key === 'ArrowLeft') {
                         e.preventDefault();
-                        showImageAt(ImageViewer.index - 1);
+                        requestShowImageAt(ImageViewer.index - 1);
                     } else if (e.key === 'ArrowRight') {
                         e.preventDefault();
-                        showImageAt(ImageViewer.index + 1);
+                        requestShowImageAt(ImageViewer.index + 1);
                     }
                 }
 
@@ -5974,13 +9792,13 @@
                         isSource = true;
                     } else {
                         isSource = lastActivePanel !== 'target';
-                    }
-                    const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
-                    if (selected && selected.length) {
-                        e.preventDefault();
-                        deleteSelected(isSource ? 'source' : 'target');
-                    }
-                }
+	                    }
+	                    const selected = isSource ? selectedSourceFiles : selectedTargetFiles;
+	                    if ((selected && selected.length) || isPanelSelectAllActive(isSource)) {
+	                        e.preventDefault();
+	                        deleteSelected(isSource ? 'source' : 'target');
+	                    }
+	                }
 
                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
                     if (_isEditableElement(e.target)) return;
@@ -6015,6 +9833,7 @@
             const sizeAction = contextMenu ? contextMenu.querySelector('[data-action="size"]') : null;
             const compressAction = contextMenu ? contextMenu.querySelector('[data-action="compress"]') : null;
             const extractAction = contextMenu ? contextMenu.querySelector('[data-action="extract"]') : null;
+            const copyPathAction = contextMenu ? contextMenu.querySelector('[data-action="copy-path"]') : null;
             const downloadWindowsAction = contextMenu ? contextMenu.querySelector('[data-action="download-windows"]') : null;
             let contextState = { isSource: true, targetRow: null };
 
@@ -6079,7 +9898,8 @@
                 row.dataset.editing = 'true';
                 nameSpan.replaceWith(input);
                 input.focus();
-                input.select();
+                const selection = _getRenameSelectionRange(original, String(row.dataset.isDirectory).toLowerCase() === 'true');
+                input.setSelectionRange(selection.start, selection.end);
 
                 const cleanup = () => {
                     if (row.dataset.editing !== 'true') return;
@@ -6312,6 +10132,13 @@
                         extractAction.classList.add('disabled');
                     }
                 }
+                if (copyPathAction) {
+                    if (row) {
+                        copyPathAction.classList.remove('disabled');
+                    } else {
+                        copyPathAction.classList.add('disabled');
+                    }
+                }
 
                 if (downloadWindowsAction) {
                     const leftSelected = selectedSourceFiles.length > 0;
@@ -6445,6 +10272,25 @@
                 });
             }
 
+            if (copyPathAction) {
+                copyPathAction.addEventListener('click', () => {
+                    if (copyPathAction.classList.contains('disabled')) return;
+                    hideContextMenu();
+                    const { targetRow } = contextState;
+                    const path = targetRow ? (targetRow.dataset.path || '') : '';
+                    if (!path) {
+                        addLogWarning('⚠️ 未找到可复制的路径');
+                        return;
+                    }
+                    copyTextToClipboard(path)
+                        .then(() => {
+                            addLogSuccess(`📋 已复制路径: ${path}`);
+                            showToast('📋 路径已复制', 'success');
+                        })
+                        .catch(() => addLogWarning('⚠️ 复制失败，请手动复制'));
+                });
+            }
+
 
             if (downloadWindowsAction) {
                 downloadWindowsAction.addEventListener('click', () => {
@@ -6508,24 +10354,55 @@
                 if (CLIENT_IPV4) {
                     socket.emit('register_client', { client_ip: CLIENT_IPV4 });
                 }
-            socket.on('connect', () => {
-                socketId = socket.id;
+                socket.on('connect', async () => {
+                    socketId = socket.id || null;
+                    updateRunControls();
+                    await restoreTerminalSessionsForCurrentSocket();
+                    for (const panel of ['source', 'target']) {
+                        const state = getTerminalState(panel);
+                        if (state.open && (!state.terminalId || !state.ready)) {
+                            scheduleTerminalAutoRecover(panel, 'socket reconnect', 120);
+                        }
+                    }
+                });
+                socket.on('disconnect', () => {
+                    socketId = null;
+                    for (const panel of ['source', 'target']) {
+                        const state = getTerminalState(panel);
+                        if (!state.open) continue;
+                        state.ready = false;
+                        state.commandRunning = false;
+                        updateTerminalLiveStatus(panel);
+                        setTerminalStatus(panel, '重连中');
+                    }
+                });
                 updateRunControls();
-            });
-            updateRunControls();
-            socket.on('connect', () => {
-                socketId = socket.id;
-                updateRunControls();
-            });
-            updateRunControls();
+                if (socket && socket.connected) {
+                    socketId = socket.id || null;
+                    updateRunControls();
+                    restoreTerminalSessionsForCurrentSocket().then(() => {
+                        for (const panel of ['source', 'target']) {
+                            const state = getTerminalState(panel);
+                            if (state.open && (!state.terminalId || !state.ready)) {
+                                scheduleTerminalAutoRecover(panel, 'socket bootstrap', 120);
+                            }
+                        }
+                    });
+                }
 
 
             switchLogoDisplay('header');
+            loadBrowseSortPreferences();
+            syncBrowseSortControls('source');
+            syncBrowseSortControls('target');
 
 
             initializeResizers();
+            syncTerminalPreferenceControls();
+            refreshTerminalLayoutOnViewportChange();
             bindContextMenus();
             setupDragAndDrop();
+            window.addEventListener('resize', refreshTerminalLayoutOnViewportChange);
 
 
             const sourceContainer = document.getElementById('sourceFileBrowser');
@@ -6539,51 +10416,106 @@
 
 
             document.getElementById('sourceServer').addEventListener('change', async function() {
-                if (this.value) {
-                    const isWindows = isWindowsServer(this.value);
+                const nextServer = this.value || '';
+                const shouldReopenTerminal = await handleTerminalServerChanged('source');
+                terminalPanelState.source.server = nextServer;
+                terminalPanelState.source.profile = getDefaultTerminalProfile(nextServer);
+                updateTerminalProfileControl('source');
+                if (!nextServer) {
+                    currentSourcePath = '';
+                    hideWindowsDriveSelector(true);
+                    return;
+                }
 
+                const isWindows = isWindowsServer(nextServer);
+                const rememberedPath = getRememberedPath(nextServer, true);
+                const configDefaultPath = getDefaultPath(nextServer);
+                const hasRememberedPath = Boolean(rememberedPath);
+                const hasConfigDefaultPath = Boolean(configDefaultPath);
+                const initialPath = rememberedPath || configDefaultPath || '';
 
-                    const defaultPath = getDefaultPathWithRemember(this.value, true);
-                    if (!defaultPath) {
-                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
-                        return;
-                    }
-                    currentSourcePath = defaultPath;
+                if (initialPath) {
+                    currentSourcePath = initialPath;
                     browseSourceInstant(currentSourcePath, { skipRemember: true });
+                } else if (!isWindows) {
+                    addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                    return;
+                } else {
+                    currentSourcePath = '';
+                }
 
-
-                    if (isWindows) {
-                        loadWindowsDrives(this.value, true);
-                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                if (isWindows) {
+                    const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                    await loadWindowsDrives(nextServer, true, { preferDesktop });
+                    if (preferDesktop) {
+                        addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
                     } else {
-                        hideWindowsDriveSelector(true);
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     }
+                } else {
+                    hideWindowsDriveSelector(true);
+                }
+
+                if (shouldReopenTerminal) {
+                    await openTerminalForPanel('source', {
+                        forceReconnect: true,
+                        server: nextServer,
+                        cwd: currentSourcePath,
+                        profile: terminalPanelState.source.profile
+                    });
                 }
             });
 
             document.getElementById('targetServer').addEventListener('change', async function() {
-                if (this.value) {
-                    const isWindows = isWindowsServer(this.value);
+                const nextServer = this.value || '';
+                const shouldReopenTerminal = await handleTerminalServerChanged('target');
+                terminalPanelState.target.server = nextServer;
+                terminalPanelState.target.profile = getDefaultTerminalProfile(nextServer);
+                updateTerminalProfileControl('target');
+                if (!nextServer) {
+                    currentTargetPath = '';
+                    hideWindowsDriveSelector(false);
+                    return;
+                }
 
+                const isWindows = isWindowsServer(nextServer);
+                const rememberedPath = getRememberedPath(nextServer, false);
+                const configDefaultPath = getDefaultPath(nextServer);
+                const hasRememberedPath = Boolean(rememberedPath);
+                const hasConfigDefaultPath = Boolean(configDefaultPath);
+                const initialPath = rememberedPath || configDefaultPath || '';
 
-                    const defaultPath = getDefaultPathWithRemember(this.value, false);
-                    if (!defaultPath) {
-                        addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
-                        return;
-                    }
-                    currentTargetPath = defaultPath;
+                if (initialPath) {
+                    currentTargetPath = initialPath;
                     browseTargetInstant(currentTargetPath, { skipRemember: true });
+                } else if (!isWindows) {
+                    addLogWarning('⚠️ 未配置默认路径，请检查配置文件');
+                    return;
+                } else {
+                    currentTargetPath = '';
+                }
 
-
-                    if (isWindows) {
-                        loadWindowsDrives(this.value, false);
-                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
+                if (isWindows) {
+                    const preferDesktop = !hasRememberedPath && !hasConfigDefaultPath;
+                    await loadWindowsDrives(nextServer, false, { preferDesktop });
+                    if (preferDesktop) {
+                        addLogInfo('💡 首次进入Windows服务器，默认打开桌面');
                     } else {
-                        hideWindowsDriveSelector(false);
+                        addLogInfo('💡 检测到Windows服务器，正在加载磁盘列表...');
                     }
+                } else {
+                    hideWindowsDriveSelector(false);
+                }
+
+                if (shouldReopenTerminal) {
+                    await openTerminalForPanel('target', {
+                        forceReconnect: true,
+                        server: nextServer,
+                        cwd: currentTargetPath,
+                        profile: terminalPanelState.target.profile
+                    });
                 }
             });
-
 
                 applyRememberedSelections();
 
