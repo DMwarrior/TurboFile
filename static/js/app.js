@@ -150,6 +150,8 @@
                     els.cancelBtn.addEventListener('click', () => {
                         if (uiDialogState.type === 'prompt') {
                             _resolveUiDialog(null);
+                        } else if (uiDialogState.type === 'choice') {
+                            _resolveUiDialog(null);
                         } else if (uiDialogState.type === 'confirm') {
                             _resolveUiDialog(false);
                         } else {
@@ -173,6 +175,8 @@
                     if (!uiDialogState.resolve) return;
                     if (uiDialogState.type === 'prompt') {
                         _resolveUiDialog(null);
+                    } else if (uiDialogState.type === 'choice') {
+                        _resolveUiDialog(null);
                     } else if (uiDialogState.type === 'confirm') {
                         _resolveUiDialog(false);
                     } else {
@@ -190,6 +194,13 @@
                             els.input.select();
                         }
                     } else if (els.confirmBtn) {
+                        if (uiDialogState.type === 'choice' && els.list) {
+                            const firstChoice = els.list.querySelector('.ui-dialog-choice-btn');
+                            if (firstChoice) {
+                                firstChoice.focus();
+                                return;
+                            }
+                        }
                         els.confirmBtn.focus();
                     }
                 });
@@ -206,6 +217,9 @@
                 }
                 if (options.type === 'prompt') {
                     return Promise.resolve(window.prompt(options.message || '', options.defaultValue || ''));
+                }
+                if (options.type === 'choice') {
+                    return Promise.resolve(null);
                 }
                 window.alert(options.message || '');
                 return Promise.resolve(undefined);
@@ -249,12 +263,39 @@
                 if (items.length > 0) {
                     items.forEach((item) => {
                         const li = document.createElement('li');
-                        li.textContent = String(item);
+                        if (uiDialogState.type === 'choice') {
+                            const btn = document.createElement('button');
+                            btn.type = 'button';
+                            btn.className = 'ui-dialog-choice-btn';
+                            const iconClass = item.iconClass || (item.is_directory ? 'bi bi-folder-fill' : 'bi bi-file-earmark');
+                            const label = item.label || item.name || String(item);
+                            const meta = item.meta || item.path || '';
+                            btn.innerHTML = `
+                                <i class="${iconClass}" aria-hidden="true"></i>
+                                <span class="ui-dialog-choice-text">
+                                    <span class="ui-dialog-choice-label"></span>
+                                    <span class="ui-dialog-choice-meta"></span>
+                                </span>
+                            `;
+                            btn.querySelector('.ui-dialog-choice-label').textContent = label;
+                            const metaEl = btn.querySelector('.ui-dialog-choice-meta');
+                            metaEl.textContent = meta;
+                            metaEl.style.display = meta ? 'block' : 'none';
+                            btn.addEventListener('click', () => {
+                                _resolveUiDialog(Object.prototype.hasOwnProperty.call(item, 'value') ? item.value : item);
+                                uiDialogState.instance.hide();
+                            });
+                            li.appendChild(btn);
+                        } else {
+                            li.textContent = String(item);
+                        }
                         els.list.appendChild(li);
                     });
                     els.list.style.display = 'block';
+                    els.list.classList.toggle('ui-dialog-choice-list', uiDialogState.type === 'choice');
                 } else {
                     els.list.style.display = 'none';
+                    els.list.classList.remove('ui-dialog-choice-list');
                 }
             }
 
@@ -292,6 +333,7 @@
                 els.confirmBtn.textContent = options.confirmText || '确定';
                 els.confirmBtn.classList.remove('btn-danger', 'btn-primary');
                 els.confirmBtn.classList.add(options.danger ? 'btn-danger' : 'btn-primary');
+                els.confirmBtn.style.display = uiDialogState.type === 'choice' ? 'none' : 'inline-block';
             }
             if (els.cancelBtn) {
                 els.cancelBtn.textContent = options.cancelText || '取消';
@@ -314,6 +356,10 @@
 
         function showPromptDialog(message, options = {}) {
             return showUiDialog({ ...options, type: 'prompt', message });
+        }
+
+        function showChoiceDialog(message, options = {}) {
+            return showUiDialog({ ...options, type: 'choice', message });
         }
 
         function _cloneTransferFiles(files) {
@@ -2109,14 +2155,33 @@
             maxVisible: 3
         };
 
+        const toastIconByType = {
+            success: 'bi bi-check-circle-fill',
+            warning: 'bi bi-exclamation-triangle-fill',
+            error: 'bi bi-x-circle-fill',
+            info: 'bi bi-info-circle-fill'
+        };
+
         function showToast(message, type = 'info') {
             const container = document.getElementById('toastContainer');
             if (!container || !message) return;
+            const toastKey = `${type}:${String(message)}`;
+            const existing = Array.from(container.children).find(child => child.dataset.toastKey === toastKey);
+            if (existing) {
+                existing.remove();
+            }
             const item = document.createElement('div');
             item.className = `toast-item toast-${type}`;
+            item.dataset.toastKey = toastKey;
+            const iconWrap = document.createElement('div');
+            iconWrap.className = 'toast-icon';
+            const icon = document.createElement('i');
+            icon.className = toastIconByType[type] || toastIconByType.info;
+            iconWrap.appendChild(icon);
             const msg = document.createElement('div');
             msg.className = 'toast-message';
             msg.textContent = message;
+            item.appendChild(iconWrap);
             item.appendChild(msg);
             container.appendChild(item);
             while (container.children.length > toastConfig.maxVisible) {
@@ -2153,6 +2218,125 @@
         function showActionFailureToast(action, payload, fallback = '未知错误') {
             const detail = extractActionErrorMessage(payload, fallback);
             showToast(`${action}: ${detail}`, 'error');
+        }
+
+        const operationProgressDefaults = {
+            search: { label: '递归搜索', runningText: '正在搜索...', iconClass: 'bi bi-search', estimatedMs: 14000 },
+            size: { label: '计算大小', runningText: '计算中...', iconClass: 'bi bi-folder-fill', estimatedMs: 18000 },
+            compress: { label: '压缩中', runningText: '压缩中...', iconClass: 'bi bi-file-zip', estimatedMs: 26000 },
+            extract: { label: '解压中', runningText: '解压中...', iconClass: 'bi bi-folder2-open', estimatedMs: 22000 },
+            delete: { label: '删除中', runningText: '删除中...', iconClass: 'bi bi-trash3-fill', estimatedMs: 12000 }
+        };
+
+        const operationProgressTimers = new Map();
+
+        function getOperationProgressContainer() {
+            let container = document.getElementById('operationProgressContainer');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'operationProgressContainer';
+                container.className = 'operation-progress-container';
+                container.setAttribute('aria-live', 'polite');
+                document.body.appendChild(container);
+            }
+            return container;
+        }
+
+        function formatOperationElapsed(ms) {
+            const seconds = Math.max(0, Math.floor(ms / 1000));
+            if (seconds < 60) return `${seconds}s`;
+            const minutes = Math.floor(seconds / 60);
+            return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`;
+        }
+
+        function setOperationProgressPercent(row, percent) {
+            const value = Math.max(0, Math.min(100, Math.round(percent)));
+            const bar = row.querySelector('.operation-progress-bar');
+            const percentEl = row.querySelector('.operation-progress-percent');
+            if (bar) bar.style.width = `${value}%`;
+            if (percentEl) percentEl.textContent = `${value}%`;
+        }
+
+        function startOperationProgress(options = {}) {
+            const type = options.type || 'search';
+            const defaults = operationProgressDefaults[type] || operationProgressDefaults.search;
+            const id = options.id || `op_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            const determinate = options.determinate === true;
+            const container = getOperationProgressContainer();
+            const row = document.createElement('div');
+            row.className = `operation-progress-item${determinate ? '' : ' is-indeterminate'}`;
+            row.dataset.type = type;
+            row.dataset.operationId = id;
+            row.innerHTML = `
+                <div class="operation-progress-icon"><i class="${options.iconClass || defaults.iconClass}"></i></div>
+                <div class="operation-progress-main">
+                    <div class="operation-progress-title"></div>
+                    <div class="operation-progress-meter-row">
+                        <div class="operation-progress-track"><div class="operation-progress-bar"></div></div>
+                        <div class="operation-progress-percent">0%</div>
+                    </div>
+                </div>
+            `;
+
+            row.querySelector('.operation-progress-title').textContent = options.label || defaults.label;
+            row.title = options.detail || options.label || defaults.label;
+            container.appendChild(row);
+
+            const estimatedMs = Math.max(4000, Number(options.estimatedMs || defaults.estimatedMs || 12000));
+            const startedAt = performance.now();
+            const update = () => {
+                if (!determinate) return;
+                const elapsed = performance.now() - startedAt;
+                const curve = 1 - Math.exp(-elapsed / estimatedMs);
+                const percent = Math.min(95, Math.max(2, curve * 100));
+                setOperationProgressPercent(row, percent);
+            };
+
+            if (determinate) {
+                update();
+                const timer = window.setInterval(update, 180);
+                operationProgressTimers.set(id, timer);
+            } else {
+                const percentEl = row.querySelector('.operation-progress-percent');
+                if (percentEl) percentEl.textContent = '执行中';
+            }
+
+            const cleanup = (delay) => {
+                window.setTimeout(() => {
+                    if (row.parentNode) row.parentNode.removeChild(row);
+                    operationProgressTimers.delete(id);
+                }, delay);
+            };
+
+            return {
+                id,
+                setDetail(detail) {
+                    row.title = detail || '';
+                },
+                finish(message = '完成') {
+                    const timerId = operationProgressTimers.get(id);
+                    if (timerId) window.clearInterval(timerId);
+                    operationProgressTimers.delete(id);
+                    row.classList.add('is-complete');
+                    row.classList.remove('is-indeterminate');
+                    setOperationProgressPercent(row, 100);
+                    const title = row.querySelector('.operation-progress-title');
+                    if (title) title.textContent = message;
+                    cleanup(options.completeDelayMs ?? 3600);
+                },
+                fail(message = '失败') {
+                    const timerId = operationProgressTimers.get(id);
+                    if (timerId) window.clearInterval(timerId);
+                    operationProgressTimers.delete(id);
+                    row.classList.add('is-error');
+                    row.classList.remove('is-indeterminate');
+                    const title = row.querySelector('.operation-progress-title');
+                    if (title) title.textContent = message;
+                    const percentEl = row.querySelector('.operation-progress-percent');
+                    if (percentEl) percentEl.textContent = '失败';
+                    cleanup(3600);
+                }
+            };
         }
 
         function getTerminalState(panel) {
@@ -3543,6 +3727,12 @@
 	                });
 	                if (!ok) return;
 
+	                const progress = startOperationProgress({
+	                    type: 'delete',
+	                    label: '删除中',
+	                    detail: total > 0 ? `当前目录全部 · ${total} 项` : '当前目录全部',
+	                    estimatedMs: 16000
+	                });
 	                try {
 	                    const response = await fetch('/api/delete', {
 	                        method: 'POST',
@@ -3560,14 +3750,14 @@
 	                    if (ok2) {
 	                        resetSelectAllState(isSource);
 	                        applySelectAllVisual(isSource);
-	                        showToast('🗑️ 删除完成：当前目录全部', 'success');
+	                        progress.finish('删除完成');
 	                    } else {
 	                        addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-	                        showToast('❌ 删除失败', 'error');
+	                        progress.fail('删除失败');
 	                    }
 	                } catch (err) {
 	                    addLogError(`❌ 删除异常: ${err.message}`);
-	                    showToast('❌ 删除异常', 'error');
+	                    progress.fail('删除异常');
 	                } finally {
 	                    if (isSource) {
 	                        refreshSourceAsync({ silent: true });
@@ -3599,6 +3789,13 @@
             }
             blurBtn();
 
+            const deleteProgress = startOperationProgress({
+                type: 'delete',
+                label: '删除中',
+                detail: `${selectedFiles.length} 项`,
+                estimatedMs: Math.max(10000, Math.min(45000, selectedFiles.length * 1200))
+            });
+
             try {
 
                 const paths = selectedFiles.map(f => f.path);
@@ -3628,21 +3825,16 @@
                     } else {
                         selectedTargetFiles = [];
                     }
-                    if (result.failed_items && result.failed_items.length > 0) {
-                        showToast(`⚠️ 部分删除失败 (${result.failed_items.length})`, 'warning');
-                    } else {
-                        const countText = result.deleted_count ? `${result.deleted_count} 项` : '已删除';
-                        showToast(`🗑️ 删除完成: ${countText}`, 'success');
-                    }
                     if (!result.success && result.failed_items && result.failed_items.length > 0) {
                         addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
                         });
                     }
+                    deleteProgress.finish(result.failed_items && result.failed_items.length > 0 ? '部分完成' : '删除完成');
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showActionFailureToast('删除失败', result);
+                    deleteProgress.fail('删除失败');
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -3652,7 +3844,7 @@
                 silentRefresh();
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showActionFailureToast('删除异常', error.message);
+                deleteProgress.fail('删除异常');
                 if (type === 'source') {
                     refreshSourceAsync({ silent: true });
                 } else {
@@ -3674,6 +3866,13 @@
             if (imageDeleteInFlight) return false;
             imageDeleteInFlight = true;
 
+            const progress = startOperationProgress({
+                type: 'delete',
+                label: '删除中',
+                detail: `${list.length} 项`,
+                estimatedMs: Math.max(8000, Math.min(30000, list.length * 1000))
+            });
+
             try {
                 const response = await fetch('/api/delete', {
                     method: 'POST',
@@ -3690,21 +3889,16 @@
                 if (ok) {
                     applyDeleteOptimistic(isSource ? 'source' : 'target', list.map(p => ({ path: p })));
                     invalidatePreviewCache(server, list);
-                    if (result.failed_items && result.failed_items.length > 0) {
-                        showToast(`⚠️ 部分删除失败 (${result.failed_items.length})`, 'warning');
-                        if (!result.success) {
-                            addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
-                            result.failed_items.forEach(item => {
-                                addLogError(`  - ${item.path}: ${item.error}`);
-                            });
-                        }
-                    } else {
-                        const countText = result.deleted_count ? `${result.deleted_count} 项` : `${list.length} 项`;
-                        showToast(`🗑️ 删除完成: ${countText}`, 'success');
+                    if (result.failed_items && result.failed_items.length > 0 && !result.success) {
+                        addLogWarning(`⚠️ 部分删除失败，共 ${result.failed_items.length} 项`);
+                        result.failed_items.forEach(item => {
+                            addLogError(`  - ${item.path}: ${item.error}`);
+                        });
                     }
+                    progress.finish(result.failed_items && result.failed_items.length > 0 ? '部分完成' : '删除完成');
                 } else {
                     addLogError(`❌ 删除失败: ${result.error || '未知错误'}`);
-                    showActionFailureToast('删除失败', result);
+                    progress.fail('删除失败');
                     if (result.failed_items && result.failed_items.length > 0) {
                         result.failed_items.forEach(item => {
                             addLogError(`  - ${item.path}: ${item.error}`);
@@ -3714,7 +3908,7 @@
                 return ok;
             } catch (error) {
                 addLogError(`❌ 删除操作异常: ${error.message}`);
-                showActionFailureToast('删除异常', error.message);
+                progress.fail('删除异常');
                 return false;
             } finally {
                 imageDeleteInFlight = false;
@@ -4146,6 +4340,12 @@
             }
             addLogInfo(`📦 正在计算大小: ${fileName || filePath}`);
             if (typeof flushLogNow === 'function') flushLogNow();
+            const progress = startOperationProgress({
+                type: 'size',
+                label: '计算大小',
+                detail: fileName || filePath,
+                estimatedMs: 18000
+            });
             try {
                 const resp = await fetch('/api/compute_size', {
                     method: 'POST',
@@ -4156,19 +4356,25 @@
                 if (result.success) {
                     const sizeText = result.human_size || result.size_bytes + ' bytes';
                     addLogSuccess(`📏 大小: ${sizeText} (${fileName || filePath})`);
-                    showToast(`📏 大小: ${sizeText}`, 'success');
+                    progress.finish(`大小: ${sizeText}`);
                 } else {
                     addLogError(`❌ 计算失败: ${result.error || '未知错误'}`);
-                    showActionFailureToast('计算失败', result);
+                    progress.fail('计算失败');
                 }
             } catch (err) {
                 addLogError(`❌ 计算异常: ${err.message}`);
-                showActionFailureToast('计算异常', err.message);
+                progress.fail('计算异常');
             }
         }
 
 
         async function compressPathOnServer(server, filePath, fileName) {
+            const progress = startOperationProgress({
+                type: 'compress',
+                label: '压缩中',
+                detail: fileName || filePath,
+                estimatedMs: 26000
+            });
             try {
                 const resp = await fetch('/api/compress', {
                     method: 'POST',
@@ -4179,19 +4385,25 @@
                 if (result.success) {
                     const zipName = result.zip_name || fileName + '.zip';
                     addLogSuccess(`🗜️ 压缩完成: ${zipName}`);
-                    showToast(`🗜️ 压缩完成: ${zipName}`, 'success');
+                    progress.finish('压缩完成');
                 } else {
                     addLogError(`❌ 压缩失败: ${result.error || '未知错误'}`);
-                    showActionFailureToast('压缩失败', result);
+                    progress.fail('压缩失败');
                 }
             } catch (err) {
                 addLogError(`❌ 压缩异常: ${err.message}`);
-                showActionFailureToast('压缩异常', err.message);
+                progress.fail('压缩异常');
             }
         }
 
 
         async function extractArchiveOnServer(server, filePath, fileName) {
+            const progress = startOperationProgress({
+                type: 'extract',
+                label: '解压中',
+                detail: fileName || filePath,
+                estimatedMs: 22000
+            });
             try {
                 const resp = await fetch('/api/extract', {
                     method: 'POST',
@@ -4201,14 +4413,14 @@
                 const result = await resp.json();
                 if (result.success) {
                     addLogSuccess(`📂 解压完成: ${fileName}`);
-                    showToast(`📂 解压完成: ${fileName}`, 'success');
+                    progress.finish('解压完成');
                 } else {
                     addLogError(`❌ 解压失败: ${result.error || '未知错误'}`);
-                    showActionFailureToast('解压失败', result);
+                    progress.fail('解压失败');
                 }
             } catch (err) {
                 addLogError(`❌ 解压异常: ${err.message}`);
-                showActionFailureToast('解压异常', err.message);
+                progress.fail('解压异常');
             }
         }
 
@@ -5638,23 +5850,6 @@
             };
 
 
-            const localNodes = getFileNodes(isSource);
-            const localRow = localNodes.find(node => {
-                const name = String(node.dataset.name || '').toLowerCase();
-                return name.includes(keyword);
-            });
-            if (localRow) {
-                const localMatch = {
-                    name: localRow.dataset.name || '',
-                    path: localRow.dataset.path || '',
-                    is_directory: String(localRow.dataset.isDirectory).toLowerCase() === 'true'
-                };
-                if (locateRow(localRow, localMatch)) {
-                    addLogInfo(`✅ 已定位到: ${localMatch.name}`);
-                    return;
-                }
-            }
-
             addLogInfo('🔎 正在快速查找，请稍候...');
             const showHidden = document.getElementById(showHiddenCheckbox).checked;
             const params = appendBrowseSortParams(new URLSearchParams({
@@ -5662,6 +5857,12 @@
                 keyword: rawKeyword,
                 show_hidden: showHidden
             }), isSource);
+            const searchProgress = startOperationProgress({
+                type: 'search',
+                label: '递归搜索',
+                detail: rawKeyword,
+                estimatedMs: 14000
+            });
 
             let data;
             try {
@@ -5669,27 +5870,68 @@
                 data = await resp.json();
             } catch (err) {
                 addLogError('❌ 查找失败: ' + (err.message || err));
+                searchProgress.fail('搜索失败');
                 return;
             }
 
             if (!data || !data.success) {
                 addLogError(`❌ 查找失败: ${data && data.error ? data.error : '未知错误'}`);
+                searchProgress.fail('搜索失败');
                 return;
             }
 
-            const match = data.match;
+            const matches = Array.isArray(data.matches)
+                ? data.matches.filter(item => item && item.path)
+                : (data.match && data.match.path ? [data.match] : []);
+            searchProgress.finish(matches.length > 0 ? `找到 ${matches.length} 个` : '搜索完成');
+            let match = matches[0] || null;
+            if (matches.length > 1) {
+                const choice = await showChoiceDialog(`找到 ${matches.length} 个匹配结果，请选择要跳转的位置`, {
+                    title: '选择搜索结果',
+                    variant: 'spotlight-search',
+                    eyebrow: 'Search Results',
+                    subtitle: `关键字: ${rawKeyword}`,
+                    iconClass: 'bi bi-search',
+                    cancelText: '取消',
+                    items: matches.map((item, idx) => ({
+                        label: item.name || item.path || `结果 ${idx + 1}`,
+                        meta: item.parent_path || item.path || '',
+                        is_directory: !!item.is_directory,
+                        value: item
+                    }))
+                });
+                if (!choice) {
+                    addLogInfo('已取消搜索结果选择');
+                    return;
+                }
+                match = choice;
+            }
             if (!match || !match.path) {
                 addLogWarning(`⚠️ 未找到包含 “${rawKeyword}” 的文件或文件夹`);
                 return;
             }
 
-            const rowInView = getFileNodes(isSource).find(node => node.dataset.path === match.path);
+            const matchedParentPath = String(match.parent_path || data.parent_path || state.path || '').trim();
+            const isRecursiveHit = matchedParentPath && matchedParentPath !== state.path;
+            if (isRecursiveHit) {
+                addLogInfo(`📍 已找到: ${match.name}，正在进入所在目录...`);
+                if (isSource) {
+                    currentSourcePath = matchedParentPath;
+                } else {
+                    currentTargetPath = matchedParentPath;
+                }
+                state.path = matchedParentPath;
+            }
+
+            const rowInView = isRecursiveHit ? null : getFileNodes(isSource).find(node => node.dataset.path === match.path);
             if (rowInView && locateRow(rowInView, match)) {
                 addLogInfo(`✅ 已定位到: ${match.name}`);
                 return;
             }
 
-            const index = typeof data.index === 'number' ? data.index : -1;
+            const index = typeof match.index === 'number'
+                ? match.index
+                : (typeof data.index === 'number' ? data.index : -1);
             if (index < 0) {
                 addLogWarning('⚠️ 已找到目标，但无法定位到界面项');
                 return;
@@ -5697,7 +5939,7 @@
 
             const pageStart = Math.floor(index / BROWSE_PAGE_SIZE) * BROWSE_PAGE_SIZE;
             const pageParams = appendBrowseSortParams(new URLSearchParams({
-                path: state.path,
+                path: matchedParentPath || state.path,
                 show_hidden: showHidden,
                 offset: pageStart,
                 limit: BROWSE_PAGE_SIZE
@@ -5712,6 +5954,11 @@
                 }
 
                 state.path = pageData.path || state.path;
+                if (isSource) {
+                    currentSourcePath = state.path;
+                } else {
+                    currentTargetPath = state.path;
+                }
                 state.offset = pageData.next_offset ?? (pageStart + (pageData.files || []).length);
                 state.loadedCount = pageData.loaded_count ?? state.offset;
                 state.total = pageData.total_count || pageData.file_count || 0;
@@ -10244,13 +10491,12 @@
                         addLogWarning('⚠️ 请先选择文件或文件夹');
                         return;
                     }
-                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
-                    const name = targetRow.dataset.name || '';
-                    addLogInfo(`🗜️ 正在压缩: ${name}`);
-                    computeSizeOnServer(server, targetRow.dataset.path, name);
-                    compressPathOnServer(server, targetRow.dataset.path, name);
-                });
-            }
+	                    const server = document.getElementById(isSource ? 'sourceServer' : 'targetServer').value;
+	                    const name = targetRow.dataset.name || '';
+	                    addLogInfo(`🗜️ 正在压缩: ${name}`);
+	                    compressPathOnServer(server, targetRow.dataset.path, name);
+	                });
+	            }
 
             if (extractAction) {
                 extractAction.addEventListener('click', () => {

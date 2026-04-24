@@ -1910,60 +1910,110 @@ def quick_search(server_ip):
         return jsonify({'success': False, 'error': '缺少路径或关键字'}), 400
 
     try:
-        files = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
-        if files is not None:
-            if not files:
-                return jsonify({
-                    'success': True,
-                    'path': path,
-                    'keyword': keyword,
-                    'total_count': 0,
-                    'match': None,
-                    'index': None
-                })
+        result_limit = 50
 
-            keyword_lower = keyword.lower()
-            first_match = None
-            first_index = None
-            for idx, item in enumerate(files):
-                name = str(item.get('name', ''))
-                if keyword_lower in name.lower():
-                    first_match = {
-                        'name': item.get('name', ''),
-                        'path': item.get('path', ''),
-                        'is_directory': bool(item.get('is_directory'))
-                    }
-                    first_index = idx
-                    break
+        def _match_parent_path(match_path: str):
+            if not match_path:
+                return path
+            if is_windows_server(server_ip):
+                normalized = str(match_path).replace('\\', '/').rstrip('/')
+                if re.match(r'^[A-Za-z]:$', normalized):
+                    return normalized + '/'
+                parent = normalized.rsplit('/', 1)[0] if '/' in normalized else path
+                if re.match(r'^[A-Za-z]:$', parent):
+                    parent += '/'
+                return parent or path
+            return os.path.dirname(str(match_path).rstrip('/')) or '/'
+
+        def _enrich_matches(matches):
+            valid_matches = [m for m in (matches or []) if m and m.get('path')]
+            parent_paths = []
+            for m in valid_matches:
+                parent = _match_parent_path(m.get('path', ''))
+                m['parent_path'] = parent
+                m['index'] = None
+                if parent and parent not in parent_paths:
+                    parent_paths.append(parent)
+
+            parent_indexes = {}
+            parent_counts = {}
+            for parent in parent_paths:
+                try:
+                    parent_items = get_cached_listing(server_ip, parent, show_hidden, sort_by, sort_order)
+                    if parent_items is None:
+                        parent_items = get_directory_listing(server_ip, parent, show_hidden, sort_by, sort_order)
+                    parent_counts[parent] = len(parent_items or [])
+                    index_map = {}
+                    for idx, item in enumerate(parent_items or []):
+                        index_map[str(item.get('path', ''))] = idx
+                    parent_indexes[parent] = index_map
+                except Exception:
+                    parent_indexes[parent] = {}
+
+            for m in valid_matches:
+                parent = m.get('parent_path') or path
+                m['index'] = parent_indexes.get(parent, {}).get(str(m.get('path', '')))
+
+            return valid_matches, parent_counts
+
+        def _response_for_matches(matches):
+            enriched, parent_counts = _enrich_matches(matches)
+            first = enriched[0] if enriched else None
+            parent_path = first.get('parent_path') if first else path
 
             return jsonify({
                 'success': True,
                 'path': path,
+                'parent_path': parent_path,
                 'keyword': keyword,
-                'total_count': len(files),
-                'match': first_match,
-                'index': first_index
+                'total_count': parent_counts.get(parent_path) if parent_path else None,
+                'match': first,
+                'matches': enriched,
+                'match_count': len(enriched),
+                'index': first.get('index') if first else None
             })
 
+        files = get_cached_listing(server_ip, path, show_hidden, sort_by, sort_order)
+        if files is not None:
+            keyword_lower = keyword.lower()
+            direct_matches = []
+            for idx, item in enumerate(files):
+                name = str(item.get('name', ''))
+                if keyword_lower in name.lower():
+                    direct_matches.append({
+                        'name': item.get('name', ''),
+                        'path': item.get('path', ''),
+                        'is_directory': bool(item.get('is_directory')),
+                        'parent_path': path,
+                        'index': idx
+                    })
+                    if len(direct_matches) >= result_limit:
+                        return _response_for_matches(direct_matches)
+
         keyword_lower = keyword.lower()
-        first_match = None
-        first_index = None
+        matches = []
 
         if is_local_server(server_ip):
             try:
-                with os.scandir(path) as entries:
-                    for entry in entries:
-                        if not show_hidden and entry.name.startswith('.'):
+                for root, dirs, file_names in os.walk(path):
+                    if not show_hidden:
+                        dirs[:] = [d for d in dirs if not d.startswith('.')]
+                        file_names = [f for f in file_names if not f.startswith('.')]
+                    entries = [(name, True) for name in dirs] + [(name, False) for name in file_names]
+                    for name, is_dir in entries:
+                        if keyword_lower not in name.lower():
                             continue
-                        if keyword_lower in entry.name.lower():
-                            first_match = {
-                                'name': entry.name,
-                                'path': os.path.join(path, entry.name),
-                                'is_directory': entry.is_dir()
-                            }
+                        matches.append({
+                            'name': name,
+                            'path': os.path.join(root, name),
+                            'is_directory': is_dir
+                        })
+                        if len(matches) >= result_limit:
                             break
+                    if len(matches) >= result_limit:
+                        break
             except Exception:
-                first_match = None
+                matches = []
         elif is_windows_server(server_ip):
             win_path = normalize_windows_path_for_cmd(path)
             safe_path = _escape_pwsh_literal(win_path)
@@ -1973,11 +2023,10 @@ def quick_search(server_ip):
                 "$ErrorActionPreference='SilentlyContinue';"
                 f"$kw = '{safe_kw}';"
                 "$pattern = [regex]::Escape($kw);"
-                f"$items = Get-ChildItem -LiteralPath '{safe_path}' -Force:{force_flag};"
-                "$hit = $items | Where-Object { $_.Name -match $pattern } | Select-Object -First 1;"
-                "if ($null -ne $hit) {"
-                "  $obj = [pscustomobject]@{name=$hit.Name; path=$hit.FullName; is_directory=$hit.PSIsContainer};"
-                "  $obj | ConvertTo-Json -Compress"
+                f"$hits = Get-ChildItem -LiteralPath '{safe_path}' -Recurse -Force:{force_flag} | "
+                f"Where-Object {{ $_.Name -match $pattern }} | Select-Object -First {result_limit};"
+                "if ($null -ne $hits) {"
+                "  @($hits | ForEach-Object { [pscustomobject]@{name=$_.Name; path=$_.FullName; is_directory=$_.PSIsContainer} }) | ConvertTo-Json -Compress"
                 "}"
             )
             cmd = f"powershell -NoProfile -Command \"{ps_cmd}\""
@@ -1987,45 +2036,47 @@ def quick_search(server_ip):
                 try:
                     parsed = json.loads(text)
                     if isinstance(parsed, dict):
-                        first_match = {
-                            'name': parsed.get('name', ''),
-                            'path': parsed.get('path', ''),
-                            'is_directory': bool(parsed.get('is_directory'))
-                        }
+                        parsed = [parsed]
+                    if isinstance(parsed, list):
+                        for item in parsed[:result_limit]:
+                            if not isinstance(item, dict):
+                                continue
+                            matches.append({
+                                'name': item.get('name', ''),
+                                'path': item.get('path', ''),
+                                'is_directory': bool(item.get('is_directory'))
+                            })
                 except Exception:
-                    first_match = None
+                    matches = []
         else:
             def _escape_find_glob(text: str) -> str:
                 return re.sub(r'([*?\\[\\]\\\\])', lambda m: '\\\\' + m.group(1), text)
 
             pattern = f"*{_escape_find_glob(keyword)}*"
-            hidden_filter = "" if show_hidden else " -not -name '.*'"
-            find_cmd = (
-                f"find {shlex.quote(path)} -maxdepth 1 -mindepth 1"
-                f"{hidden_filter} -iname {shlex.quote(pattern)} -print -quit"
-            )
+            if show_hidden:
+                find_expr = f"-iname {shlex.quote(pattern)} -printf '%y\\t%p\\n'"
+            else:
+                find_expr = (
+                    f"\\( -name '.*' -prune \\) -o "
+                    f"\\( -iname {shlex.quote(pattern)} -printf '%y\\t%p\\n' \\)"
+                )
+            find_cmd = f"LC_ALL=C find {shlex.quote(path)} -mindepth 1 {find_expr} 2>/dev/null | head -n {result_limit}"
             stdout, stderr, exit_code = ssh_manager.execute_command(server_ip, find_cmd)
-            found_line = (stdout or '').strip().splitlines()
-            found_path = found_line[0].strip() if found_line else ''
-            if found_path:
+            for line in (stdout or '').splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                kind, sep, found_path = line.partition('\t')
+                if not sep or not found_path:
+                    continue
                 name = os.path.basename(found_path.rstrip('/'))
-                test_cmd = f"[ -d {shlex.quote(found_path)} ] && echo DIR || echo FILE"
-                t_out, _, _ = ssh_manager.execute_command(server_ip, test_cmd)
-                is_dir = (t_out or '').strip().upper() == 'DIR'
-                first_match = {
+                matches.append({
                     'name': name,
                     'path': found_path,
-                    'is_directory': is_dir
-                }
+                    'is_directory': kind == 'd'
+                })
 
-        return jsonify({
-            'success': True,
-            'path': path,
-            'keyword': keyword,
-            'total_count': None,
-            'match': first_match,
-            'index': first_index
-        })
+        return _response_for_matches(matches)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

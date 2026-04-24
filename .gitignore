@@ -117,6 +117,7 @@ htmlcov/
 coverage.xml
 *.cover
 .hypothesis/
+benchmark_results/
 
 # Jupyter Notebook
 .ipynb_checkpoints
