@@ -1640,73 +1640,22 @@ def clear_all_cache():
     return cache_count
 
 def is_winscp_hidden_file(name, permissions="", path="/"):
-    """Decide whether to hide a file per WinSCP rules.
+    """Return whether an entry should be hidden when "show hidden" is off."""
 
-    Args:
-        name: file name
-        permissions: permission string (ls -l format)
-        path: current directory path
+    entry_name = str(name or '')
+    link_name = entry_name.split(' -> ', 1)[0] if ' -> ' in entry_name else entry_name
 
-    Returns:
-        bool: True to hide, False to show
-    """
-
-    if name.startswith('.'):
+    if link_name.startswith('.'):
         return True
 
+    try:
+        normalized_path = os.path.normpath(str(path or '/') or '/')
+    except Exception:
+        normalized_path = str(path or '/') or '/'
 
-    system_symlinks = {
-        'bin', 'sbin', 'lib', 'lib32', 'lib64', 'libx32'
-    }
-    if name in system_symlinks:
+    root_system_symlinks = {'bin', 'sbin', 'lib', 'lib32', 'lib64', 'libx32'}
+    if normalized_path == '/' and str(permissions or '').startswith('l') and link_name in root_system_symlinks:
         return True
-
-
-    system_dirs = {
-        'proc', 'sys', 'dev', 'run', 'boot', 'etc', 'var', 'tmp',
-        'lost+found', 'cdrom', 'media', 'mnt', 'opt', 'srv', 'usr'
-    }
-    if name in system_dirs:
-        return True
-
-
-    system_files = {
-        'swapfile', 'vmlinuz', 'initrd.img'
-    }
-    if name in system_files:
-        return True
-
-
-    if name.startswith('.Trash-'):
-        return True
-
-
-    if name == 'root' and path != '/':
-        return True
-
-
-    if name == 'home' and path != '/':
-        return True
-
-
-    if name == 'snap':
-        return True
-
-
-
-    if '/Work' in path or path.endswith('/Work'):
-
-        work_hidden_dirs = {
-            'home', 'root', 'snap', 'boot', 'etc', 'var', 'usr', 'opt',
-            'proc', 'sys', 'dev', 'run', 'tmp', 'media', 'mnt', 'srv',
-            'lost+found', 'cdrom'
-        }
-        if name in work_hidden_dirs:
-            return True
-
-
-        if name in {'bin', 'sbin', 'lib', 'lib32', 'lib64', 'libx32'}:
-            return True
 
     return False
 
@@ -1731,10 +1680,14 @@ def get_directory_listing(server_ip, path=None, show_hidden=False, sort_by=BROWS
         try:
             items = []
             for item in os.listdir(path):
-                if not show_hidden and item.startswith('.'):
+                item_path = os.path.join(path, item)
+                if not show_hidden and is_winscp_hidden_file(
+                    item,
+                    'l' if os.path.islink(item_path) else '',
+                    path
+                ):
                     continue
 
-                item_path = os.path.join(path, item)
                 is_dir = os.path.isdir(item_path)
                 size = os.path.getsize(item_path) if not is_dir else 0
                 mtime = os.path.getmtime(item_path)
@@ -1945,7 +1898,11 @@ def get_directory_listing_optimized(server_ip, path=None, show_hidden=False, sor
 
             with os.scandir(path) as entries:
                 for entry in entries:
-                    if not show_hidden and entry.name.startswith('.'):
+                    if not show_hidden and is_winscp_hidden_file(
+                        entry.name,
+                        'l' if entry.is_symlink() else '',
+                        path
+                    ):
                         continue
 
                     try:
